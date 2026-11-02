@@ -9,10 +9,16 @@ const { kiemTraToken } = require('./middleware');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const allowedOrigins = (process.env.FRONTEND_URL || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+const corsOrigin = allowedOrigins.length ? allowedOrigins : '*';
+
+const io = new Server(server, { cors: { origin: corsOrigin } });
 
 app.use(cors({
-    origin: '*', // Hoặc thay bằng ['https://cafe-pos-frontend-iota.vercel.app', 'http://localhost:5173']
+    origin: corsOrigin,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Token']
 }));
