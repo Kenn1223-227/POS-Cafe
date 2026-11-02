@@ -11,7 +11,11 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-app.use(cors());
+app.use(cors({
+    origin: '*', // Hoặc thay bằng ['https://cafe-pos-frontend-iota.vercel.app', 'http://localhost:5173']
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Token']
+}));
 app.use(express.json());
 
 // ==========================================
@@ -1546,6 +1550,14 @@ app.get('/api/sanpham/quanly', kiemTraToken, choPhepVaiTro(1), async (req, res) 
     } catch (error) {
         guiLoi(res, error, 'Lỗi API Thực đơn quản lý:');
     }
+});
+app.get('/', (req, res) => {
+    res.json({ 
+        status: 'success', 
+        message: '☕ POS Cafe API Server đang hoạt động bình thường!',
+        version: '1.0.0',
+        timestamp: new Date()
+    });
 });
 
 // Bắt lỗi chung (JSON sai cú pháp, lỗi không lường trước...)
