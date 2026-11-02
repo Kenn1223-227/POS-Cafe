@@ -1,0 +1,27 @@
+{
+  "name": "cafe-pos-backend",
+  "version": "1.0.0",
+  "description": "Backend API cho hệ thống POS quản lý quán cà phê",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "pos",
+    "cafe",
+    "express",
+    "socket.io"
+  ],
+  "author": "Khang",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/server": "^1.9.2",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.8",
+    "express": "^5.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.1",
+    "socket.io": "^4.8.4"
+  }
+}

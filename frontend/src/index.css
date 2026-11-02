@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+.card {
+  @apply bg-white rounded-2xl shadow-lg border border-amber-100;
+}
+
+.input {
+  @apply w-full min-h-14 px-4 rounded-xl border border-stone-300 bg-white text-base text-stone-800 outline-none transition focus:border-amber-700 focus:ring-2 focus:ring-amber-200 disabled:bg-stone-100;
+}
+
+.btn {
+  @apply inline-flex items-center justify-center rounded-xl font-semibold transition cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed;
+}
+
+.btn-primary {
+  @apply bg-amber-700 hover:bg-amber-800 active:bg-amber-900 text-white shadow-md;
+}
