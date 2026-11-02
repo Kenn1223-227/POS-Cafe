@@ -1555,8 +1555,23 @@ app.get('/', (req, res) => {
     res.json({ 
         status: 'success', 
         message: '☕ POS Cafe API Server đang hoạt động bình thường!',
-        version: '1.0.0',
-        timestamp: new Date()
+        version: '1.0.0'
+    });
+});
+
+// Route kiểm tra sức khỏe hệ thống có tiền tố /api
+app.get('/api', (req, res) => {
+    res.json({ 
+        status: 'success', 
+        message: '☕ POS Cafe API Endpoint đã sẵn sàng!'
+    });
+});
+
+// Bắt lỗi các route không tồn tại
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        message: 'Endpoint không tồn tại'
     });
 });
 
