@@ -5,9 +5,25 @@ const http = require('http');
 const { Server } = require('socket.io');
 require('dotenv').config();
 const pool = require('./db');
-const { kiemTraToken } = require('./middleware');
+const crypto = require('crypto');
+const { kiemTraCauHinh } = require('./config');
+const { hashPassword, verifyPassword } = require('./password');
+const {
+    kiemTraToken,
+    gioiHanDangNhap,
+    ghiNhanDangNhapSai,
+    xoaDangNhapSai,
+    JWT_VERIFY_OPTIONS,
+} = require('./middleware');
+
+kiemTraCauHinh(); // dừng ngay nếu thiếu/yếu JWT_SECRET hoặc thiếu DATABASE_URL
 
 const app = express();
+// Chạy sau proxy (Render...): đặt TRUST_PROXY=1 để req.ip là IP khách thật (giới hạn đăng nhập sai dựa vào đây)
+if (process.env.TRUST_PROXY) {
+    const v = process.env.TRUST_PROXY;
+    app.set('trust proxy', /^\d+$/.test(v) ? Number(v) : v === 'true' ? true : v);
+}
 const server = http.createServer(app);
 const allowedOrigins = (process.env.FRONTEND_URL || '')
     .split(',')
@@ -20,7 +36,7 @@ const io = new Server(server, { cors: { origin: corsOrigin } });
 app.use(cors({
     origin: corsOrigin,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Token']
+    allowedHeaders: ['Content-Type', 'Authorization', 'Token', 'Idempotency-Key']
 }));
 app.use(express.json());
 
@@ -72,6 +88,46 @@ async function chayGiaoDich(fn) {
 }
 
 const lam3 = (x) => Math.round(x * 1000) / 1000; // khớp NUMERIC(18,3) của kho
+
+// ---- Idempotency cho POST /api/order --------------------------------------------
+// Client gửi header Idempotency-Key (UUID). Gửi lại cùng key + cùng nội dung => trả lại kết quả cũ,
+// KHÔNG tạo thêm dòng món / không trừ kho lần nữa.
+const IDEM_REGEX = /^[A-Za-z0-9_-]{8,64}$/;
+let idemSanSang = false;
+
+// null = client không gửi key | false = key sai định dạng | string = key hợp lệ
+function docKhoaIdempotency(req) {
+    const raw = req.get('Idempotency-Key');
+    if (raw === undefined) return null;
+    return IDEM_REGEX.test(raw) ? raw : false;
+}
+
+async function khoiTaoIdempotency() {
+    try {
+        await pool.query(
+            `CREATE TABLE IF NOT EXISTS DonHang_Idempotency (
+                KhoaIdem    VARCHAR(64) PRIMARY KEY,
+                MaNV        TEXT NOT NULL,
+                DauVanTay   CHAR(64) NOT NULL,
+                MaHoaDon    TEXT,
+                LaHoaDonMoi BOOLEAN,
+                DsMaCTHD    JSONB,
+                ThoiGianTao TIMESTAMPTZ NOT NULL DEFAULT now()
+            )`
+        );
+        idemSanSang = true;
+    } catch (error) {
+        console.error('⚠️ Không tạo được bảng DonHang_Idempotency, tạm tắt chống đơn trùng:', error.message);
+    }
+}
+
+async function donDepIdempotency() {
+    try {
+        await pool.query(`DELETE FROM DonHang_Idempotency WHERE ThoiGianTao < now() - interval '2 days'`);
+    } catch (error) {
+        console.error('Lỗi dọn bảng DonHang_Idempotency:', error.message);
+    }
+}
 
 // Ca thu ngân đang mở của toàn hệ thống (kieuKhoa: 'SHARE' | 'UPDATE' | undefined)
 const KIEU_KHOA = { UPDATE: ' FOR UPDATE', SHARE: ' FOR SHARE' };
@@ -298,7 +354,7 @@ io.use((socket, next) => {
 
     if (!token) return next(new Error('Từ chối kết nối: Thiếu Token!'));
 
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    jwt.verify(token, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS, (err, user) => {
         if (err) return next(new Error('Từ chối kết nối: Token sai hoặc đã hết hạn!'));
         socket.user = user;
         next();
@@ -320,19 +376,43 @@ io.on('connection', (socket) => {
 // ==========================================
 // PHÂN HỆ: XÁC THỰC (AUTH)
 // ==========================================
-app.post('/api/auth/login', async (req, res) => {
-    const { tenDangNhap, matKhau } = req.body;
-    try {
-        const result = await pool.query(
-            'SELECT MaNV, TenNV, VaiTro FROM NhanVien WHERE TenDangNhap = $1 AND MatKhauHash = $2 AND TrangThaiLamViec = TRUE',
-            [tenDangNhap, matKhau]
-        );
+app.post('/api/auth/login', gioiHanDangNhap, async (req, res) => {
+    const { tenDangNhap, matKhau } = req.body || {};
+    if (
+        typeof tenDangNhap !== 'string' || typeof matKhau !== 'string' ||
+        !tenDangNhap.trim() || !matKhau || tenDangNhap.length > 64 || matKhau.length > 128
+    ) {
+        return res.status(400).json({ message: 'Vui lòng nhập tên đăng nhập và mật khẩu hợp lệ!' });
+    }
 
-        if (result.rows.length === 0) {
+    try {
+        // Chỉ tìm theo tên đăng nhập; mật khẩu được kiểm tra bằng hash ở phía Node
+        const result = await pool.query(
+            'SELECT MaNV, TenNV, VaiTro, MatKhauHash FROM NhanVien WHERE TenDangNhap = $1 AND TrangThaiLamViec = TRUE',
+            [tenDangNhap]
+        );
+        const user = result.rows[0];
+        const { ok, canBamLai } = await verifyPassword(matKhau, user ? user.matkhauhash : null);
+
+        if (!user || !ok) {
+            ghiNhanDangNhapSai(req, tenDangNhap);
             return res.status(401).json({ message: 'Sai tài khoản, mật khẩu hoặc tài khoản đã bị khóa!' });
         }
+        xoaDangNhapSai(req, tenDangNhap);
 
-        const user = result.rows[0];
+        // Tài khoản cũ còn lưu mật khẩu thô: nâng cấp lên hash ngay lần đăng nhập thành công này.
+        // Điều kiện "MatKhauHash = giá trị cũ" để không ghi đè nếu mật khẩu vừa bị đổi ở nơi khác.
+        if (canBamLai) {
+            try {
+                await pool.query(
+                    'UPDATE NhanVien SET MatKhauHash = $1 WHERE MaNV = $2 AND MatKhauHash = $3',
+                    [await hashPassword(matKhau), user.manv, user.matkhauhash]
+                );
+            } catch (error) {
+                console.warn(`Chưa nâng cấp được hash mật khẩu cho NV ${user.manv}:`, error.message);
+            }
+        }
+
         const token = jwt.sign(
             { maNV: user.manv, vaiTro: user.vaitro },
             process.env.JWT_SECRET,
@@ -410,8 +490,50 @@ app.post('/api/order', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) =>
         }
     }
 
+    const khoaIdem = docKhoaIdempotency(req);
+    if (khoaIdem === false) {
+        return res.status(400).json({ message: 'Header Idempotency-Key không hợp lệ (8-64 ký tự: chữ, số, gạch ngang, gạch dưới)!' });
+    }
+    const dungIdem = Boolean(khoaIdem) && idemSanSang;
+    const dauVanTay = dungIdem
+        ? crypto.createHash('sha256').update(JSON.stringify({ maBan: maBan || null, maKH: maKH || null, danhSachMon })).digest('hex')
+        : null;
+
     try {
         const ketQua = await chayGiaoDich(async (client) => {
+            // 0. Chống đơn trùng: chiếm key trong CHÍNH transaction này.
+            //    - Request song song cùng key sẽ bị Postgres chặn chờ tại câu INSERT cho tới khi request đầu COMMIT/ROLLBACK.
+            //    - ROLLBACK (vd. hết nguyên liệu) => key tự biến mất, được phép gửi lại.
+            if (dungIdem) {
+                const chiem = await client.query(
+                    `INSERT INTO DonHang_Idempotency (KhoaIdem, MaNV, DauVanTay) VALUES ($1, $2, $3)
+                     ON CONFLICT (KhoaIdem) DO NOTHING RETURNING KhoaIdem`,
+                    [khoaIdem, String(maNV), dauVanTay]
+                );
+                if (chiem.rows.length === 0) {
+                    const cu = await client.query(
+                        `SELECT MaNV, DauVanTay, MaHoaDon, LaHoaDonMoi, DsMaCTHD
+                           FROM DonHang_Idempotency WHERE KhoaIdem = $1`,
+                        [khoaIdem]
+                    );
+                    const k = cu.rows[0];
+                    if (!k || String(k.manv) !== String(maNV) || k.dauvantay !== dauVanTay) {
+                        throw new LoiNghiepVu(422, 'Idempotency-Key này đã được dùng cho một order khác!', { maLoi: 'IDEMPOTENCY_KEY_REUSED' });
+                    }
+                    if (k.mahoadon === null) {
+                        throw new LoiNghiepVu(409, 'Order này đang được xử lý, vui lòng thử lại sau giây lát!', { maLoi: 'DANG_XU_LY' });
+                    }
+                    const hoaDonCu = await layHoaDonChiTiet(client, k.mahoadon);
+                    return {
+                        trungLap: true,
+                        maHoaDon: hoaDonCu ? hoaDonCu.maHoaDon : k.mahoadon,
+                        laHoaDonMoi: k.lahoadonmoi,
+                        monMoi: await layMonTheoMa(client, k.dsmacthd || []),
+                        hoaDon: hoaDonCu,
+                    };
+                }
+            }
+
             // 1. Phải đang mở ca chung
             const ca = await layCaDangMo(client, 'SHARE');
             if (!ca) throw loiChuaMoCa();
@@ -569,7 +691,16 @@ app.post('/api/order', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) =>
                 }
             }
 
+            // Ghi kết quả vào key (cùng transaction => COMMIT cùng lúc với đơn hàng)
+            if (dungIdem) {
+                await client.query(
+                    `UPDATE DonHang_Idempotency SET MaHoaDon = $2, LaHoaDonMoi = $3, DsMaCTHD = $4::jsonb WHERE KhoaIdem = $1`,
+                    [khoaIdem, String(maHoaDon), laHoaDonMoi, JSON.stringify(dsMaCTHD)]
+                );
+            }
+
             return {
+                trungLap: false,
                 maHoaDon,
                 laHoaDonMoi,
                 monMoi: await layMonTheoMa(client, dsMaCTHD),
@@ -577,7 +708,19 @@ app.post('/api/order', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) =>
             };
         });
 
-        const { maHoaDon, laHoaDonMoi, monMoi, hoaDon } = ketQua;
+        const { maHoaDon, laHoaDonMoi, monMoi, hoaDon, trungLap } = ketQua;
+
+        // Yêu cầu lặp lại: trả đúng kết quả đã tạo, KHÔNG phát lại sự kiện xuống Bar
+        if (trungLap) {
+            return res.status(200).json({
+                message: `Order #${maHoaDon} đã được ghi nhận trước đó, không tạo trùng.`,
+                maHoaDon,
+                laHoaDonMoi,
+                danhSachMon: monMoi,
+                hoaDon,
+                trungLap: true,
+            });
+        }
         io.to('room_barista').emit('CO_DON_MOI', {
             maHoaDon,
             maBan: maBan || null,
@@ -1595,4 +1738,6 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Server Backend & Socket.IO đang chạy tại http://localhost:${PORT}`);
+    khoiTaoIdempotency().then(donDepIdempotency);
+    setInterval(donDepIdempotency, 6 * 60 * 60 * 1000).unref();
 });

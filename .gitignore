@@ -1,5 +1,15 @@
-﻿node_modules/
-.env
-frontend/.env
+# Dependencies
+node_modules/
 frontend/node_modules/
+
+# Secrets: KHÔNG BAO GIỜ commit. Chỉ commit các file *.example
+.env
+.env.*
+!.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# Build & đóng gói
 frontend/dist/
+*.zip
