@@ -1,0 +1,33 @@
+# Fly.io Always-On Deployment Config (Zero Cold Start — Singapore Region sin cho độ trễ thấp nhất về Việt Nam)
+app = "cafe-pos-backend"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3000"
+  TRUST_PROXY = "1"
+  LOG_FORMAT = "json"
+  JWT_ACCESS_EXPIRES_IN = "30m"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/api/health"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512

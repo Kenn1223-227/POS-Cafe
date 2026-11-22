@@ -13,3 +13,8 @@ frontend/.env.*
 # Build & đóng gói
 frontend/dist/
 *.zip
+
+# Runtime Print Bridge (chứa token & hàng đợi cục bộ)
+local-print-bridge/bridge-config.json
+local-print-bridge/spool-queue.json
+local-print-bridge/lan-orders.json

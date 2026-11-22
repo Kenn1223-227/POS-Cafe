@@ -19,6 +19,20 @@ export const nhanSuService = {
   // --- Dành cho Quản lý (Admin) ---
   getNhanVien: () => axiosClient.get('/nhansu/nhanvien'),
 
+  taoNhanVien: (body) => axiosClient.post('/nhansu/nhanvien', body),
+
+  doiTrangThaiNV: (maNV, trangThaiLamViec) =>
+    axiosClient.put(`/nhansu/nhanvien/${encodeURIComponent(maNV)}/trangthai`, { trangThaiLamViec }),
+
+  datLaiMatKhauNV: (maNV, matKhauMoi) =>
+    axiosClient.put(`/nhansu/nhanvien/${encodeURIComponent(maNV)}/matkhau`, { matKhauMoi }),
+
+  datPinNV: (maNV, pin) =>
+    axiosClient.put(`/nhansu/nhanvien/${encodeURIComponent(maNV)}/pin`, { pin }),
+
+  capNhatQuyenNV: (maNV, body) =>
+    axiosClient.put(`/nhansu/nhanvien/${encodeURIComponent(maNV)}/quyen`, body),
+
   getCaLamViec: () => axiosClient.get('/nhansu/ca'),
 
   getPhanCa: (tuNgay, denNgay) =>

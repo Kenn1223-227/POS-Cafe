@@ -1,12 +1,30 @@
-import { useState } from 'react'
+import { useState, memo } from 'react'
 import toast from 'react-hot-toast'
 import { khachHangService } from '../../../services/khachHangService'
+import { useAuthStore } from '../../../store/authStore'
+import { searchCachedCustomers } from '../../../offline/offlineDb'
+import { isNetworkError } from '../../../offline/syncEngine'
 
-export default function CustomerBox({ customer, onSelectCustomer }) {
+const CustomerBox = memo(function CustomerBox({ customer, onSelectCustomer, inputRef }) {
+  const user = useAuthStore((s) => s.user)
+  const tenantId = String(user?.tenantId || 'DEFAULT')
   const [soDienThoai, setSoDienThoai] = useState('')
   const [tenKH, setTenKH] = useState('')
   const [needRegister, setNeedRegister] = useState(false)
   const [loading, setLoading] = useState(false)
+
+  const handleOfflineLookup = async (sdt) => {
+    const matches = await searchCachedCustomers(tenantId, sdt)
+    if (matches.length > 0) {
+      const kh = matches[0]
+      onSelectCustomer(kh)
+      toast.success(`📡 Đã chọn KH (Offline Cache): ${kh.tenKH} • ${kh.diemTichLuy} điểm`)
+      setNeedRegister(false)
+      return true
+    }
+    toast.error('Đang ngoại tuyến — không tìm thấy khách hàng này trong bộ nhớ Offline!')
+    return false
+  }
 
   const handleSearch = async (e) => {
     e.preventDefault()
@@ -17,8 +35,12 @@ export default function CustomerBox({ customer, onSelectCustomer }) {
     }
     setLoading(true)
     try {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        await handleOfflineLookup(sdt)
+        return
+      }
       if (!needRegister) {
-        const kh = await khachHangService.traCuu(sdt)
+        const kh = await khachHangService.traCuu(sdt, { silent: true })
         if (kh) {
           onSelectCustomer(kh)
           toast.success(`Đã chọn KH: ${kh.tenKH}`)
@@ -38,8 +60,12 @@ export default function CustomerBox({ customer, onSelectCustomer }) {
         setNeedRegister(false)
         setTenKH('')
       }
-    } catch {
-      // Interceptor đã báo lỗi
+    } catch (err) {
+      if (isNetworkError(err)) {
+        await handleOfflineLookup(sdt)
+      } else {
+        toast.error(err?.response?.data?.message || 'Không thể tra cứu khách hàng')
+      }
     } finally {
       setLoading(false)
     }
@@ -80,23 +106,24 @@ export default function CustomerBox({ customer, onSelectCustomer }) {
         </div>
       ) : (
         <form onSubmit={handleSearch} className="space-y-2">
-          <div className="flex gap-2">
+          <div className="flex gap-2.5">
             <input
+              ref={inputRef}
               type="tel"
               value={soDienThoai}
               onChange={(e) => {
                 setSoDienThoai(e.target.value)
                 setNeedRegister(false)
               }}
-              placeholder="Nhập SĐT khách hàng..."
-              className="flex-1 px-3 py-2 bg-white rounded-xl border border-gray-300 text-xs outline-none focus:ring-2 focus:ring-amber-600"
+              placeholder="SĐT / 4 số cuối / Quét thẻ [F8]..."
+              className="flex-1 min-h-[52px] px-3 py-2 bg-white rounded-xl border border-gray-300 text-xs outline-none focus:ring-2 focus:ring-amber-600"
             />
             <button
               type="submit"
               disabled={loading}
-              className="px-3.5 py-2 bg-amber-700 hover:bg-amber-800 text-white text-xs font-bold rounded-xl cursor-pointer shrink-0"
+              className="min-h-[52px] px-4 py-2 bg-amber-700 hover:bg-amber-800 text-white text-xs font-bold rounded-xl cursor-pointer shrink-0"
             >
-              {loading ? '...' : needRegister ? 'Đăng ký' : 'Tra cứu'}
+              {loading ? '...' : needRegister ? 'Đăng ký' : 'Tra cứu [F8]'}
             </button>
           </div>
 
@@ -106,7 +133,7 @@ export default function CustomerBox({ customer, onSelectCustomer }) {
               value={tenKH}
               onChange={(e) => setTenKH(e.target.value)}
               placeholder="Nhập họ tên khách hàng mới..."
-              className="w-full px-3 py-2 bg-white rounded-xl border border-amber-400 text-xs outline-none"
+              className="w-full min-h-[52px] px-3 py-2 bg-white rounded-xl border border-amber-400 text-xs outline-none"
               autoFocus
             />
           )}
@@ -114,4 +141,6 @@ export default function CustomerBox({ customer, onSelectCustomer }) {
       )}
     </div>
   )
-}
+})
+
+export default CustomerBox

@@ -2,9 +2,15 @@ import axiosClient from '../api/axiosClient'
 
 export const khachHangService = {
   // Chỉ tra cứu theo SĐT (không tự tạo mới)
-  traCuu: async (soDienThoai) => {
-    const res = await axiosClient.get('/khachhang', { params: { soDienThoai } })
+  traCuu: async (soDienThoai, config = {}) => {
+    const res = await axiosClient.get('/khachhang', { params: { soDienThoai }, ...config })
     return res.khachHang // null nếu chưa có
+  },
+
+  // [Phân hệ 7] Tải danh sách khách hàng thân thiết để cache xuống IndexedDB phục vụ bán hàng Offline
+  getCache: async (config = {}) => {
+    const res = await axiosClient.get('/khachhang/cache', { silent: true, ...config })
+    return Array.isArray(res?.customers) ? res.customers : []
   },
 
   // Tìm hoặc đăng ký nhanh khách hàng mới

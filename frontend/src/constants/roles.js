@@ -22,6 +22,6 @@ export const ROLE_HOME = {
 export const ROUTE_ROLES = {
   '/admin': [1],
   '/pos': [4, 1, 3], // Cho phép cả Thu ngân, Quản lý và Phục vụ truy cập POS
-  '/barista': [2],
+  '/barista': [2, 1], // Cho phép cả Barista và Quản lý giám sát KDS
   '/waiter': [3, 1],
 }

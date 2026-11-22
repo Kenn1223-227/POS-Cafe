@@ -1,0 +1,406 @@
+// Bộ dựng lệnh nhị phân chuẩn ESC/POS cho máy in nhiệt K80 (80mm / 48 ký tự) + Xung mở két tiền RJ11
+
+const ESC = 0x1b;
+const GS = 0x1d;
+
+// Chuyển tiếng Việt có dấu sang ASCII sạch để mọi máy in nhiệt giá rẻ (Xprinter/Zywell) không bị lỗi font/ô vuông
+function boDauTiengViet(str) {
+    return String(str || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/đ/g, 'd')
+        .replace(/Đ/g, 'D')
+        .replace(/[^\x20-\x7E\n]/g, ' ');
+}
+
+function dinhDangTien(n) {
+    const num = Math.round(Number(n) || 0);
+    return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + 'd';
+}
+
+function padTwoCols(left, right, width = 48) {
+    const l = boDauTiengViet(left);
+    const r = boDauTiengViet(right);
+    const space = Math.max(1, width - l.length - r.length);
+    if (l.length + r.length + 1 > width) {
+        return l.slice(0, Math.max(1, width - r.length - 1)) + ' ' + r;
+    }
+    return l + ' '.repeat(space) + r;
+}
+
+function wrapText(text, width = 48) {
+    const clean = boDauTiengViet(text).trim();
+    if (!clean) return [];
+    const lines = [];
+    let cur = clean;
+    while (cur.length > width) {
+        let cut = cur.lastIndexOf(' ', width);
+        if (cut <= 0) cut = width;
+        lines.push(cur.slice(0, cut).trim());
+        cur = cur.slice(cut).trim();
+    }
+    if (cur) lines.push(cur);
+    return lines;
+}
+
+// Lệnh mở ngăn kéo tiền RJ11 chuẩn ESC/POS: ESC p 0 25 250 (0x1B 0x70 0x00 0x19 0xFA)
+function buildCashDrawerKickBuffer() {
+    return Buffer.from([ESC, 0x70, 0x00, 0x19, 0xfa]);
+}
+
+// [PHÂN HỆ 9 - VIRAL PLG] Lệnh in mã QR Code chuẩn ESC/POS (GS ( k — Model 2, ECC Level M)
+function buildEscPosQrCodeBuffer(data, moduleSize = 4) {
+    const clean = String(data || '').trim();
+    if (!clean) return Buffer.alloc(0);
+    const dataBuf = Buffer.from(clean, 'utf8');
+    const storeLen = dataBuf.length + 3;
+    const pL = storeLen & 0xff;
+    const pH = (storeLen >> 8) & 0xff;
+    const size = Math.max(3, Math.min(8, Number(moduleSize) || 4));
+    return Buffer.concat([
+        Buffer.from([GS, 0x28, 0x6b, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00]), // Model 2
+        Buffer.from([GS, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x43, size]),       // Module size
+        Buffer.from([GS, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x45, 0x31]),       // Error correction M (49)
+        Buffer.from([GS, 0x28, 0x6b, pL, pH, 0x31, 0x50, 0x30]),           // Store QR payload
+        dataBuf,
+        Buffer.from([GS, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x51, 0x30]),       // Print QR
+    ]);
+}
+
+// Dựng Buffer nhị phân ESC/POS + bản xem trước dạng text cho Bill K80
+function buildReceiptK80({
+    hoaDon,
+    tenQuan = 'QUAN CA PHE POS',
+    diaChi = '',
+    soLanIn = 1,
+    laBanSao = false,
+    reprintBanner = null,
+    failoverHeader = null,
+    laTamTinh = false,
+    laDonOffline = false,
+    thuNgan = '',
+    autoCut = true,
+    kickDrawer = false,
+    showPlgWatermark = false,
+    plgReferralUrl = '',
+}) {
+    const chunks = [];
+    const previewLines = [];
+    const LINE = '-'.repeat(48);
+
+    const pushBytes = (...bytes) => chunks.push(Buffer.from(bytes));
+    const pushLine = (text = '') => {
+        const clean = boDauTiengViet(text);
+        previewLines.push(clean);
+        chunks.push(Buffer.from(clean + '\n', 'ascii'));
+    };
+
+    // Init printer
+    pushBytes(ESC, 0x40);
+    if (kickDrawer) {
+        chunks.push(buildCashDrawerKickBuffer());
+    }
+
+    // Banner Failover hoặc Server-enforced Reprint Watermark
+    if (failoverHeader) {
+        pushBytes(ESC, 0x61, 0x01);
+        pushBytes(ESC, 0x45, 0x01);
+        pushLine(failoverHeader);
+        pushBytes(ESC, 0x45, 0x00);
+    }
+    const effectiveReprintBanner = reprintBanner || (laBanSao || Number(soLanIn) >= 2 ? `*** BAN SAO - REPRINT LAN ${Math.max(2, Number(soLanIn || 2))} ***` : null);
+    if (effectiveReprintBanner) {
+        pushBytes(ESC, 0x61, 0x01);
+        pushBytes(ESC, 0x45, 0x01);
+        pushLine(effectiveReprintBanner);
+        pushBytes(ESC, 0x45, 0x00);
+    }
+
+    // Center + Bold + Double Size cho tên quán
+    pushBytes(ESC, 0x61, 0x01); // Align center
+    pushBytes(ESC, 0x45, 0x01); // Bold ON
+    pushBytes(GS, 0x21, 0x11);  // Double width & height
+    pushLine(boDauTiengViet(tenQuan).toUpperCase());
+    pushBytes(GS, 0x21, 0x00);  // Normal size
+    pushBytes(ESC, 0x45, 0x00); // Bold OFF
+
+    if (diaChi) pushLine(diaChi);
+
+    const maHD = hoaDon?.maHoaDon || 'TEST';
+    const tenBan = hoaDon?.ban?.map((b) => b.tenBan).join(', ') || 'Mang di';
+    const sttNum = Number(hoaDon?.soThuTuNgay);
+    if (Number.isInteger(sttNum) && sttNum > 0) {
+        const sttLabel = String(sttNum).padStart(2, '0');
+        pushBytes(ESC, 0x45, 0x01); // Bold ON
+        pushBytes(GS, 0x21, 0x11);  // Double width & height
+        pushLine(`SO #${sttLabel}`);
+        pushBytes(GS, 0x21, 0x00);  // Normal size
+        pushBytes(ESC, 0x45, 0x00); // Bold OFF
+    }
+    pushLine(`HD: #${maHD} | ${tenBan}`);
+
+    if (laDonOffline || hoaDon?.offline) {
+        pushBytes(ESC, 0x45, 0x01);
+        pushLine('*** DON OFFLINE - DANG CHO DONG BO ***');
+        pushBytes(ESC, 0x45, 0x00);
+    } else if (laTamTinh) {
+        pushBytes(ESC, 0x45, 0x01);
+        pushLine('*** PHIEU TAM TINH (CHUA THANH TOAN) ***');
+        pushBytes(ESC, 0x45, 0x00);
+    } else if (laBanSao) {
+        pushBytes(ESC, 0x45, 0x01);
+        pushLine(`*** BAN SAO - REPRINT (LAN ${Number(soLanIn)}) ***`);
+        pushBytes(ESC, 0x45, 0x00);
+    }
+
+    // Align left cho chi tiết đơn
+    pushBytes(ESC, 0x61, 0x00);
+    const gio = new Date(hoaDon?.thoiGianTao || hoaDon?.thoigiantao || Date.now()).toLocaleString('vi-VN');
+    pushLine(`Gio: ${gio}`);
+    if (thuNgan) pushLine(`Thu ngan: ${thuNgan}`);
+    if (hoaDon?.khachHang) {
+        pushLine(`KH: ${hoaDon.khachHang.tenKH} (${hoaDon.khachHang.soDienThoai || ''})`);
+    }
+    pushLine(LINE);
+    pushBytes(ESC, 0x45, 0x01);
+    pushLine(padTwoCols('MON / SL', 'THANH TIEN'));
+    pushBytes(ESC, 0x45, 0x00);
+    pushLine(LINE);
+
+    const items = (hoaDon?.danhSachMon || []).filter((m) => !m.daHuy && m.trangThaiPhaChe !== 'DaHuy');
+    for (const m of items) {
+        const title = `${m.tenMon} (${m.kichThuoc}) x${m.soLuong}`;
+        pushLine(padTwoCols(title, dinhDangTien(m.thanhTien)));
+        if (m.toppings?.length) {
+            const tpStr = '+ ' + m.toppings.map((t) => `${t.tenTopping} x${t.soLuong}`).join(', ');
+            for (const l of wrapText(tpStr, 46)) pushLine('  ' + l);
+        }
+        if (m.ghiChu) {
+            for (const l of wrapText(`(${m.ghiChu})`, 46)) pushLine('  ' + l);
+        }
+    }
+
+    pushLine(LINE);
+    const tienGiamKM = Number(hoaDon?.tienGiamKM || 0);
+    const tienGiamDiem = Number(hoaDon?.tienGiamDiem || 0);
+    const diemSuDung = Number(hoaDon?.diemSuDung || 0);
+    if (tienGiamKM > 0 || tienGiamDiem > 0) {
+        pushLine(padTwoCols('Tam tinh:', dinhDangTien(hoaDon?.tongTamTinh ?? 0)));
+        if (tienGiamKM > 0) {
+            const labelKm = hoaDon?.maKhuyenMai ? `Giam KM (${hoaDon.maKhuyenMai}):` : 'Giam khuyen mai:';
+            pushLine(padTwoCols(labelKm, '-' + dinhDangTien(tienGiamKM)));
+        }
+        if (tienGiamDiem > 0) {
+            pushLine(padTwoCols(`Doi diem (${diemSuDung} diem):`, '-' + dinhDangTien(tienGiamDiem)));
+        }
+    }
+    const tongCong = hoaDon?.tongTienThanhToan ?? hoaDon?.tongSauGiam ?? hoaDon?.tongTamTinh ?? 0;
+    pushBytes(ESC, 0x45, 0x01);
+    pushBytes(GS, 0x21, 0x01); // Double height
+    pushLine(padTwoCols('TONG CONG:', dinhDangTien(tongCong)));
+    pushBytes(GS, 0x21, 0x00);
+    pushBytes(ESC, 0x45, 0x00);
+
+    if (hoaDon?.danhSachThanhToan?.length > 0) {
+        for (const p of hoaDon.danhSachThanhToan) {
+            pushLine(padTwoCols(`  TT (${p.phuongThucTT}):`, dinhDangTien(p.soTien)));
+        }
+    }
+
+    pushLine(LINE);
+    pushBytes(ESC, 0x61, 0x01);
+    const maDoiChieu = String(maHD).slice(-4).toUpperCase();
+    const gioIn = new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    pushBytes(ESC, 0x45, 0x01);
+    pushLine(`MA DOI CHIEU: #${maDoiChieu} | GIO IN: ${gioIn}`);
+    pushBytes(ESC, 0x45, 0x00);
+    pushLine('Quy khach vui long kiem tra DUNG GIO IN & STT');
+    pushLine('Cam on Quy khach & Hen gap lai!');
+    if (showPlgWatermark) {
+        const refUrl = String(plgReferralUrl || 'https://cafepos.vn/onboarding').trim();
+        pushLine(LINE);
+        pushBytes(ESC, 0x45, 0x01);
+        pushLine('Phan mem CafePOS - MIEN PHI 400 don/thang');
+        pushBytes(ESC, 0x45, 0x00);
+        pushLine('Quet QR dung thu 30s cho chu quan:');
+        chunks.push(buildEscPosQrCodeBuffer(refUrl, 4));
+        previewLines.push(`[QR: ${refUrl}]`);
+        pushLine(refUrl.replace(/^https?:\/\//i, '').slice(0, 48));
+    }
+    pushLine('');
+    pushLine('');
+    pushLine('');
+
+    if (autoCut) {
+        // GS V 66 0 — Cắt giấy tự động (partial cut)
+        pushBytes(GS, 0x56, 0x42, 0x00);
+    }
+
+    return {
+        buffer: Buffer.concat(chunks),
+        previewText: previewLines.join('\n'),
+        kickDrawer: Boolean(kickDrawer),
+    };
+}
+
+// Dựng Buffer nhị phân ESC/POS + bản xem trước cho Phiếu Chốt Ca Nhiệt (Z-Report K80)
+function buildZReportK80({
+    doiSoat,
+    tenQuan = 'QUAN CA PHE POS',
+    diaChi = '',
+    nguoiIn = '',
+    laBanSao = false,
+    autoCut = true,
+    kickDrawer = false,
+}) {
+    const chunks = [];
+    const previewLines = [];
+    const LINE = '-'.repeat(48);
+    const DLINE = '='.repeat(48);
+
+    const pushBytes = (...bytes) => chunks.push(Buffer.from(bytes));
+    const pushLine = (text = '') => {
+        const clean = boDauTiengViet(text);
+        previewLines.push(clean);
+        chunks.push(Buffer.from(clean + '\n', 'ascii'));
+    };
+
+    const fmtSigned = (n) => {
+        const v = Math.round(Number(n) || 0);
+        if (v > 0) return '+' + dinhDangTien(v);
+        if (v < 0) return '-' + dinhDangTien(Math.abs(v));
+        return dinhDangTien(0);
+    };
+
+    pushBytes(ESC, 0x40);
+    if (kickDrawer) chunks.push(buildCashDrawerKickBuffer());
+
+    // Header
+    pushBytes(ESC, 0x61, 0x01);
+    pushBytes(ESC, 0x45, 0x01);
+    pushBytes(GS, 0x21, 0x11);
+    pushLine(boDauTiengViet(tenQuan).toUpperCase());
+    pushBytes(GS, 0x21, 0x00);
+    if (diaChi) pushLine(diaChi);
+    pushLine('PHIEU CHOT CA (Z-REPORT)');
+    if (laBanSao) pushLine('*** BAN SAO - REPRINT ***');
+    pushBytes(ESC, 0x45, 0x00);
+    pushLine(DLINE);
+
+    // Thông tin ca
+    pushBytes(ESC, 0x61, 0x00);
+    const ds = doiSoat || {};
+    const dt = ds.doanhThu || {};
+    const ht = ds.hoanTien || {};
+    const moLuc = ds.thoiGianMoCa ? new Date(ds.thoiGianMoCa).toLocaleString('vi-VN') : '-';
+    const dongLuc = ds.thoiGianDongCa
+        ? new Date(ds.thoiGianDongCa).toLocaleString('vi-VN')
+        : new Date().toLocaleString('vi-VN');
+
+    pushLine(`Ma ca:    #${ds.maCaThuNgan || '-'}`);
+    pushLine(`Thu ngan: ${ds.tenNV || '-'}`);
+    pushLine(`Mo ca:    ${moLuc}`);
+    pushLine(`Dong ca:  ${dongLuc}`);
+    pushLine(padTwoCols('So hoa don da thu:', `${Number(dt.soHoaDon || 0)} don`));
+    pushLine(LINE);
+
+    // 1. Doanh thu theo PTTT
+    pushBytes(ESC, 0x45, 0x01);
+    pushLine('1. DOANH THU TRONG CA');
+    pushBytes(ESC, 0x45, 0x00);
+    pushLine(padTwoCols('  Tien mat:', dinhDangTien(dt.tienMat)));
+    pushLine(padTwoCols('  Chuyen khoan / VietQR:', dinhDangTien(dt.chuyenKhoan)));
+    if (Number(dt.the) > 0) pushLine(padTwoCols('  The ngan hang:', dinhDangTien(dt.the)));
+    if (Number(dt.voucher) > 0) pushLine(padTwoCols('  Voucher / Khac:', dinhDangTien(dt.voucher)));
+    pushBytes(ESC, 0x45, 0x01);
+    pushLine(padTwoCols('  TONG DOANH THU:', dinhDangTien(dt.tong)));
+    pushBytes(ESC, 0x45, 0x00);
+
+    if (Number(ht.tong) > 0) {
+        pushLine(padTwoCols('  Hoan tien sau TT (tong):', '-' + dinhDangTien(ht.tong)));
+        if (Number(ht.tienMat) > 0) {
+            pushLine(padTwoCols('    - Hoan tien mat:', '-' + dinhDangTien(ht.tienMat)));
+        }
+        const hoanKhac = Number(ht.chuyenKhoan || 0) + Number(ht.the || 0) + Number(ht.voucher || 0);
+        if (hoanKhac > 0) {
+            pushLine(padTwoCols('    - Hoan CK / The:', '-' + dinhDangTien(hoanKhac)));
+        }
+    }
+    pushLine(LINE);
+
+    // 2. Đối soát két tiền mặt (tách riêng Safe Drop / Rút két!)
+    pushBytes(ESC, 0x45, 0x01);
+    pushLine('2. DOI SOAT KET TIEN MAT');
+    pushBytes(ESC, 0x45, 0x00);
+    pushLine(padTwoCols('  (+) Tien mat dau ca:', dinhDangTien(ds.tienMatDauCa)));
+    pushLine(padTwoCols('  (+) Doanh thu tien mat:', dinhDangTien(dt.tienMat)));
+    if (Number(ht.tienMat) > 0) {
+        pushLine(padTwoCols('  (-) Hoan tien mat sau TT:', '-' + dinhDangTien(ht.tienMat)));
+    }
+    pushLine(padTwoCols('  (+) Thu lat vat (Pay-In):', dinhDangTien(ds.thuLatVat)));
+    pushLine(padTwoCols('  (-) Chi lat vat (Pay-Out):', '-' + dinhDangTien(ds.chiLatVat)));
+    pushLine(padTwoCols('  (-) Rut ket an toan (Safe Drop):', '-' + dinhDangTien(ds.rutKet)));
+    pushLine(LINE);
+
+    pushBytes(ESC, 0x45, 0x01);
+    pushLine(padTwoCols('QUY LY THUYET TAI KET:', dinhDangTien(ds.tienMatLyThuyet)));
+    pushLine(padTwoCols('TIEN MAT THUC DEM:', dinhDangTien(ds.tienMatThucTe)));
+    pushBytes(GS, 0x21, 0x01); // Double height
+    pushLine(padTwoCols('CHENH LECH:', fmtSigned(ds.chenhLech)));
+    pushBytes(GS, 0x21, 0x00);
+    pushBytes(ESC, 0x45, 0x00);
+    if (ds.trangThai) {
+        pushLine(`Ket luan: ${ds.trangThai}`);
+    }
+
+    // 3. Chi tiết mệnh giá kiểm đếm Blind Drop (nếu có)
+    const menhGia = ds.chiTietMenhGia && typeof ds.chiTietMenhGia === 'object' ? ds.chiTietMenhGia : null;
+    if (menhGia) {
+        const entries = Object.entries(menhGia)
+            .map(([k, v]) => [Number(k), Number(v)])
+            .filter(([mg, sl]) => mg > 0 && sl > 0)
+            .sort((a, b) => b[0] - a[0]);
+        if (entries.length > 0) {
+            pushLine(LINE);
+            pushBytes(ESC, 0x45, 0x01);
+            pushLine('3. BANG DEM MENH GIA (BLIND DROP)');
+            pushBytes(ESC, 0x45, 0x00);
+            for (const [mg, sl] of entries) {
+                pushLine(padTwoCols(`  ${dinhDangTien(mg)} x ${sl} to`, dinhDangTien(mg * sl)));
+            }
+        }
+    }
+
+    if (ds.ghiChuChenhLech) {
+        pushLine(LINE);
+        for (const l of wrapText(`Ghi chu: ${ds.ghiChuChenhLech}`, 48)) pushLine(l);
+    }
+
+    pushLine(DLINE);
+    pushLine(padTwoCols('  Thu ngan ky', 'Quan ly / Chu quan  '));
+    pushLine('');
+    pushLine('');
+    pushLine('');
+    pushBytes(ESC, 0x61, 0x01);
+    const gioIn = new Date().toLocaleString('vi-VN');
+    pushLine(`In luc: ${gioIn}${nguoiIn ? ' | ' + nguoiIn : ''}`);
+    pushLine('');
+    pushLine('');
+
+    if (autoCut) {
+        pushBytes(GS, 0x56, 0x42, 0x00);
+    }
+
+    return {
+        buffer: Buffer.concat(chunks),
+        previewText: previewLines.join('\n'),
+        kickDrawer: Boolean(kickDrawer),
+    };
+}
+
+module.exports = {
+    boDauTiengViet,
+    buildCashDrawerKickBuffer,
+    buildReceiptK80,
+    buildZReportK80,
+};

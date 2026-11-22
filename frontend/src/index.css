@@ -23,3 +23,59 @@ body,
 .btn-primary {
   @apply bg-amber-700 hover:bg-amber-800 active:bg-amber-900 text-white shadow-md;
 }
+
+/* [PHÂN HỆ 6] Chế độ Dark Mode (Quầy Lounge / Pub ánh sáng tối) */
+.pos-theme-dark {
+  background-color: #0c0a09;
+  color: #f5f5f4;
+}
+.pos-theme-dark .bg-white,
+.pos-theme-dark .bg-stone-50,
+.pos-theme-dark .bg-stone-50\/70 {
+  background-color: #1c1917 !important;
+  color: #f5f5f4 !important;
+  border-color: #44403c !important;
+}
+.pos-theme-dark .bg-gray-100,
+.pos-theme-dark .bg-gray-50 {
+  background-color: #292524 !important;
+  color: #e7e5e4 !important;
+  border-color: #44403c !important;
+}
+.pos-theme-dark .text-gray-800,
+.pos-theme-dark .text-gray-900,
+.pos-theme-dark .text-gray-700,
+.pos-theme-dark .text-stone-900,
+.pos-theme-dark .text-stone-800 {
+  color: #f5f5f4 !important;
+}
+.pos-theme-dark .text-gray-500,
+.pos-theme-dark .text-gray-600,
+.pos-theme-dark .text-stone-500 {
+  color: #a8a29e !important;
+}
+.pos-theme-dark input,
+.pos-theme-dark select {
+  background-color: #292524 !important;
+  color: #fafaf9 !important;
+  border-color: #57534e !important;
+}
+
+/* [PHÂN HỆ 6] Chế độ High-Contrast (Quầy Take-away ngoài trời nắng gắt) */
+.pos-theme-high-contrast {
+  background-color: #ffffff;
+  color: #000000;
+  filter: contrast(1.18) saturate(1.15);
+}
+.pos-theme-high-contrast .border,
+.pos-theme-high-contrast .border-gray-200,
+.pos-theme-high-contrast .border-gray-300 {
+  border-color: #000000 !important;
+  border-width: 2px !important;
+}
+.pos-theme-high-contrast .text-gray-500,
+.pos-theme-high-contrast .text-gray-600,
+.pos-theme-high-contrast .text-stone-500 {
+  color: #111827 !important;
+  font-weight: 700 !important;
+}

@@ -1,0 +1,19 @@
+# Loại bỏ tuyệt đối node_modules, build artifacts & file bí mật khi đóng gói Docker / CI/CD
+node_modules/
+**/node_modules/
+frontend/dist/
+frontend/.vite/
+.env
+.env.*
+!.env.example
+.git/
+.gitignore
+*.zip
+*.tar.gz
+*.log
+npm-debug.log*
+backend-codebase.xml
+local-print-bridge/bridge-config.json
+local-print-bridge/lan-orders.json
+.DS_Store
+Thumbs.db

@@ -5,8 +5,18 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "print-bridge": "node local-print-bridge/bridge-server.js",
     "hash-passwords": "node scripts/hash-passwords.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "db:migrate": "node scripts/run-migration.js",
+    "pack:clean": "node scripts/pack-clean.js",
+    "test:unit": "node scripts/test-phanhe7-unit.js",
+    "test:phanhe1": "node scripts/test-phanhe1-unit.js",
+    "test:phanhe1:integration": "node scripts/test-phanhe1-integration.js",
+    "test:phanhe2": "node scripts/test-phanhe2-kds.js",
+    "test:phanhe3": "node scripts/test-phanhe3-payment-shift.js",
+    "test:phanhe4": "node scripts/test-phanhe4-inventory-cogs.js",
+    "test:security": "node scripts/test-tenant-isolation.js",
+    "test": "node scripts/test-tenant-isolation.js"
   },
   "keywords": [
     "pos",
