@@ -28,6 +28,8 @@ import DongCaModal, {
   buildDenominationMap,
 } from './components/DongCaModal'
 import PosErrorBoundary from './components/PosErrorBoundary'
+import ConfirmPinModal from '../../components/ConfirmPinModal'
+import axiosClient from '../../api/axiosClient'
 import OfflineQueueModal from './components/OfflineQueueModal'
 import PrintBridgeModal from './components/PrintBridgeModal'
 import PaidOrdersRefundModal from './components/PaidOrdersRefundModal'
@@ -420,6 +422,21 @@ export default function PosPage() {
     }
   }, [loadPosData, refreshOutboxList, refreshFailedPrintCount, triggerOutboxSync])
 
+  const [reprintPrompt, setReprintPrompt] = useState(null) // { step: 'pin'|'reason', hoaDon, extraOpts, pin }
+  const [combos, setCombos] = useState([])
+  const [pickingCombo, setPickingCombo] = useState(null)
+  const [comboSelections, setComboSelections] = useState({})
+
+  useEffect(() => {
+    axiosClient
+      .get('/combos', { silent: true })
+      .then((res) => {
+        if (Array.isArray(res?.danhSachCombo)) setCombos(res.danhSachCombo)
+        else if (Array.isArray(res)) setCombos(res)
+      })
+      .catch(() => {})
+  }, [])
+
   // Đồng bộ Màn hình phụ Khách hàng (Customer Facing Display - /cfd) qua BroadcastChannel
   const postCfdMessage = useCallback((payload) => {
     if (typeof BroadcastChannel === 'undefined') return
@@ -429,15 +446,25 @@ export default function PosPage() {
   }, [])
 
   useEffect(() => {
-    const total = activeInvoice
+    const rawTotal = activeInvoice
       ? Number(activeInvoice.tongTamTinh || 0)
       : cart.reduce((s, item) => {
-          const tp = (item.toppings || []).reduce((ts, t) => ts + Number(t.donGia) * Number(t.soLuong || 1), 0)
-          return s + (Number(item.donGia) + tp) * Number(item.soLuong)
+          const tp = (item.toppings || []).reduce(
+            (ts, t) => ts + Number(t.donGia) * Number(t.soLuongMoiLy ?? t.soLuong ?? 1),
+            0
+          )
+          const mod = Number(item.giaModifiers || 0)
+          return s + (Number(item.donGia) + mod + tp) * Number(item.soLuong)
         }, 0)
+    const discountAmount = Number(promoPreview?.tongGiamGia || activeInvoice?.tongGiamGia || 0)
+    const total = Math.max(0, rawTotal - discountAmount)
     const paidAmount = activeInvoice ? Number(activeInvoice.daThanhToan || 0) : 0
     const remainingAmount = activeInvoice
-      ? Number(activeInvoice.conLaiCanThu ?? Math.max(0, total - paidAmount))
+      ? Number(
+          promoPreview?.tongSauGiam != null
+            ? Math.max(0, Number(promoPreview.tongSauGiam) - paidAmount)
+            : activeInvoice.conLaiCanThu ?? Math.max(0, total - paidAmount)
+        )
       : total
     const transferMemo = activeInvoice ? `POSHD${activeInvoice.maHoaDon}` : 'POSCAFE'
 
@@ -447,13 +474,15 @@ export default function PosPage() {
       customer,
       cart,
       activeInvoice,
+      promoPreview,
+      discountAmount,
       total,
       paidAmount,
       remainingAmount,
       transferMemo,
       vietQrUrl: remainingAmount > 0 ? buildVietQrUrl({ amount: remainingAmount, addInfo: transferMemo }) : null,
     })
-  }, [cart, activeInvoice, selectedTable, customer, postCfdMessage])
+  }, [cart, activeInvoice, selectedTable, customer, promoPreview, postCfdMessage])
 
   const activeInvoiceId = activeInvoice?.maHoaDon || null
 
@@ -752,23 +781,8 @@ export default function PosPage() {
         const status = err?.response?.status
         const code = err?.response?.data?.code || err?.response?.data?.maLoi
         if (status === 403 && (code === 'REPRINT_FORBIDDEN' || code === 'CAN_QUYEN_IN_LAI')) {
-          const pin = window.prompt(
-            'In lại hóa đơn (lần 2+) yêu cầu mã PIN Quản lý / Ca trưởng (4–6 số):'
-          )
-          if (!pin || !pin.trim()) {
-            toast.error('Đã hủy in lại hóa đơn (cần PIN Quản lý)!')
-            return
-          }
-          const lyDo = window.prompt('Lý do in lại hóa đơn:', 'Khách yêu cầu in lại bill') || 'In lại bill theo yêu cầu'
-          try {
-            printMeta = await orderService.issuePrintToken(hoaDon.maHoaDon, {
-              managerPin: pin.trim(),
-              lyDo: lyDo.trim(),
-            })
-          } catch (retryErr) {
-            toast.error(retryErr?.response?.data?.message || 'PIN Quản lý không hợp lệ — từ chối in lại!')
-            return
-          }
+          setReprintPrompt({ step: 'pin', hoaDon, extraOpts, pin: '' })
+          return
         } else if (err?.response) {
           // Lỗi từ máy chủ (400/401/403/404) -> không bỏ qua kiểm soát in!
           return
@@ -790,7 +804,7 @@ export default function PosPage() {
     [user?.tenNV, user?.tenQuan]
   )
 
-  const handleSubmitOrder = useCallback(async () => {
+  const handleSubmitOrder = useCallback(async (submitOpts = {}) => {
     if (cart.length === 0) return
     if (!currentShift) {
       toast.error('Bạn cần mở ca thu ngân trước khi tạo đơn!')
@@ -799,7 +813,12 @@ export default function PosPage() {
     if (submitLockRef.current) return
     submitLockRef.current = true
     setSubmitting(true)
-    const payload = buildOrderPayload()
+    const basePayload = buildOrderPayload()
+    const payload = {
+      ...basePayload,
+      ...(submitOpts?.choThanhToanTruoc ? { choThanhToanTruoc: true } : {}),
+      ...(submitOpts?.phuongThucDuKien ? { phuongThucDuKien: submitOpts.phuongThucDuKien } : {}),
+    }
     const dauVanTay = JSON.stringify(payload)
     if (!orderKeyRef.current || orderKeyRef.current.dauVanTay !== dauVanTay) {
       orderKeyRef.current = { key: newIdempotencyKey(), dauVanTay }
@@ -1228,9 +1247,13 @@ export default function PosPage() {
   }
 
   const handleStartVietQrOrder = useCallback(async () => {
-    await handleSubmitOrder()
+    // [Wave 3B — P1-02] Counter VietQR trả trước: gửi cờ AWAITING_PAYMENT để không bắn KDS / không trừ kho trước khi tiền về!
+    await handleSubmitOrder({
+      choThanhToanTruoc: true,
+      phuongThucDuKien: 'VIETQR_PREPAID',
+    })
     setPreferVietQrKey((k) => k + 1)
-    toast('📱 Đã mở đơn & bật mã VietQR chờ Webhook ngân hàng tự động xác nhận!', { icon: '🏦' })
+    toast('📱 Đã mở đơn AWAITING_PAYMENT & bật mã VietQR (chỉ bắn KDS khi tiền về 100%)!', { icon: '🏦' })
   }, [handleSubmitOrder])
 
   const handleVoidInvoiceItem = (item) => {
@@ -1937,7 +1960,17 @@ export default function PosPage() {
           <PosErrorBoundary section="Thực đơn (MenuGrid)">
             <MenuGrid
               menu={menu}
+              combos={combos}
               onPickProduct={setPickingProduct}
+              onPickCombo={(cmb) => {
+                const initSel = {}
+                for (const sl of cmb.slots || []) {
+                  const first = (sl.items || [])[0]
+                  if (first) initSel[sl.id] = first.maMon
+                }
+                setComboSelections(initSel)
+                setPickingCombo(cmb)
+              }}
               onQuickAdd={(item) => {
                 addToCart(item)
                 toast.success(`+1 ${item.tenMon} (${item.kichThuoc})`, { duration: 1200 })
@@ -2285,6 +2318,172 @@ export default function PosPage() {
         onRefreshPos={loadLiveOperations}
         onCountsChange={setEcoCounts}
       />
+
+      {/* [Wave 3B — P1-02] Modal PIN & Lý do In lại hóa đơn (thay thế hoàn toàn window.prompt) */}
+      <ConfirmPinModal
+        open={Boolean(reprintPrompt)}
+        mode={reprintPrompt?.step === 'pin' ? 'pin' : 'input'}
+        showKeypad={reprintPrompt?.step === 'pin'}
+        title={reprintPrompt?.step === 'pin' ? '🔒 Yêu cầu PIN Quản lý để In lại Bill' : '📝 Lý do in lại hóa đơn'}
+        message={
+          reprintPrompt?.step === 'pin'
+            ? 'In lại hóa đơn (lần 2+) yêu cầu mã PIN Quản lý / Ca trưởng (4–6 số):'
+            : 'Nhập lý do in lại hóa đơn (bắt buộc lưu Audit Log):'
+        }
+        placeholder={reprintPrompt?.step === 'pin' ? '••••' : 'Khách yêu cầu in lại bill'}
+        defaultValue={reprintPrompt?.step === 'reason' ? 'Khách yêu cầu in lại bill' : ''}
+        minLength={reprintPrompt?.step === 'pin' ? 4 : 3}
+        confirmText={reprintPrompt?.step === 'pin' ? 'Tiếp tục' : 'Xác nhận in lại'}
+        onCancel={() => {
+          setReprintPrompt(null)
+          toast.error('Đã hủy in lại hóa đơn!')
+        }}
+        onConfirm={async (val) => {
+          if (!reprintPrompt) return
+          if (reprintPrompt.step === 'pin') {
+            setReprintPrompt({ ...reprintPrompt, step: 'reason', pin: val })
+            return
+          }
+          const { hoaDon, extraOpts, pin } = reprintPrompt
+          setReprintPrompt(null)
+          try {
+            const printMeta = await orderService.issuePrintToken(hoaDon.maHoaDon, {
+              managerPin: pin,
+              lyDo: val || 'In lại bill theo yêu cầu',
+            })
+            const res = await printReceiptK80(hoaDon, {
+              ...printMeta,
+              ...extraOpts,
+              thuNgan: user?.tenNV || '',
+              tenQuan: user?.tenQuan || '',
+            })
+            if (res?.mode === 'BRIDGE') {
+              toast.success(`🖨️ Đã in lại Bill #${hoaDon.maHoaDon} (Silent Print)`, { duration: 2500 })
+            }
+          } catch (retryErr) {
+            toast.error(retryErr?.response?.data?.message || 'PIN Quản lý không hợp lệ — từ chối in lại!')
+          }
+        }}
+      />
+
+      {/* [Wave 3B — P1-02] Modal chọn món theo Slot cho Combo */}
+      {pickingCombo && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div>
+                <h3 className="text-lg font-extrabold text-purple-900">🎁 {pickingCombo.tenCombo}</h3>
+                <p className="text-xs text-purple-700 font-bold">
+                  Giá Combo: {formatVND(pickingCombo.giaBanCombo)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPickingCombo(null)}
+                className="w-10 h-10 rounded-full bg-gray-100 hover:bg-gray-200 font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-3 max-h-80 overflow-y-auto">
+              {(pickingCombo.slots || []).map((sl) => (
+                <div key={sl.id} className="space-y-1.5">
+                  <label className="block text-xs font-extrabold uppercase text-stone-700">
+                    {sl.tenSlot} (Chọn {sl.soLuongChon || 1})
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(sl.items || []).map((it) => {
+                      const active = comboSelections[sl.id] === it.maMon
+                      return (
+                        <button
+                          key={`${sl.id}-${it.maMon}`}
+                          type="button"
+                          onClick={() => setComboSelections((prev) => ({ ...prev, [sl.id]: it.maMon }))}
+                          className={`min-h-11 px-3 py-2 rounded-xl text-xs font-bold border text-left cursor-pointer ${
+                            active
+                              ? 'bg-purple-700 text-white border-purple-700'
+                              : 'bg-stone-50 text-stone-800 border-stone-200 hover:bg-purple-50'
+                          }`}
+                        >
+                          {it.tenMon || it.maMon} ({it.kichThuocMacDinh || 'M'})
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const slots = pickingCombo.slots || []
+                const count = Math.max(1, slots.length)
+                const perSlotPrice = Math.round(Number(pickingCombo.giaBanCombo || 0) / count)
+                slots.forEach((sl, idx) => {
+                  const chosenCode = comboSelections[sl.id] || sl.items?.[0]?.maMon
+                  const chosen = (sl.items || []).find((i) => i.maMon === chosenCode) || sl.items?.[0]
+                  if (!chosen) return
+                  const price =
+                    idx === count - 1
+                      ? Math.max(0, Number(pickingCombo.giaBanCombo || 0) - perSlotPrice * (count - 1))
+                      : perSlotPrice
+                  addToCart({
+                    maMon: chosen.maMon,
+                    tenMon: `[Combo] ${chosen.tenMon || chosen.maMon}`,
+                    kichThuoc: chosen.kichThuocMacDinh || 'M',
+                    donGia: price,
+                    giaModifiers: 0,
+                    modifiers: [],
+                    soLuong: 1,
+                    ghiChu: `Combo: ${pickingCombo.tenCombo}`,
+                    maCombo: pickingCombo.maCombo,
+                    tenComboSnapshot: pickingCombo.tenCombo,
+                    isTakeaway: false,
+                    courseNo: 1,
+                    fireStatus: 'FIRED',
+                    toppings: [],
+                  })
+                })
+                toast.success(`🎁 Đã thêm ${pickingCombo.tenCombo} vào giỏ!`)
+                setPickingCombo(null)
+              }}
+              className="w-full min-h-12 rounded-xl bg-purple-700 hover:bg-purple-800 text-white font-extrabold text-sm cursor-pointer"
+            >
+              ➕ Thêm Combo vào giỏ ({formatVND(pickingCombo.giaBanCombo)})
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* [Wave 3B — P1-02] Mobile Thumb Zone: thanh thao tác nhanh cố định ở đáy màn hình < 768px */}
+      <div
+        data-testid="mobile-thumb-zone"
+        className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur border-t border-stone-200 px-3 py-2 flex items-center justify-between gap-2 shadow-lg"
+      >
+        <button
+          type="button"
+          onClick={() => searchInputRef.current?.focus()}
+          className="min-h-11 px-3 rounded-xl bg-stone-100 text-stone-800 text-xs font-extrabold flex-1 cursor-pointer"
+        >
+          🔍 Tìm món
+        </button>
+        <button
+          type="button"
+          disabled={cart.length === 0 || submitting}
+          onClick={() => void handleSubmitOrder()}
+          className="min-h-11 px-3 rounded-xl bg-amber-600 text-white text-xs font-extrabold flex-1 cursor-pointer disabled:opacity-40"
+        >
+          🧾 Gửi đơn ({cart.reduce((s, i) => s + Number(i.soLuong || 1), 0)})
+        </button>
+        <button
+          type="button"
+          disabled={cart.length === 0 || submitting}
+          onClick={() => void handleStartVietQrOrder()}
+          className="min-h-11 px-3 rounded-xl bg-emerald-600 text-white text-xs font-extrabold flex-1 cursor-pointer disabled:opacity-40"
+        >
+          📱 VietQR
+        </button>
+      </div>
       </PosErrorBoundary>
     </div>
   )

@@ -1,27 +1,46 @@
 import { useState, useMemo, useRef, memo } from 'react'
 import { formatVND } from '../../../utils/format'
+import { normalizeViSearch } from '../../../utils/viSearch'
 
-const MenuGrid = memo(function MenuGrid({ menu, onPickProduct, onQuickAdd, searchInputRef }) {
-  const groups = useMemo(
-    () => ['Tất cả', ...new Set(menu.map((m) => m.nhomMon || 'Khác'))],
-    [menu]
-  )
+const MenuGrid = memo(function MenuGrid({
+  menu,
+  combos = [],
+  onPickProduct,
+  onQuickAdd,
+  onPickCombo,
+  searchInputRef,
+}) {
+  const groups = useMemo(() => {
+    const base = ['Tất cả', ...new Set(menu.map((m) => m.nhomMon || 'Khác'))]
+    if (Array.isArray(combos) && combos.length > 0) base.push('🎁 Combo')
+    return base
+  }, [menu, combos])
   const [activeGroup, setActiveGroup] = useState('Tất cả')
   const [search, setSearch] = useState('')
   const longPressTimerRef = useRef(null)
   const longPressedRef = useRef(false)
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase()
+    const q = normalizeViSearch(search)
     return menu.filter((item) => {
       const matchGroup = activeGroup === 'Tất cả' || (item.nhomMon || 'Khác') === activeGroup
       const matchSearch =
         !q ||
-        item.tenMon?.toLowerCase().includes(q) ||
-        item.maMon?.toLowerCase().includes(q)
+        normalizeViSearch(item.tenMon).includes(q) ||
+        normalizeViSearch(item.maMon).includes(q)
       return matchGroup && matchSearch
     })
   }, [menu, activeGroup, search])
+
+  const filteredCombos = useMemo(() => {
+    const q = normalizeViSearch(search)
+    return (combos || []).filter(
+      (c) =>
+        !q ||
+        normalizeViSearch(c.tenCombo).includes(q) ||
+        normalizeViSearch(c.maCombo).includes(q)
+    )
+  }, [combos, search])
 
   const triggerSmartDefaultAdd = (item) => {
     const defaultSize =
@@ -112,7 +131,35 @@ const MenuGrid = memo(function MenuGrid({ menu, onPickProduct, onQuickAdd, searc
       </p>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2.5 overflow-y-auto max-h-[480px] pr-1">
-        {filtered.map((item) => {
+        {(activeGroup === '🎁 Combo' || activeGroup === 'Tất cả') &&
+          filteredCombos.map((cmb) => (
+            <button
+              type="button"
+              key={`combo-${cmb.maCombo}`}
+              disabled={Boolean(cmb.tamHet)}
+              onClick={() => onPickCombo?.(cmb)}
+              className={`p-3.5 rounded-2xl border-2 text-left flex flex-col justify-between transition min-h-[132px] ${
+                cmb.tamHet
+                  ? 'bg-gray-100 border-gray-200 opacity-60 cursor-not-allowed'
+                  : 'border-purple-300 bg-purple-50/70 hover:border-purple-600 hover:shadow-md cursor-pointer'
+              }`}
+            >
+              <div>
+                <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded bg-purple-600 text-white">
+                  🎁 COMBO
+                </span>
+                <p className="mt-1.5 font-extrabold text-sm text-purple-950 line-clamp-2">{cmb.tenCombo}</p>
+                <p className="text-[11px] text-purple-700 mt-0.5">
+                  {(cmb.slots || []).length} nhóm chọn món
+                </p>
+              </div>
+              <div className="mt-2 flex items-center justify-between">
+                <span className="font-extrabold text-sm text-purple-900">{formatVND(cmb.giaBanCombo)}</span>
+                <span className="text-[10px] font-bold text-purple-700">Chọn slot →</span>
+              </div>
+            </button>
+          ))}
+        {activeGroup !== '🎁 Combo' && filtered.map((item) => {
           const defaultSize =
             item.sizes?.find((s) => s.kichThuoc === 'M') ||
             item.sizes?.[0] || { kichThuoc: 'M', giaBan: 0 }

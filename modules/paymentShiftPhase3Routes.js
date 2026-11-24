@@ -5,6 +5,7 @@
  * =============================================================================
  */
 const crypto = require('crypto');
+const { uploadReceiptPhoto, readLocalReceiptPhoto } = require('./storageAdapter');
 const {
     DEFAULT_SHIFT_POLICY,
     normalizeBranchForShift,
@@ -169,18 +170,37 @@ function registerPaymentShiftPhase3Routes(app, deps) {
         const idChungTu = `RCP_${Date.now()}_${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 
         try {
+            const stored = await uploadReceiptPhoto({
+                tenantId,
+                idChungTu,
+                dataUrl: cleanData,
+                mimeType: allowedMime,
+            });
             await pool.withTenant(tenantId, async (client) => {
                 await client.query(
-                    `INSERT INTO public.receipt_photo_uploads (id, tenantid, manv, mimetype, sizebytes, dataurl)
-                     VALUES ($1, $2, $3, $4, $5, $6)`,
-                    [idChungTu, tenantId, req.user.maNV, allowedMime, sizeBytes, cleanData]
+                    `INSERT INTO public.receipt_photo_uploads
+                        (id, tenantid, manv, mimetype, sizebytes, dataurl, storage_provider, storage_key, storage_url)
+                     VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8)`,
+                    [
+                        idChungTu,
+                        tenantId,
+                        req.user.maNV,
+                        stored.mimeType,
+                        stored.sizeBytes,
+                        stored.storageProvider,
+                        stored.storageKey,
+                        stored.storageUrl,
+                    ]
                 );
             });
             res.status(201).json({
                 message: 'Đã lưu ảnh chứng từ xác thực!',
                 idChungTu,
-                url: `/api/uploads/receipt-photo/${idChungTu}`,
-                sizeBytes,
+                url: stored.storageUrl || `/api/uploads/receipt-photo/${idChungTu}`,
+                storageProvider: stored.storageProvider,
+                storageKey: stored.storageKey,
+                storageUrl: stored.storageUrl,
+                sizeBytes: stored.sizeBytes,
             });
         } catch (error) {
             guiLoi(res, error, 'Lỗi API Upload ảnh chứng từ:');
@@ -192,12 +212,21 @@ function registerPaymentShiftPhase3Routes(app, deps) {
         try {
             const r = await qTenant(
                 req,
-                `SELECT id, mimetype, sizebytes, dataurl, createdat FROM public.receipt_photo_uploads
+                `SELECT id, mimetype, sizebytes, dataurl, storage_provider, storage_key, storage_url, createdat
+                   FROM public.receipt_photo_uploads
                   WHERE id = $1 AND tenantid = $2`,
                 [req.params.id, tenantId]
             );
             if (r.rows.length === 0) return res.status(404).json({ message: 'Không tìm thấy ảnh chứng từ!' });
-            res.json(r.rows[0]);
+            const row = r.rows[0];
+            if (req.query.raw === '1' && row.storage_provider === 'LOCAL' && row.storage_key) {
+                const buf = await readLocalReceiptPhoto(row.storage_key);
+                if (buf) {
+                    res.setHeader('Content-Type', row.mimetype || 'image/webp');
+                    return res.send(buf);
+                }
+            }
+            res.json(row);
         } catch (error) {
             guiLoi(res, error, 'Lỗi API Xem ảnh chứng từ:');
         }

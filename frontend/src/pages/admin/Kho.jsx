@@ -6,6 +6,7 @@ import { useBarcodeScanner } from '../../hooks/useBarcodeScanner'
 import FeatureLockedCard from '../../components/FeatureLockedCard'
 import { hasFeatureFlag } from '../../utils/featureFlags'
 import { formatVND, formatNumber, getTodayISO } from '../../utils/format'
+import axiosClient from '../../api/axiosClient'
 
 const WASTAGE_OPTIONS = [
   { code: 'BARISTA_SPILL', label: 'Đổ vỡ / đánh sữa hỏng trong quầy' },
@@ -63,6 +64,52 @@ export default function Kho() {
   const [producingNL, setProducingNL] = useState(null)
   const [batchDraftByNL, setBatchDraftByNL] = useState({})
   const [lockDateInput, setLockDateInput] = useState(() => getTodayISO())
+
+  // [Wave 3B — P1-02] Vật tư Đóng gói theo Kênh (cauhinh_vattu_mangdi: /api/kho/vattu-mangdi)
+  const [packagingRules, setPackagingRules] = useState([])
+  const [packagingForm, setPackagingForm] = useState({
+    loaiDonHang: 'MANG_DI',
+    kichThuoc: 'ALL',
+    maNL: '',
+    soLuongMoiLy: 1,
+  })
+  const [savingPackaging, setSavingPackaging] = useState(false)
+
+  const loadPackagingRules = useCallback(async () => {
+    try {
+      const res = await axiosClient.get('/kho/vattu-mangdi', { silent: true })
+      setPackagingRules(Array.isArray(res?.danhSach) ? res.danhSach : Array.isArray(res) ? res : [])
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadPackagingRules()
+  }, [loadPackagingRules])
+
+  const handleSavePackagingRule = async (e) => {
+    e.preventDefault()
+    if (!packagingForm.maNL) {
+      toast.error('Vui lòng chọn vật tư/bao bì (ly nhựa, nắp, ống hút, túi...)!')
+      return
+    }
+    setSavingPackaging(true)
+    try {
+      await axiosClient.post('/kho/vattu-mangdi', {
+        loaiDonHang: packagingForm.loaiDonHang,
+        kichThuoc: packagingForm.kichThuoc,
+        maNL: packagingForm.maNL,
+        soLuongMoiLy: Number(packagingForm.soLuongMoiLy || 1),
+      })
+      toast.success('📦 Đã lưu định mức vật tư đóng gói theo kênh!')
+      await loadPackagingRules()
+    } catch {
+      // Interceptor xử lý
+    } finally {
+      setSavingPackaging(false)
+    }
+  }
   const [autoPoOrders, setAutoPoOrders] = useState([])
 
   const loadKhoData = useCallback(async () => {
@@ -1555,6 +1602,86 @@ export default function Kho() {
           </div>
         </div>
       )}
+
+      {/* [Wave 3B — P1-02] Tab / Panel Vật tư Đóng gói theo Kênh (cauhinh_vattu_mangdi) */}
+      <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-extrabold text-stone-900">
+              📦 Vật tư Đóng gói theo Kênh (Bao bì động Mang đi / Giao hàng)
+            </h2>
+            <p className="text-xs text-stone-500">
+              Tự động trừ ly nhựa, nắp cầu, ống hút, túi chữ T theo kênh bán (MANG_DI / GIAO_HANG / APP) vào COGS
+            </p>
+          </div>
+          <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-amber-100 text-amber-800">
+            {packagingRules.length} cấu hình
+          </span>
+        </div>
+        <form onSubmit={handleSavePackagingRule} className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
+          <select
+            value={packagingForm.loaiDonHang}
+            onChange={(e) => setPackagingForm((p) => ({ ...p, loaiDonHang: e.target.value }))}
+            className="rounded-xl border border-stone-300 px-3 py-2 text-xs font-semibold"
+          >
+            <option value="MANG_DI">🛍️ Mang đi (MANG_DI)</option>
+            <option value="GIAO_HANG">🛵 Giao hàng (GIAO_HANG)</option>
+            <option value="APP">📱 App Delivery (APP)</option>
+          </select>
+          <select
+            value={packagingForm.kichThuoc}
+            onChange={(e) => setPackagingForm((p) => ({ ...p, kichThuoc: e.target.value }))}
+            className="rounded-xl border border-stone-300 px-3 py-2 text-xs font-semibold"
+          >
+            <option value="ALL">Mọi Size (ALL)</option>
+            <option value="S">Size S</option>
+            <option value="M">Size M</option>
+            <option value="L">Size L</option>
+          </select>
+          <select
+            value={packagingForm.maNL}
+            onChange={(e) => setPackagingForm((p) => ({ ...p, maNL: e.target.value }))}
+            className="rounded-xl border border-stone-300 px-3 py-2 text-xs font-semibold"
+          >
+            <option value="">-- Chọn vật tư bao bì --</option>
+            {nguyenLieuList.map((nl) => (
+              <option key={nl.maNL} value={nl.maNL}>
+                {nl.tenNL} ({nl.donViTinh})
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            min="0.1"
+            step="0.1"
+            value={packagingForm.soLuongMoiLy}
+            onChange={(e) => setPackagingForm((p) => ({ ...p, soLuongMoiLy: e.target.value }))}
+            placeholder="SL mỗi ly"
+            className="rounded-xl border border-stone-300 px-3 py-2 text-xs font-semibold"
+          />
+          <button
+            type="submit"
+            disabled={savingPackaging}
+            className="rounded-xl bg-amber-700 hover:bg-amber-800 text-white text-xs font-extrabold px-4 py-2 cursor-pointer disabled:opacity-50"
+          >
+            {savingPackaging ? 'Đang lưu...' : '💾 Lưu bao bì'}
+          </button>
+        </form>
+        {packagingRules.length > 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {packagingRules.map((r, idx) => (
+              <div key={r.id || idx} className="p-2.5 rounded-xl bg-stone-50 border border-stone-200 text-xs flex justify-between">
+                <span className="font-bold text-stone-800">
+                  {r.loaiDonHang || r.loaidonhang} • Size {r.kichThuoc || r.kichthuoc}
+                </span>
+                <span className="text-amber-800 font-extrabold">
+                  {r.tenNL || r.manl} × {r.soLuongMoiLy || r.soluongmoily}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

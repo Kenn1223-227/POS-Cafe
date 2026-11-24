@@ -4,6 +4,7 @@ import { caService } from '../../../services/caService'
 import { useAuthStore } from '../../../store/authStore'
 import { formatVND } from '../../../utils/format'
 import { printZReportK80 } from '../../../utils/printHelper'
+import ConfirmPinModal from '../../../components/ConfirmPinModal'
 
 const MENH_GIA = [500000, 200000, 100000, 50000, 20000, 10000, 5000, 2000, 1000]
 
@@ -95,7 +96,9 @@ export default function DongCaModal({ isOpen, onClose, currentShift, preCloseWar
     }
   }
 
-  const handleDongCa = async (e) => {
+  const [confirmDongCaOpen, setConfirmDongCaOpen] = useState(false)
+
+  const handleDongCa = (e) => {
     e.preventDefault()
     if (tienThucTeNum === null || Number.isNaN(tienThucTeNum) || tienThucTeNum < 0) {
       toast.error('Vui lòng kiểm đếm và nhập số tiền mặt thực tế (>= 0)!')
@@ -105,8 +108,11 @@ export default function DongCaModal({ isOpen, onClose, currentShift, preCloseWar
       toast.error('Vui lòng nhập lý do giải trình chênh lệch tối thiểu 10 ký tự để xác nhận lần 2!')
       return
     }
-    if (!window.confirm(`Xác nhận chốt ca với tiền mặt thực tế ${formatVND(tienThucTeNum)}?`)) return
+    setConfirmDongCaOpen(true)
+  }
 
+  const executeDongCa = async () => {
+    setConfirmDongCaOpen(false)
     const chiTietMenhGia = useCounter ? buildDenominationMap(counts) : undefined
 
     setSubmitting(true)
@@ -357,6 +363,16 @@ export default function DongCaModal({ isOpen, onClose, currentShift, preCloseWar
           </form>
         )}
       </div>
+      <ConfirmPinModal
+        open={confirmDongCaOpen}
+        mode="confirm"
+        danger
+        title="Xác nhận Chốt Ca"
+        message={`Xác nhận chốt ca với tiền mặt thực tế ${formatVND(tienThucTeNum)}?`}
+        confirmText="Chốt ca ngay"
+        onConfirm={executeDongCa}
+        onCancel={() => setConfirmDongCaOpen(false)}
+      />
     </div>
   )
 }

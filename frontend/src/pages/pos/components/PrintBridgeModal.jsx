@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import toast from 'react-hot-toast'
+import ConfirmPinModal from '../../../components/ConfirmPinModal'
 import {
   getBridgeClientSettings,
   saveBridgeClientSettings,
@@ -224,10 +225,16 @@ export default function PrintBridgeModal({ isOpen, onClose, user, onStatusChange
     }
   }
 
-  const handleNoSaleKick = async () => {
-    const lyDo = window.prompt('Nhập lý do mở két tiền không bán hàng (bắt buộc ghi Audit Log):')
+  const [noSaleModalOpen, setNoSaleModalOpen] = useState(false)
+
+  const handleNoSaleKick = () => {
+    setNoSaleModalOpen(true)
+  }
+
+  const executeNoSaleKick = async (lyDo) => {
+    setNoSaleModalOpen(false)
     if (!lyDo || lyDo.trim().length < 3) {
-      if (lyDo !== null) toast.error('Lý do mở két phải từ 3 ký tự trở lên!')
+      toast.error('Lý do mở két phải từ 3 ký tự trở lên!')
       return
     }
     setLoading(true)
@@ -775,6 +782,17 @@ export default function PrintBridgeModal({ isOpen, onClose, user, onStatusChange
           )}
         </div>
       </div>
+      <ConfirmPinModal
+        open={noSaleModalOpen}
+        mode="input"
+        title="💰 Mở két tiền không bán hàng (No-Sale RJ11)"
+        message="Nhập lý do mở két tiền không bán hàng (bắt buộc ghi Audit Log):"
+        placeholder="VD: Đổi tiền lẻ đầu ca..."
+        minLength={3}
+        confirmText="Mở két & Ghi Log"
+        onConfirm={executeNoSaleKick}
+        onCancel={() => setNoSaleModalOpen(false)}
+      />
     </div>
   )
 }

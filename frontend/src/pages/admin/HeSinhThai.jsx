@@ -645,7 +645,10 @@ export default function HeSinhThai() {
           <div className="bg-white p-5 rounded-2xl border border-gray-200 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-extrabold text-sm text-gray-800">
-                🛵 Aggregator Hub — Doanh thu & Chiết khấu Sàn Giao Đồ Ăn
+                🛵 Aggregator Hub — Doanh thu &amp; Chiết khấu Sàn Giao Đồ Ăn{' '}
+                <span className="ml-1.5 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-extrabold uppercase">
+                  Beta / Demo Simulator
+                </span>
               </h3>
               <div className="flex gap-2">
                 {['GRABFOOD', 'SHOPEEFOOD', 'BEFOOD'].map((pf) => (
@@ -745,7 +748,12 @@ export default function HeSinhThai() {
             </div>
 
             <div className="lg:col-span-5 bg-white p-5 rounded-2xl border space-y-3">
-              <h3 className="font-extrabold text-sm text-gray-800">💬 Hàng đợi Tin nhắn Tự động Zalo ZNS</h3>
+              <h3 className="font-extrabold text-sm text-gray-800">
+                💬 Hàng đợi Tin nhắn Tự động Zalo ZNS{' '}
+                <span className="ml-1.5 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-extrabold uppercase">
+                  Beta / Demo Outbox
+                </span>
+              </h3>
               <div className="space-y-2 max-h-80 overflow-y-auto text-xs">
                 {znsOutbox.length === 0 ? (
                   <p className="text-gray-400 text-center py-6">

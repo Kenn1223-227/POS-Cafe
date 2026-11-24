@@ -18,6 +18,7 @@ import {
 } from '../../utils/sound'
 import { printKdsItemLabels50x30 } from '../../utils/printHelper'
 import { subscribeLanEvents, updateLanItemStatus } from '../../utils/lanHub'
+import axiosClient from '../../api/axiosClient'
 
 const KHOA_QUEUE_CU = 'barista_kds_queue'
 const KHOA_TRAM_KDS = 'barista_kds_station'
@@ -285,7 +286,48 @@ export default function BaristaPage() {
     }
   }, [stationFilter, viewMode, user?.tenantId, user?.branchId])
 
+  const [expiringBatches, setExpiringBatches] = useState([])
+  const [discardingLotId, setDiscardingLotId] = useState(null)
+
+  const loadExpiringBatches = useCallback(async () => {
+    try {
+      const res = await axiosClient.get('/kds/expiring-batches', { silent: true })
+      if (Array.isArray(res?.batches)) setExpiringBatches(res.batches)
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadExpiringBatches()
+    const timer = setInterval(() => void loadExpiringBatches(), 60000)
+    return () => clearInterval(timer)
+  }, [loadExpiringBatches])
+
+  const handleDiscardExpiredBatch = async (lotId) => {
+    setDiscardingLotId(lotId)
+    try {
+      const res = await axiosClient.post(`/kds/batches/${lotId}/discard-expired`, {
+        lyDo: 'Xuất hủy 1 chạm mẻ hết hạn từ màn hình KDS',
+      })
+      toast.success(res?.message || '🗑️ Đã xuất hủy mẻ hết hạn!')
+      setExpiringBatches((prev) => prev.filter((b) => Number(b.lotId) !== Number(lotId)))
+    } catch {
+      // Interceptor xử lý
+    } finally {
+      setDiscardingLotId(null)
+    }
+  }
+
   useSocketEvents({
+    'kds:batch_expiring_warning': (payload) => {
+      if (Array.isArray(payload?.batches)) {
+        setExpiringBatches(payload.batches)
+        if (payload.batches.length > 0 && soundRef.current) {
+          playRushOrRemakeSound()
+        }
+      }
+    },
     CONNECTION_STATE: ({ disconnectedOver5s: isAlert }) => {
       setDisconnectedOver5s(Boolean(isAlert))
     },
@@ -707,6 +749,30 @@ export default function BaristaPage() {
 
   return (
     <div className="min-h-screen bg-stone-900 text-stone-100 flex flex-col">
+      {/* [Wave 3B — P1-04] Cảnh báo HSD Bán thành phẩm sắp hết hạn trên KDS + nút 1 chạm Hủy mẻ */}
+      {expiringBatches.length > 0 && (
+        <div className="bg-red-900/95 border-b border-red-500 px-5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-black text-amber-300 uppercase">⏰ Cảnh báo HSD Bán thành phẩm:</span>
+            {expiringBatches.map((b) => (
+              <span
+                key={b.lotId}
+                className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-red-950/80 border border-red-400/50 text-white"
+              >
+                <b>{b.tenNL}</b> ({b.maLo}) — {b.isExpired ? 'ĐÃ HẾT HẠN' : `còn ${b.minutesLeft} phút`}
+                <button
+                  type="button"
+                  disabled={discardingLotId === b.lotId}
+                  onClick={() => handleDiscardExpiredBatch(b.lotId)}
+                  className="px-2 py-0.5 rounded bg-red-600 hover:bg-red-500 text-white font-extrabold cursor-pointer disabled:opacity-50"
+                >
+                  {discardingLotId === b.lotId ? 'Đang hủy...' : '🗑️ Hủy mẻ hết hạn'}
+                </button>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       <header className="bg-stone-950 px-5 py-3.5 flex flex-wrap items-center justify-between gap-3 border-b border-stone-800">
         <div>
           <h1 className="text-xl font-extrabold text-amber-400">

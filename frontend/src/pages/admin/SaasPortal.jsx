@@ -4,17 +4,20 @@ import toast from 'react-hot-toast'
 import { saasService } from '../../services/saasService'
 import { useAuthStore } from '../../store/authStore'
 import { formatVND, formatDateTime, formatNumber } from '../../utils/format'
+import ConfirmPinModal from '../../components/ConfirmPinModal'
+import axiosClient from '../../api/axiosClient'
 
 const PLAN_CARDS = [
   {
     id: 'FREE',
     name: 'FREE (Vĩnh viễn)',
     priceVnd: 0,
-    badge: 'MỒI CÂU 0Đ',
-    desc: 'Xe cafe mang đi & quán mới mở • 1 chi nhánh, 1 máy POS, tối đa 400 đơn/tháng',
+    priceLabel: '0đ / điểm bán',
+    badge: 'MIỄN PHÍ 0Đ',
+    desc: 'Xe cafe mang đi & quán mới mở • 1 điểm bán, tối đa 350 đơn/tháng',
     perks: [
-      'Miễn phí 0đ mãi mãi (không cần thẻ)',
-      'Bán hàng POS cơ bản (tối đa 400 đơn/tháng)',
+      'Miễn phí 0đ mãi mãi (tối đa 350 đơn/tháng)',
+      'Bán hàng POS cơ bản & KDS 1 quầy',
       'Báo cáo kinh doanh 7 ngày gần nhất',
       'Hóa đơn K80 kèm dòng chân trang QR CafePOS',
     ],
@@ -22,41 +25,43 @@ const PLAN_CARDS = [
   {
     id: 'STARTER',
     name: 'STARTER',
-    priceVnd: 149000,
+    priceVnd: 169000,
+    priceLabel: '169.000đ / điểm bán / tháng',
     badge: '',
-    desc: '1 chi nhánh • Không giới hạn đơn POS cơ bản',
+    desc: '169.000đ/điểm bán/tháng • Không giới hạn đơn POS cơ bản',
     perks: [
       'Không giới hạn đơn hàng & lịch sử báo cáo',
       'Offline-First PWA (bán liên tục khi rớt mạng)',
-      'AI Menu Importer (nhập menu từ ảnh/Zalo)',
+      'Nhập thực đơn từ KiotViet / Sapo (CSV/Excel)',
       'Hóa đơn sạch hoàn toàn (không watermark)',
     ],
   },
   {
     id: 'PRO',
-    name: 'PRO / GROWTH',
-    priceVnd: 399000,
+    name: 'PRO',
+    priceVnd: 349000,
+    priceLabel: '349.000đ / điểm bán / tháng',
     badge: 'CHỦ LỰC • PHỔ BIẾN NHẤT',
     highlight: true,
-    desc: 'Quán cafe/trà sữa chuyên nghiệp • Tối đa 3 chi nhánh',
+    desc: '349.000đ/điểm bán/tháng • Quán cafe/trà sữa chuyên nghiệp',
     perks: [
       'Kho BOM + Sub-Recipes + Kiểm kho 60s + Ma trận BCG',
       'KDS đa trạm + In tem cốc 50×30 + QR Order tại bàn',
       'VietQR Auto Webhook (SePay/PayOS) chốt đơn 3 giây',
-      'Đối soát mù + Cảnh báo Telegram Anti-Fraud + CRM Loyalty',
+      'Đối soát mù + Chấm công 3 lớp QR/GPS + CRM Loyalty',
     ],
   },
   {
-    id: 'ENTERPRISE',
-    name: 'ENTERPRISE / CHAIN',
-    priceVnd: 990000,
-    extraBranchPriceVnd: 250000,
-    badge: 'CHUỖI & NHƯỢNG QUYỀN',
-    desc: 'Từ 990k/tháng + 250k/chi nhánh thêm • Không giới hạn quy mô',
+    id: 'CHAIN',
+    name: 'CHAIN (Từ 3 điểm bán)',
+    priceVnd: 499000,
+    priceLabel: '499.000đ / điểm bán / tháng',
+    badge: 'CHUỖI TỪ 3 ĐIỂM BÁN',
+    desc: '499.000đ/điểm bán/tháng (từ 3 điểm bán) • Quản trị chuỗi tập trung',
     perks: [
       'Đa chi nhánh, Menu tập trung, Kho tổng & Điều chuyển',
       'Quản trị Nhượng quyền & PostgreSQL RLS cô lập tuyệt đối',
-      'Open API, Hóa đơn điện tử & Zalo ZNS thương hiệu riêng',
+      'Hóa đơn điện tử MTT • Aggregator & Zalo ZNS Outbox (Beta / Demo)',
       'Hỗ trợ SLA 24/7 & Triển khai phần cứng tận nơi',
     ],
   },
@@ -173,45 +178,70 @@ export default function SaasPortal() {
     }
   }
 
-  const handleSwitchFree = async () => {
-    if (
-      !window.confirm(
-        'Chuyển sang gói FREE Vĩnh viễn (0đ/tháng)?\nGiới hạn: 400 đơn/tháng, báo cáo 7 ngày gần nhất, bill K80 có dòng chân trang QR CafePOS. Toàn bộ dữ liệu của bạn vẫn được giữ nguyên.'
-      )
-    ) {
+  const [saasDialog, setSaasDialog] = useState(null) // { kind: 'switchFree'|'expansion', offer }
+  const [showImportModal, setShowImportModal] = useState(false)
+  const [importCsvText, setImportCsvText] = useState('')
+  const [importingSheet, setImportingSheet] = useState(false)
+  const [importResult, setImportResult] = useState(null)
+
+  const handleImportMenuSheet = async (e) => {
+    e.preventDefault()
+    if (!importCsvText.trim()) {
+      toast.error('Vui lòng dán dữ liệu CSV hoặc chọn tệp xuất từ KiotViet / Sapo!')
       return
     }
-    setProcessing(true)
+    setImportingSheet(true)
     try {
-      const res = await saasService.downgradeToFree()
-      toast.success(res.message)
-      await loadData()
+      const res = await axiosClient.post('/saas/import-menu-sheet', { csvText: importCsvText })
+      setImportResult(res)
+      toast.success(res.message || `Đã nhập ${res.imported} món!`)
     } catch {
       // Interceptor xử lý
     } finally {
-      setProcessing(false)
+      setImportingSheet(false)
     }
   }
 
-  const handleRequestExpansion = async (offer) => {
-    const lienHe = window.prompt(
-      `Nhập SĐT / Zalo nhận tư vấn cho "${offer.title}":`,
-      user?.soDienThoai || user?.email || ''
-    )
-    if (lienHe === null) return
-    setSubmittingOffer(offer.loaiDichVu)
-    try {
-      const res = await saasService.submitExpansionInquiry({
-        loaiDichVu: offer.loaiDichVu,
-        goiQuanTam: offer.goiQuanTam,
-        soLuong: 1,
-        lienHe: lienHe.trim(),
-      })
-      toast.success(res.message, { duration: 5000 })
-    } catch {
-      // Interceptor xử lý
-    } finally {
-      setSubmittingOffer('')
+  const handleSwitchFree = () => {
+    setSaasDialog({ kind: 'switchFree' })
+  }
+
+  const handleRequestExpansion = (offer) => {
+    setSaasDialog({ kind: 'expansion', offer })
+  }
+
+  const handleConfirmSaasDialog = async (val) => {
+    if (!saasDialog) return
+    const current = saasDialog
+    setSaasDialog(null)
+    if (current.kind === 'switchFree') {
+      setProcessing(true)
+      try {
+        const res = await saasService.downgradeToFree()
+        toast.success(res.message)
+        await loadData()
+      } catch {
+        // Interceptor xử lý
+      } finally {
+        setProcessing(false)
+      }
+      return
+    }
+    if (current.kind === 'expansion' && current.offer) {
+      setSubmittingOffer(current.offer.loaiDichVu)
+      try {
+        const res = await saasService.submitExpansionInquiry({
+          loaiDichVu: current.offer.loaiDichVu,
+          goiQuanTam: current.offer.goiQuanTam,
+          soLuong: 1,
+          lienHe: String(val || '').trim(),
+        })
+        toast.success(res.message, { duration: 5000 })
+      } catch {
+        // Interceptor xử lý
+      } finally {
+        setSubmittingOffer('')
+      }
     }
   }
 
@@ -753,6 +783,28 @@ export default function SaasPortal() {
         </div>
       )}
 
+      {/* [Wave 3B — P1-05] Migration Toolkit 1 phút: Nhập thực đơn từ KiotViet / Sapo */}
+      <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-extrabold text-emerald-950">
+            📥 Chuyển đổi dữ liệu 1 phút từ KiotViet / Sapo (Migration Toolkit)
+          </h3>
+          <p className="text-xs text-emerald-800">
+            Tự động nhận diện cột Tên hàng, Nhóm hàng, Giá bán, ĐVT/Size, Mã hàng từ file CSV/Excel xuất từ KiotViet &amp; Sapo.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setImportResult(null)
+            setShowImportModal(true)
+          }}
+          className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold cursor-pointer"
+        >
+          📥 Nhập Thực Đơn Từ KiotViet / Sapo (CSV/Excel)
+        </button>
+      </div>
+
       {/* Liên kết riêng cho đội vận hành nền tảng */}
       <div className="flex items-center justify-between px-4 py-3 rounded-xl bg-slate-900 text-slate-300 text-xs">
         <span>🛡️ Bạn là Quản trị viên vận hành toàn nền tảng SaaS (Churn Radar, duyệt gói, bật/tắt Feature Flags)?</span>
@@ -763,6 +815,90 @@ export default function SaasPortal() {
           Mở Platform Super Admin →
         </Link>
       </div>
+
+      {showImportModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleImportMenuSheet}
+            className="bg-white rounded-2xl max-w-xl w-full p-5 shadow-2xl space-y-4"
+          >
+            <div className="flex items-center justify-between border-b pb-3">
+              <h3 className="text-base font-extrabold text-stone-900">
+                📥 Nhập Thực Đơn Từ KiotViet / Sapo (CSV / Excel)
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowImportModal(false)}
+                className="w-9 h-9 rounded-full bg-stone-100 hover:bg-stone-200 font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-2">
+              <input
+                type="file"
+                accept=".csv,.txt"
+                onChange={(e) => {
+                  const f = e.target.files?.[0]
+                  if (!f) return
+                  const reader = new FileReader()
+                  reader.onload = () => setImportCsvText(String(reader.result || ''))
+                  reader.readAsText(f, 'utf-8')
+                }}
+                className="block w-full text-xs text-stone-600"
+              />
+              <textarea
+                rows={7}
+                value={importCsvText}
+                onChange={(e) => setImportCsvText(e.target.value)}
+                placeholder={'Mã hàng,Tên hàng,Nhóm hàng,Giá bán,ĐVT\nCF01,Cà Phê Sữa Đá,Cà phê,29000,M\nBX01,Bạc Xỉu Đá,Cà phê,35000,L'}
+                className="w-full rounded-xl border border-stone-300 p-3 text-xs font-mono"
+              />
+            </div>
+            {importResult && (
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900">
+                Nguồn nhận diện: <b>{importResult.detectedSource}</b> • Đã nhập: <b>{importResult.imported}</b> • Bỏ qua:{' '}
+                <b>{importResult.skipped}</b>
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowImportModal(false)}
+                className="px-4 py-2 rounded-xl border border-stone-300 text-xs font-bold cursor-pointer"
+              >
+                Đóng
+              </button>
+              <button
+                type="submit"
+                disabled={importingSheet}
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold cursor-pointer disabled:opacity-50"
+              >
+                {importingSheet ? 'Đang nhập...' : '🚀 Nhập thực đơn ngay'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      <ConfirmPinModal
+        open={Boolean(saasDialog)}
+        mode={saasDialog?.kind === 'switchFree' ? 'confirm' : 'input'}
+        title={
+          saasDialog?.kind === 'switchFree'
+            ? 'Chuyển sang gói FREE Vĩnh viễn (0đ/tháng)'
+            : `Đăng ký tư vấn: ${saasDialog?.offer?.title || ''}`
+        }
+        message={
+          saasDialog?.kind === 'switchFree'
+            ? 'Giới hạn: 350 đơn/tháng, báo cáo 7 ngày gần nhất, bill K80 có dòng chân trang QR CafePOS. Toàn bộ dữ liệu của bạn vẫn được giữ nguyên.'
+            : `Nhập SĐT / Zalo nhận tư vấn cho "${saasDialog?.offer?.title || ''}":`
+        }
+        defaultValue={saasDialog?.kind === 'expansion' ? user?.soDienThoai || user?.email || '' : ''}
+        confirmText={saasDialog?.kind === 'switchFree' ? 'Chuyển sang FREE' : 'Gửi yêu cầu'}
+        onConfirm={handleConfirmSaasDialog}
+        onCancel={() => setSaasDialog(null)}
+      />
     </div>
   )
 }

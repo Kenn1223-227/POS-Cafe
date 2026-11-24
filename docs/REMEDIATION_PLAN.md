@@ -40,7 +40,7 @@
 | **Wave 2** | **031** | `031_wave2_cogs_adjustment_journal.sql` | Tạo `public.cogs_adjustment_journal` (`FORCE RLS`) cho Safe WAC & replay hồi tố. |
 | **Wave 3A** | **032** | `032_wave3a_vn_tax_einvoice_nd13.sql` | `tax_categories` (`VAT_8_FB`, `VAT_10_STD`, `VAT_0`, `KCT`), tax snapshot trên `chitiethoadon`, `einvoices` + RPC `SECURITY DEFINER` (`fn_public_lookup_einvoice`, `fn_public_request_einvoice`), `customer_consent_logs`, `ZaloOptIn DEFAULT FALSE`, `anonymized_at`. |
 | **Wave 3A** | **033** | `033_wave3a_branch_availability_86.sql` | Tạo `public.branch_availability_86 (tenant_id, branch_id, entity_type, entity_id)` với `FORCE RLS`. |
-| **Wave 3B** | **034** | `034_hr_3layer_kiosk_gps_and_shift_overlap.sql` | `kiosk_hmac_secret`, GPS/IP chi nhánh trên `ChiNhanh`, ràng buộc chống trùng khung giờ ca `PhanCa`. |
+| **Wave 3B** | **034** | `034_wave3b_hr_3layer_storage_saas.sql` | `ChiTietHoaDon.FireStatus` thêm `'AWAITING_PAYMENT'`; `kiosk_hmac_secret`, GPS/IP chi nhánh trên `ChiNhanh`, `verify_method`/`checkin_lat`/`checkin_lng`/`late_minutes` trên `ChamCong`; `storage_provider`/`storage_key`/`storage_url` trên `receipt_photo_uploads`; bảng `tenant_dunning_logs` (`FORCE RLS`). |
 | **Wave 4** | **035** | `035_business_day_cutoff_and_reporting_summary.sql` | `business_day_cutoff_hour` (04:00), `hoadon.business_date`, composite indexes, `daily_branch_financial_summary`. |
 | **Wave 4** | **036** | `036_house_account_vietqr_attempts_dual_pin.sql` | `house_accounts`, `house_account_ledger`, `vietqr_payment_attempts` (TTL 5p), `shift_handovers` (Dual-PIN). |
 | **Wave 4** | **037** | `037_aggregator_settlement_and_supplier_ap.sql` | `aggregator_settlement_batches`, `supplier_ap_ledger`. |

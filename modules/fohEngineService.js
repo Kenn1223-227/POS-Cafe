@@ -610,7 +610,7 @@ async function recalculateInvoiceTotals(
     // Đọc các dòng món còn hiệu lực
     const monRes = await client.query(
         `SELECT c.MaCTHD, c.SoLuong, c.DonGia,
-                COALESCE(c.GiaGiam, 0) AS GiaGiam,
+                COALESCE((to_jsonb(c)->>'giagiam')::numeric, 0) AS GiaGiam,
                 COALESCE((to_jsonb(c)->>'giamodifiers')::numeric, 0) AS GiaModifiers,
                 COALESCE((to_jsonb(c)->>'chietkhaumon')::numeric, 0) AS ChietKhauMon,
                 COALESCE((to_jsonb(c)->>'lamontang')::boolean, FALSE) AS LaMonTang,

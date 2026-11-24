@@ -214,6 +214,41 @@ export async function saveOfflineOrder(params) {
 }
 
 let isFlushing = false
+const CLOCK_DRIFT_WARN_MS = 10 * 60 * 1000
+
+/**
+ * [Wave 3B — P1-02] So sánh đồng hồ thiết bị với header Date của Server trước khi sync Offline.
+ * Nếu lệch > 10 phút -> trả cảnh báo rõ để thu ngân kiểm tra lại giờ thiết bị (tránh bị từ chối Happy Hour).
+ */
+export async function checkServerClockDrift() {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return { drifted: false, driftMs: 0, warning: null }
+  }
+  try {
+    const resp = await axiosClient.get('/ready', {
+      timeout: 3000,
+      silent: true,
+      transformResponse: [(d) => d],
+    })
+    const serverDateHeader = resp?.headers?.date || resp?.headers?.Date
+    if (!serverDateHeader) return { drifted: false, driftMs: 0, warning: null }
+    const serverMs = Date.parse(serverDateHeader)
+    if (!Number.isFinite(serverMs)) return { drifted: false, driftMs: 0, warning: null }
+    const driftMs = Math.abs(Date.now() - serverMs)
+    const driftMinutes = Math.round((driftMs / 60000) * 10) / 10
+    if (driftMs > CLOCK_DRIFT_WARN_MS) {
+      return {
+        drifted: true,
+        driftMs,
+        driftMinutes,
+        warning: `⏰ Cảnh báo lệch đồng hồ thiết bị ${driftMinutes} phút (> 10 phút) so với máy chủ! Khuyến mãi theo khung giờ (Happy Hour) sẽ không tự động áp dụng khi đồng bộ.`,
+      }
+    }
+    return { drifted: false, driftMs, driftMinutes, warning: null }
+  } catch {
+    return { drifted: false, driftMs: 0, warning: null }
+  }
+}
 
 // Đồng bộ tuần tự FIFO toàn bộ hàng đợi Outbox của đúng Tenant hiện tại lên Server (an toàn Idempotency-Key + Silent Refresh Token)
 export async function flushOutboxQueue({ tenantId = null, includeFailed = false, onUpdate } = {}) {
@@ -228,8 +263,14 @@ export async function flushOutboxQueue({ tenantId = null, includeFailed = false,
   let authExpired = false
   let shiftNotOpen = false
   const shiftWarnings = []
+  let clockDriftWarning = null
 
   try {
+    const clockStatus = await checkServerClockDrift()
+    if (clockStatus.drifted && clockStatus.warning) {
+      clockDriftWarning = clockStatus.warning
+      shiftWarnings.push(clockStatus.warning)
+    }
     const jobs = await getAllOutboxJobs(tenantId)
     const targets = jobs.filter((j) => j.status === 'PENDING' || (includeFailed && j.status === 'FAILED'))
 
@@ -308,5 +349,5 @@ export async function flushOutboxQueue({ tenantId = null, includeFailed = false,
     if (onUpdate) onUpdate(await getAllOutboxJobs(tenantId))
   }
 
-  return { synced, failed, authExpired, shiftNotOpen, shiftWarnings }
+  return { synced, failed, authExpired, shiftNotOpen, shiftWarnings, clockDriftWarning }
 }

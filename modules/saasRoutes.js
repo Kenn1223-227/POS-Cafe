@@ -1283,6 +1283,104 @@ function registerSaasRoutes(
             guiLoi(res, error, 'Lỗi API Nhập thực đơn AI:');
         }
     });
+
+    // [Wave 3B — P1-05] Migration Toolkit 1 phút: Nhập thực đơn từ CSV / Excel xuất từ KiotViet hoặc Sapo
+    app.post('/api/saas/import-menu-sheet', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+        const tenantId = layTenantId(req);
+        const { rows = null, csvText = null } = req.body || {};
+        if (!Array.isArray(rows) && !String(csvText || '').trim()) {
+            return res.status(400).json({ message: 'Vui lòng cung cấp danh sách dòng (rows) hoặc nội dung CSV (csvText)!' });
+        }
+
+        const parsed = parseMenuSheetRows({ rows, csvText });
+        if (parsed.items.length === 0 && parsed.errors.length > 0) {
+            return res.status(400).json({
+                message: 'Không đọc được món hợp lệ nào từ file bảng tính!',
+                imported: 0,
+                skipped: parsed.skipped,
+                errors: parsed.errors,
+                detectedSource: parsed.detectedSource,
+            });
+        }
+
+        try {
+            const summary = await chayGiaoDich(async (client) => {
+                let imported = 0;
+                let skipped = parsed.skipped;
+                const errors = [...parsed.errors];
+                const prefix = tenantId === 'DEFAULT' ? 'IMP' : `${tenantId.slice(-4).toUpperCase()}I`;
+
+                for (let i = 0; i < parsed.items.length; i++) {
+                    const item = parsed.items[i];
+                    try {
+                        const maMon = item.maMon
+                            ? `${tenantId === 'DEFAULT' ? '' : `${tenantId.slice(-4).toUpperCase()}_`}${item.maMon}`.slice(0, 32)
+                            : `${prefix}_${Date.now().toString(36).toUpperCase().slice(-4)}_${i + 1}`;
+
+                        await client.query(
+                            `INSERT INTO SanPham (MaMon, TenMon, NhomMon, GiaGoc, DangKinhDoanh, TamHet, TenantId)
+                             VALUES ($1, $2, $3, $4, TRUE, FALSE, $5)
+                             ON CONFLICT (MaMon) DO UPDATE
+                               SET TenMon = EXCLUDED.TenMon,
+                                   NhomMon = EXCLUDED.NhomMon,
+                                   GiaGoc = EXCLUDED.GiaGoc,
+                                   DangKinhDoanh = TRUE
+                             WHERE SanPham.TenantId = $5`,
+                            [maMon, item.tenMon, item.nhomMon, item.giaBan, tenantId]
+                        );
+
+                        const sizeCode = ['S', 'M', 'L'].includes(item.size) ? item.size : 'M';
+                        await client.query(
+                            `INSERT INTO SanPham_Size (MaMon, KichThuoc, GiaBan)
+                             VALUES ($1, $2, $3)
+                             ON CONFLICT (MaMon, KichThuoc) DO UPDATE
+                               SET GiaBan = EXCLUDED.GiaBan`,
+                            [maMon, sizeCode, item.giaBan]
+                        );
+                        imported += 1;
+                    } catch (rowErr) {
+                        skipped += 1;
+                        errors.push({ row: item.rowIndex, reason: rowErr.message });
+                    }
+                }
+
+                if (ghiAuditLog) {
+                    await ghiAuditLog(client, {
+                        tenantId,
+                        maNV: req.user.maNV,
+                        vaiTro: req.user.vaiTro,
+                        hanhDong: 'MENU_SHEET_IMPORTED',
+                        doiTuong: 'SANPHAM',
+                        maDoiTuong: `${imported}_ITEMS`,
+                        giaTriMoi: { imported, skipped, detectedSource: parsed.detectedSource },
+                        ip: req.ip,
+                    });
+                }
+
+                return { imported, skipped, errors };
+            }, tenantId);
+
+            res.status(201).json({
+                message: `📥 Đã nhập thành công ${summary.imported} món từ ${parsed.detectedSource}!`,
+                detectedSource: parsed.detectedSource,
+                imported: summary.imported,
+                skipped: summary.skipped,
+                errors: summary.errors,
+            });
+        } catch (error) {
+            guiLoi(res, error, 'Lỗi API Import thực đơn KiotViet/Sapo:');
+        }
+    });
+
+    // [Wave 3B — P1-05] Chạy quét Dunning nhắc gia hạn (D-7, D-3, D-1, EXPIRED) & Tenant Health Score
+    app.post('/api/saas/dunning/run', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+        try {
+            const report = await runDunningCheck(pool);
+            res.json(report);
+        } catch (error) {
+            guiLoi(res, error, 'Lỗi API Chạy Dunning Check:');
+        }
+    });
 }
 
 // Tự động kích hoạt gói bản quyền chính thức khi Webhook SePay/PayOS báo nhận đúng số tiền & mã đơn SUB...
@@ -1430,6 +1528,222 @@ async function timTenantWebhookConfig(pool, slugOrId) {
     };
 }
 
+// ==========================================
+// [Wave 3B — P1-05] MIGRATION TOOLKIT PARSER (KIOTVIET & SAPO) + DUNNING CRON
+// ==========================================
+function normalizeHeaderKey(key) {
+    return String(key || '')
+        .replace(/^\uFEFF/, '')
+        .replace(/[đĐ]/g, 'd')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+}
+
+function parseCsvLine(line, delimiter = ',') {
+    const out = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+            if (inQuotes && line[i + 1] === '"') {
+                cur += '"';
+                i++;
+            } else {
+                inQuotes = !inQuotes;
+            }
+        } else if (ch === delimiter && !inQuotes) {
+            out.push(cur.trim());
+            cur = '';
+        } else {
+            cur += ch;
+        }
+    }
+    out.push(cur.trim());
+    return out;
+}
+
+function parseCsvToRows(csvText) {
+    const lines = String(csvText || '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .split('\n')
+        .filter((l) => l.trim().length > 0);
+    if (lines.length < 2) return [];
+    const headerLine = lines[0];
+    const delimiter = (headerLine.match(/;/g) || []).length > (headerLine.match(/,/g) || []).length ? ';' : ',';
+    const headers = parseCsvLine(headerLine, delimiter);
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+        const cols = parseCsvLine(lines[i], delimiter);
+        const obj = {};
+        for (let c = 0; c < headers.length; c++) {
+            obj[headers[c]] = cols[c] ?? '';
+        }
+        rows.push(obj);
+    }
+    return rows;
+}
+
+function parseMoneyNumber(val) {
+    if (typeof val === 'number' && Number.isFinite(val)) return Math.round(val);
+    const cleaned = String(val || '').replace(/[^\d.-]/g, '');
+    const num = Number(cleaned);
+    return Number.isFinite(num) ? Math.round(num) : NaN;
+}
+
+function parseMenuSheetRows({ rows = null, csvText = null } = {}) {
+    const rawRows = Array.isArray(rows) ? rows : parseCsvToRows(csvText);
+    const items = [];
+    const errors = [];
+    let skipped = 0;
+    let detectedSource = 'GENERIC';
+
+    if (rawRows.length === 0) {
+        return { detectedSource, items, skipped: 0, errors: [{ row: 0, reason: 'Không có dữ liệu dòng nào trong bảng tính' }] };
+    }
+
+    const sampleKeys = Object.keys(rawRows[0] || {}).map(normalizeHeaderKey);
+    if (sampleKeys.some((k) => k.includes('ma hang') || k.includes('ten hang') || k.includes('nhom hang 3 cap'))) {
+        detectedSource = 'KIOTVIET';
+    } else if (sampleKeys.some((k) => k.includes('ten san pham') || k.includes('ma sku') || k.includes('ten phien ban') || k.includes('sapo'))) {
+        detectedSource = 'SAPO';
+    }
+
+    const pickField = (row, aliases) => {
+        for (const [k, v] of Object.entries(row || {})) {
+            const nk = normalizeHeaderKey(k);
+            if (aliases.some((a) => nk === a || nk.includes(a))) {
+                if (v !== undefined && v !== null && String(v).trim() !== '') return String(v).trim();
+            }
+        }
+        return '';
+    };
+
+    rawRows.forEach((row, idx) => {
+        const rowIndex = idx + 2;
+        const tenMon = pickField(row, ['ten hang', 'ten mon', 'ten san pham', 'product name', 'name']);
+        const nhomMon = pickField(row, ['nhom hang', 'nhom mon', 'danh muc', 'loai san pham', 'category']) || 'Đồ uống';
+        const giaStr = pickField(row, ['gia ban', 'don gia', 'gia', 'price', 'gia niem yet']);
+        const maMonRaw = pickField(row, ['ma hang', 'ma mon', 'ma sku', 'sku', 'code']);
+        const sizeRaw = pickField(row, ['size', 'kich thuoc', 'ten phien ban', 'dvt', 'don vi tinh']);
+
+        if (!tenMon) {
+            skipped += 1;
+            errors.push({ row: rowIndex, reason: 'Thiếu tên món/tên hàng' });
+            return;
+        }
+        const giaBan = parseMoneyNumber(giaStr);
+        if (!Number.isFinite(giaBan) || giaBan < 0) {
+            skipped += 1;
+            errors.push({ row: rowIndex, reason: `Giá bán không hợp lệ ("${giaStr}") cho món "${tenMon}"` });
+            return;
+        }
+
+        const sizeUpper = sizeRaw.toUpperCase();
+        let size = 'M';
+        if (['S', 'SMALL', 'NHO', 'NHỎ'].includes(sizeUpper)) size = 'S';
+        else if (['L', 'LARGE', 'LON', 'LỚN'].includes(sizeUpper)) size = 'L';
+        else if (['M', 'MEDIUM', 'VUA', 'VỪA'].includes(sizeUpper)) size = 'M';
+
+        const maMonClean = maMonRaw
+            ? maMonRaw.replace(/[^a-zA-Z0-9_-]/g, '').toUpperCase().slice(0, 24)
+            : '';
+
+        items.push({
+            rowIndex,
+            maMon: maMonClean || null,
+            tenMon: tenMon.slice(0, 120),
+            nhomMon: nhomMon.slice(0, 80),
+            giaBan,
+            size,
+        });
+    });
+
+    return { detectedSource, items, skipped, errors };
+}
+
+/**
+ * [Wave 3B — P1-05] Dunning Cron & Tenant Health Score:
+ * - Quét các tenant sắp hết hạn ở mốc D-7, D-3, D-1, EXPIRED
+ * - Ghi nhận idempotent vào public.tenant_dunning_logs (UNIQUE (tenant_id, stage, subscription_ends_at))
+ * - Gắn cờ rủi ro rời bỏ (churnRisk = true) khi số đơn 3 ngày giảm > 50% so với trung bình 3 ngày tuần trước
+ */
+async function runDunningCheck(pool, { nowMs = Date.now() } = {}) {
+    const res = await pool.query('SELECT * FROM public.fn_platform_overview_tenants()');
+    const tenants = res.rows || [];
+    const logged = [];
+    const skippedDuplicate = [];
+    const churnRiskTenants = [];
+
+    for (const t of tenants) {
+        const tenantId = t.tenantid;
+        if (!tenantId || tenantId === 'DEFAULT') continue;
+        const goiCuoc = String(t.goicuoc || '').toUpperCase();
+        const trangThai = String(t.trangthai || '').toUpperCase();
+
+        // Tính Tenant Health Score: cảnh báo khi đơn 3 ngày giảm > 50% so với nhịp trung bình 3 ngày trước đó
+        const orders3d = Number(t.so_don_3_ngay || 0);
+        const ordersPrev7d = Number(t.so_don_7_14_ngay || 0);
+        const baseline3d = (ordersPrev7d / 7) * 3;
+        const dropPct = baseline3d >= 3 ? Math.round(((baseline3d - orders3d) / baseline3d) * 100) : 0;
+        const churnRisk = baseline3d >= 3 && orders3d < baseline3d * 0.5;
+        if (churnRisk) {
+            churnRiskTenants.push({
+                tenantId,
+                tenQuan: t.tenquan,
+                orders3d,
+                baseline3d: Math.round(baseline3d * 10) / 10,
+                dropPct,
+            });
+        }
+
+        if (goiCuoc === 'FREE' && trangThai === 'ACTIVE') continue;
+        const endsAtRaw = t.subscriptionendsat || t.trialendsat;
+        if (!endsAtRaw) continue;
+
+        const endsAtMs = new Date(endsAtRaw).getTime();
+        if (!Number.isFinite(endsAtMs)) continue;
+
+        const daysLeft = Math.ceil((endsAtMs - nowMs) / 86400000);
+        let stage = null;
+        if (daysLeft <= 0) stage = 'EXPIRED';
+        else if (daysLeft <= 1) stage = 'D-1';
+        else if (daysLeft <= 3) stage = 'D-3';
+        else if (daysLeft <= 7) stage = 'D-7';
+
+        if (!stage) continue;
+
+        const insertedId = await pool.withTenant(tenantId, async (client) => {
+            const ins = await client.query(
+                `INSERT INTO public.tenant_dunning_logs (tenant_id, stage, subscription_ends_at)
+                 VALUES ($1, $2, $3::timestamptz)
+                 ON CONFLICT (tenant_id, stage, subscription_ends_at) DO NOTHING
+                 RETURNING id`,
+                [tenantId, stage, new Date(endsAtMs).toISOString()]
+            );
+            return ins.rows[0]?.id || null;
+        });
+
+        if (insertedId) {
+            logged.push({ id: Number(insertedId), tenantId, stage, daysLeft, subscriptionEndsAt: new Date(endsAtMs).toISOString() });
+        } else {
+            skippedDuplicate.push({ tenantId, stage, daysLeft });
+        }
+    }
+
+    return {
+        checkedTenants: tenants.length,
+        logged,
+        skippedDuplicate,
+        churnRiskTenants,
+        checkedAt: new Date(nowMs).toISOString(),
+    };
+}
+
 module.exports = {
     TRIAL_DAYS,
     BILLING_DISCOUNT,
@@ -1443,5 +1757,7 @@ module.exports = {
     maHoaKhoaWebhook,
     giaiMaKhoaWebhook,
     timTenantWebhookConfig,
+    parseMenuSheetRows,
+    runDunningCheck,
     isMultiTenantReady: () => multiTenantSanSang,
 };

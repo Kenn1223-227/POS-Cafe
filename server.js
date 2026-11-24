@@ -82,6 +82,13 @@ const {
 } = require('./modules/paymentShiftPhase3Engine');
 const { registerPaymentShiftPhase3Routes } = require('./modules/paymentShiftPhase3Routes');
 const {
+    createKioskQrPayload,
+    verifyKioskQrToken,
+    verifyLocationOrIp,
+    isShiftTimeOverlapping,
+    calculateLateMinutes,
+} = require('./modules/hrAntiFraudService');
+const {
     WASTAGE_TAXONOMY,
     VALID_WASTAGE_CODES,
     lam4,
@@ -871,9 +878,9 @@ const mapMonPhaChe = (r) => ({
 async function layMonTheoMa(db, dsMaCTHD) {
     if (!Array.isArray(dsMaCTHD) || dsMaCTHD.length === 0) return [];
     const r = await db.query(
-        `${SQL_MON_PHA_CHE} WHERE cthd.MaCTHD = ANY($1::varchar[])
+        `${SQL_MON_PHA_CHE} WHERE cthd.MaCTHD::text = ANY($1::text[])
          ORDER BY COALESCE((to_jsonb(cthd)->>'mucdouutien')::int, 0) DESC, cthd.ThoiGianGoi ASC, cthd.MaCTHD ASC`,
-        [dsMaCTHD]
+        [dsMaCTHD.map(String)]
     );
     return r.rows.map(mapMonPhaChe);
 }
@@ -896,7 +903,7 @@ async function layMonTheoTrangThai(db, dsTrangThai, tenantId = 'DEFAULT', { incl
 // ---- Hóa đơn chi tiết (dùng cho xem bàn, thanh toán, in bill — Single Source of Truth) ----------------
 async function layHoaDonChiTiet(db, maHoaDon) {
     const hdRes = await db.query(
-        `SELECT hd.MaHoaDon, hd.MaKH, kh.TenKH, kh.SoDienThoai, kh.DiemTichLuy,
+        `SELECT hd.MaHoaDon, hd.MaKH, COALESCE(to_jsonb(kh)->>'tenkh', to_jsonb(kh)->>'hoten') AS TenKH, kh.SoDienThoai, kh.DiemTichLuy,
                 hd.TrangThaiTT, hd.PhuongThucTT, hd.TongTienThanhToan, hd.ThoiGianTao, hd.ThoiGianThanhToan,
                 COALESCE(hd.SoLanIn, 0) AS SoLanIn, COALESCE(hd.DaInTamTinh, FALSE) AS DaInTamTinh,
                 hd.SoThuTuNgay,
@@ -941,7 +948,7 @@ async function layHoaDonChiTiet(db, maHoaDon) {
         `SELECT c.MaCTHD, c.MaMon,
                 COALESCE(to_jsonb(c)->>'tenmontuychinh', c.TenMonSnapshot, sp.TenMon) AS TenMon,
                 c.KichThuoc, c.SoLuong, c.DonGia,
-                COALESCE(c.GiaGiam, 0) AS GiaGiam, COALESCE(c.GiaVonSnapshot, 0) AS GiaVonSnapshot,
+                COALESCE((to_jsonb(c)->>'giagiam')::numeric, 0) AS GiaGiam, COALESCE(c.GiaVonSnapshot, 0) AS GiaVonSnapshot,
                 COALESCE((to_jsonb(c)->>'giamodifiers')::numeric, 0) AS GiaModifiers,
                 COALESCE((to_jsonb(c)->'modifierssnapshot')::jsonb, '[]'::jsonb) AS ModifiersSnapshot,
                 to_jsonb(c)->>'combogroupuid' AS ComboGroupUid,
@@ -2545,12 +2552,16 @@ async function taoOrderTrongGiaoDich(
         clientOrderUid = null,
         laOfflineSync = false,
         offlineCreatedAt = null,
+        choThanhToanTruoc = false,
+        phuongThucDuKien = null,
         danhSachMon = [],
         combos = [],
         allowNegativeStock = ALLOW_NEGATIVE_STOCK,
         ip = null,
     }
 ) {
+    const laAwaitingPayment =
+        Boolean(choThanhToanTruoc) || String(phuongThucDuKien || '').trim().toUpperCase() === 'VIETQR_PREPAID';
     const soldOutWarnings = [];
     const countdownUpdates = [];
     const openItemAuditRows = [];
@@ -3101,7 +3112,11 @@ async function taoOrderTrongGiaoDich(
             }
         }
 
-        const fireStatus = String(mon.fireStatus || 'FIRED').toUpperCase() === 'HELD' ? 'HELD' : 'FIRED';
+        const fireStatus = laAwaitingPayment
+            ? 'AWAITING_PAYMENT'
+            : String(mon.fireStatus || 'FIRED').toUpperCase() === 'HELD'
+            ? 'HELD'
+            : 'FIRED';
         const courseNo = Math.max(1, Math.floor(Number(mon.courseNo || 1)));
         const laMonTang = Boolean(mon.laMonTang);
         const chietKhauMon = Math.max(0, Number(mon.chietKhauMon || 0));
@@ -3273,6 +3288,12 @@ async function taoOrderTrongGiaoDich(
         }
         maHoaDon = hd.rows[0].mahoadon;
         laHoaDonMoi = true;
+        if (laAwaitingPayment) {
+            await client.query(
+                `UPDATE HoaDon SET lifecycle_status = 'AWAITING_PAYMENT' WHERE MaHoaDon = $1`,
+                [maHoaDon]
+            );
+        }
         if (maBan) {
             await client.query('INSERT INTO HoaDon_Ban (MaHoaDon, MaBan) VALUES ($1, $2)', [maHoaDon, maBan]);
             await client.query('UPDATE Ban SET TrangThai = 2 WHERE MaBan = $1', [maBan]);
@@ -3281,7 +3302,8 @@ async function taoOrderTrongGiaoDich(
     if (maKH) await client.query('UPDATE HoaDon SET MaKH = $1 WHERE MaHoaDon = $2', [maKH, maHoaDon]);
 
     // [Phân hệ 2 - Countdown 86 Stock] Trừ nguyên tử số lượng giới hạn trong ngày (chống 2 thu ngân bán vượt suất!)
-    if (monCountdownMap.size > 0) {
+    // [Wave 3B — P1-02] Đơn Counter VietQR AWAITING_PAYMENT chưa trừ suất & chưa trừ kho cho đến khi thanh toán đủ 100%
+    if (monCountdownMap.size > 0 && !laAwaitingPayment) {
         const qtyByCountdownMon = new Map();
         for (const d of dongMon) {
             if (monCountdownMap.has(d.maMon)) {
@@ -3330,10 +3352,11 @@ async function taoOrderTrongGiaoDich(
     }
 
     // [Phân hệ 4 - 100/100] Kiểm tra & trừ kho Single-Source TonKhoChiNhanh (ORDER BY MaNL ASC FOR UPDATE -> 0% Deadlock, FEFO & Historical Offline WAC)
+    // [Wave 3B — P1-02] Đơn AWAITING_PAYMENT chưa trừ kho ở bước tạo đơn (sẽ trừ nguyên tử khi chốt PAID)
     const canhBaoTonThap = [];
     const orderBranchId = normalizeInventoryBranch(tenantId, branchId);
     const branchWacUsedMap = new Map();
-    if (tieuHao.size > 0) {
+    if (tieuHao.size > 0 && !laAwaitingPayment) {
         const dsNL = [...tieuHao.keys()];
         const { branchId: lockedBranchId, stockMap } = await lockBranchStockOrdered(client, tenantId, orderBranchId, dsNL);
 
@@ -3584,6 +3607,21 @@ async function taoOrderTrongGiaoDich(
     };
 }
 
+// [Wave 3B — P1-02] Kiểm tra độ lệch đồng hồ thiết bị Offline (> 10 phút) chống gian lận Happy Hour
+const OFFLINE_CLOCK_DRIFT_LIMIT_MS = 10 * 60 * 1000;
+function detectOfflineClockDrift(offlineCreatedAt, nowMs = Date.now()) {
+    if (!offlineCreatedAt) return { tampered: false, driftMs: 0, offlineCreatedAtMs: null };
+    const offlineMs = Date.parse(String(offlineCreatedAt));
+    if (!Number.isFinite(offlineMs)) return { tampered: false, driftMs: 0, offlineCreatedAtMs: null };
+    const driftMs = Math.abs(nowMs - offlineMs);
+    return {
+        tampered: driftMs > OFFLINE_CLOCK_DRIFT_LIMIT_MS,
+        driftMs,
+        driftMinutes: Math.round((driftMs / 60000) * 10) / 10,
+        offlineCreatedAtMs: offlineMs,
+    };
+}
+
 // [v3 - Phân hệ 1 100/100] Tạo order / gọi thêm món (hỗ trợ Modifiers, Combo, Course Firing, Takeaway, Optimistic Locking)
 async function handleCreateOrAppendOrder(req, res) {
     const {
@@ -3602,6 +3640,8 @@ async function handleCreateOrAppendOrder(req, res) {
         phiPhucVuPhanTram = null,
         expectedVersion = null,
         branchId = null,
+        choThanhToanTruoc = false,
+        phuongThucDuKien = null,
         danhSachMon = [],
         combos = [],
     } = req.body || {};
@@ -3703,6 +3743,8 @@ async function handleCreateOrAppendOrder(req, res) {
                 clientOrderUid,
                 laOfflineSync,
                 offlineCreatedAt: req.body?.offlineCreatedAt || null,
+                choThanhToanTruoc,
+                phuongThucDuKien,
                 danhSachMon,
                 combos,
                 ip: req.ip,
@@ -3732,6 +3774,37 @@ async function handleCreateOrAppendOrder(req, res) {
             }
 
             if (laOfflineSync) {
+                const clockCheck = detectOfflineClockDrift(req.body?.offlineCreatedAt);
+                if (clockCheck.tampered) {
+                    await ghiAuditLog(client, {
+                        tenantId: tId,
+                        maNV,
+                        vaiTro: req.user.vaiTro,
+                        hanhDong: 'OFFLINE_CLOCK_TAMPER_SUSPECTED',
+                        doiTuong: 'HOADON',
+                        maDoiTuong: maHoaDon,
+                        giaTriMoi: {
+                            offlineClientId,
+                            offlineCreatedAt: req.body?.offlineCreatedAt,
+                            serverNow: new Date().toISOString(),
+                            driftMs: clockCheck.driftMs,
+                            driftMinutes: clockCheck.driftMinutes,
+                        },
+                        lyDo: `Thiết bị đồng bộ Offline lệch đồng hồ ${clockCheck.driftMinutes} phút (> 10 phút) — từ chối tự động Happy Hour`,
+                        ip: req.ip,
+                        batBuoc: true,
+                    });
+                    if (typeof dispatchFraudAlertFromAudit === 'function') {
+                        void dispatchFraudAlertFromAudit(pool, {
+                            tenantId: tId,
+                            hanhDong: 'OFFLINE_CLOCK_TAMPER_SUSPECTED',
+                            maNV,
+                            maDoiTuong: maHoaDon,
+                            giaTriMoi: { driftMinutes: clockCheck.driftMinutes, offlineCreatedAt: req.body?.offlineCreatedAt },
+                            lyDo: `⏰ Nghi vấn chỉnh đồng hồ thiết bị Offline (lệch ${clockCheck.driftMinutes} phút) trên HĐ #${maHoaDon}!`,
+                        }).catch(() => {});
+                    }
+                }
                 await ghiAuditLog(client, {
                     tenantId: tId,
                     maNV,
@@ -3951,6 +4024,7 @@ app.post('/api/order/quick-checkout', kiemTraToken, choPhepVaiTro(1, 4), kiemTra
     try {
         const ketQua = await chayGiaoDich(async (client) => {
             const laOfflineSync = req.get('X-Offline-Sync') === '1';
+            const clockCheckQc = laOfflineSync ? detectOfflineClockDrift(req.body?.offlineCreatedAt) : { tampered: false };
             const caInfo = await layCaChoGiaoDichOffline(client, {
                 tenantId: tId,
                 maCaGoc: req.body?.maCaThuNganGoc || null,
@@ -3978,6 +4052,8 @@ app.post('/api/order/quick-checkout', kiemTraToken, choPhepVaiTro(1, 4), kiemTra
                 clientOrderUid,
                 laOfflineSync,
                 offlineCreatedAt: req.body?.offlineCreatedAt || null,
+                choThanhToanTruoc: false,
+                phuongThucDuKien: null,
                 danhSachMon,
                 combos,
                 ip: req.ip,
@@ -4006,7 +4082,7 @@ app.post('/api/order/quick-checkout', kiemTraToken, choPhepVaiTro(1, 4), kiemTra
                 maKH: maKH || null,
                 maKhuyenMai,
                 diemSuDung,
-                tuDongHappyHour: Boolean(tuDongHappyHour),
+                tuDongHappyHour: Boolean(tuDongHappyHour) && !clockCheckQc.tampered,
                 autoFillSingleMethod: {
                     phuongThucTT,
                     tienKhachDua: tienKhachDua !== undefined && tienKhachDua !== null ? Number(tienKhachDua) : null,
@@ -4026,6 +4102,37 @@ app.post('/api/order/quick-checkout', kiemTraToken, choPhepVaiTro(1, 4), kiemTra
             const uuDai = ttQc.uuDai || {};
 
             if (laOfflineSync) {
+                const clockCheck = detectOfflineClockDrift(req.body?.offlineCreatedAt);
+                if (clockCheck.tampered) {
+                    await ghiAuditLog(client, {
+                        tenantId: tId,
+                        maNV,
+                        vaiTro: req.user.vaiTro,
+                        hanhDong: 'OFFLINE_CLOCK_TAMPER_SUSPECTED',
+                        doiTuong: 'HOADON',
+                        maDoiTuong: maHoaDon,
+                        giaTriMoi: {
+                            offlineClientId,
+                            offlineCreatedAt: req.body?.offlineCreatedAt,
+                            serverNow: new Date().toISOString(),
+                            driftMs: clockCheck.driftMs,
+                            driftMinutes: clockCheck.driftMinutes,
+                        },
+                        lyDo: `Thiết bị đồng bộ Offline lệch đồng hồ ${clockCheck.driftMinutes} phút (> 10 phút) — từ chối tự động Happy Hour`,
+                        ip: req.ip,
+                        batBuoc: true,
+                    });
+                    if (typeof dispatchFraudAlertFromAudit === 'function') {
+                        void dispatchFraudAlertFromAudit(pool, {
+                            tenantId: tId,
+                            hanhDong: 'OFFLINE_CLOCK_TAMPER_SUSPECTED',
+                            maNV,
+                            maDoiTuong: maHoaDon,
+                            giaTriMoi: { driftMinutes: clockCheck.driftMinutes, offlineCreatedAt: req.body?.offlineCreatedAt },
+                            lyDo: `⏰ Nghi vấn chỉnh đồng hồ thiết bị Offline (lệch ${clockCheck.driftMinutes} phút) trên HĐ #${maHoaDon}!`,
+                        }).catch(() => {});
+                    }
+                }
                 await ghiAuditLog(client, {
                     tenantId: tId,
                     maNV,
@@ -6900,6 +7007,7 @@ async function ghiNhanThanhToanTrongGiaoDich(
     const daHoanTat = tongSauThu + 0.01 >= tongTien;
     let diemCong = 0;
     let banDaTrong = [];
+    let kdsEmitPlan = null;
 
     if (daHoanTat) {
         const tatCaThanhToan = [
@@ -6912,7 +7020,7 @@ async function ghiNhanThanhToanTrongGiaoDich(
         try {
             await client.query(
                 `UPDATE HoaDon
-                    SET TrangThaiTT = 1, TongTienThanhToan = $2, ThoiGianThanhToan = CURRENT_TIMESTAMP,
+                    SET TrangThaiTT = 1, lifecycle_status = 'PAID', TongTienThanhToan = $2, ThoiGianThanhToan = CURRENT_TIMESTAMP,
                         PhuongThucTT = $3, MaCaThuNgan = COALESCE($4, MaCaThuNgan), MaKH = COALESCE($5, MaKH),
                         TienPhiPhucVu = $6, TienThueVAT = $7, TienLamTron = $8
                   WHERE MaHoaDon = $1`,
@@ -6937,6 +7045,107 @@ async function ghiNhanThanhToanTrongGiaoDich(
                   WHERE MaHoaDon = $1`,
                 [maHoaDon, tongTien, ptttChinh, ca ? ca.macathungan : null, maKH || null]
             );
+        }
+
+        // [Wave 3B — P1-02] Nếu hóa đơn có các dòng AWAITING_PAYMENT (Counter VietQR trả trước),
+        // thực hiện trừ kho BOM + chuyển FireStatus='FIRED' + tạo sự kiện KDS ORDER_NEW nguyên tử trong cùng transaction!
+        const awaitingRowsRes = await client.query(
+            `SELECT MaCTHD, MaMon, SoLuong, (to_jsonb(ChiTietHoaDon)->'bomsnapshotjson') AS bomsnap
+               FROM ChiTietHoaDon
+              WHERE MaHoaDon = $1
+                AND FireStatus = 'AWAITING_PAYMENT'
+                AND TrangThaiPhaChe <> 'DaHuy'
+              ORDER BY MaCTHD ASC
+              FOR UPDATE`,
+            [maHoaDon]
+        );
+        if (awaitingRowsRes.rows.length > 0) {
+            const awaitingIds = awaitingRowsRes.rows.map((r) => r.macthd);
+            const deferredTieuHao = new Map();
+            for (const r of awaitingRowsRes.rows) {
+                const snap = r.bomsnap && typeof r.bomsnap === 'object' ? r.bomsnap : null;
+                if (snap) {
+                    for (const [mNl, qVal] of Object.entries(snap)) {
+                        const q = Number(qVal || 0);
+                        if (q > 0) {
+                            deferredTieuHao.set(mNl, lam3((deferredTieuHao.get(mNl) || 0) + q));
+                        }
+                    }
+                }
+            }
+
+            const settleBranchId = normalizeInventoryBranch(hdTenantId, branchId || ca?.branchid || 'DEFAULT');
+            if (deferredTieuHao.size > 0) {
+                const dsNL = [...deferredTieuHao.keys()];
+                const { branchId: lockedBranchId, stockMap } = await lockBranchStockOrdered(client, hdTenantId, settleBranchId, dsNL);
+                const phieu = await client.query(
+                    `INSERT INTO PhieuGiaoDichKho (MaNV, LoaiGD, GhiChu, TenantId, BranchId, MaCaThuNgan, NgayChungTu, TrangThaiDuyet)
+                     VALUES ($1, 3, $2, $3, $4, $5, $6::date, 'POSTED') RETURNING MaGiaoDich`,
+                    [
+                        maNV || 'WEBHOOK',
+                        `Tiêu hao bán hàng (VietQR PAID) - HĐ ${maHoaDon}`,
+                        hdTenantId,
+                        lockedBranchId,
+                        ca ? String(ca.macathungan) : null,
+                        todayDateVN(),
+                    ]
+                );
+                const maGiaoDich = phieu.rows[0].magiaodich;
+
+                for (const [mNl, sl] of [...deferredTieuHao].sort((a, b) => a[0].localeCompare(b[0]))) {
+                    const st = stockMap.get(mNl);
+                    if (!st) continue;
+                    const soLuong = lam3(sl);
+                    await consumeFefoBatches(client, {
+                        tenantId: hdTenantId,
+                        branchId: lockedBranchId,
+                        maNL: mNl,
+                        qty: soLuong,
+                    });
+                    const tonTruoc = st.soLuongTon;
+                    const tonSau = lam3(tonTruoc - soLuong);
+                    await insertLedgerLine(client, {
+                        maGiaoDich,
+                        maNL: mNl,
+                        soLuong,
+                        donGiaNhap: st.giaVonDonVi,
+                        tinhTrang: 'Tiêu hao bán hàng (VietQR PAID)',
+                        tonTruoc,
+                        tonSau,
+                        giaVonTruoc: st.giaVonDonVi,
+                        giaVonSau: st.giaVonDonVi,
+                    });
+                    await updateBranchStockRow(client, {
+                        tenantId: hdTenantId,
+                        branchId: lockedBranchId,
+                        maNL: mNl,
+                        nextQty: tonSau,
+                        nextWac: st.giaVonDonVi,
+                    });
+                }
+            }
+
+            await client.query(
+                `UPDATE ChiTietHoaDon
+                    SET FireStatus = 'FIRED', FiredAt = CURRENT_TIMESTAMP
+                  WHERE MaCTHD::text = ANY($1::text[])`,
+                [awaitingIds.map(String)]
+            );
+
+            const monMoiFired = await layMonTheoMa(client, awaitingIds);
+            if (monMoiFired.length > 0) {
+                kdsEmitPlan = await recordAndEmitOrderNewByStation(client, io, {
+                    tenantId: hdTenantId,
+                    branchId: normalizeBranchId(branchId || ca?.branchid || 'DEFAULT'),
+                    maHoaDon,
+                    maBan: chiTietTruoc.ban?.[0]?.maBan || null,
+                    tenBan: chiTietTruoc.ban?.[0]?.tenBan || null,
+                    mangDi: !(chiTietTruoc.ban && chiTietTruoc.ban.length > 0),
+                    themMon: false,
+                    dotGoi: 1,
+                    monMoiFired,
+                });
+            }
         }
 
         // Chốt toàn bộ các phần chia tiền (nếu còn) sang PAID khi hóa đơn hoàn tất
@@ -7025,6 +7234,7 @@ async function ghiNhanThanhToanTrongGiaoDich(
         tienChuyenThua,
         diemCong,
         banDaTrong,
+        kdsEmitPlan,
         hoaDon: await layHoaDonChiTiet(client, maHoaDon),
     };
 }
@@ -7132,6 +7342,7 @@ app.post('/api/order/thanhtoan', kiemTraToken, choPhepVaiTro(1, 4), kiemTraHanSu
                 voucherApprovedByManager = true;
             }
 
+            const clockCheckTT = laOfflineSync ? detectOfflineClockDrift(req.body?.offlineCreatedAt) : { tampered: false };
             const resTT = await ghiNhanThanhToanTrongGiaoDich(client, {
                 maHoaDon,
                 expectedTenantId: tenantId,
@@ -7144,7 +7355,7 @@ app.post('/api/order/thanhtoan', kiemTraToken, choPhepVaiTro(1, 4), kiemTraHanSu
                 maKH,
                 maKhuyenMai,
                 diemSuDung,
-                tuDongHappyHour: Boolean(tuDongHappyHour),
+                tuDongHappyHour: Boolean(tuDongHappyHour) && !clockCheckTT.tampered,
                 autoFillSingleMethod,
                 cacKhoanTT,
                 choPhepThuMotPhan: Boolean(choPhepThuMotPhan),
@@ -7155,6 +7366,36 @@ app.post('/api/order/thanhtoan', kiemTraToken, choPhepVaiTro(1, 4), kiemTraHanSu
                 terminalId: terminalId || ca.terminalid,
                 ip: req.ip,
             });
+
+            if (laOfflineSync && clockCheckTT.tampered) {
+                await ghiAuditLog(client, {
+                    tenantId,
+                    maNV: req.user.maNV,
+                    vaiTro: req.user.vaiTro,
+                    hanhDong: 'OFFLINE_CLOCK_TAMPER_SUSPECTED',
+                    doiTuong: 'HOADON',
+                    maDoiTuong: maHoaDon,
+                    giaTriMoi: {
+                        offlineCreatedAt: req.body?.offlineCreatedAt,
+                        serverNow: new Date().toISOString(),
+                        driftMs: clockCheckTT.driftMs,
+                        driftMinutes: clockCheckTT.driftMinutes,
+                    },
+                    lyDo: `Thanh toán Offline lệch đồng hồ ${clockCheckTT.driftMinutes} phút (> 10 phút) — từ chối tự động Happy Hour`,
+                    ip: req.ip,
+                    batBuoc: true,
+                });
+                if (typeof dispatchFraudAlertFromAudit === 'function') {
+                    void dispatchFraudAlertFromAudit(pool, {
+                        tenantId,
+                        hanhDong: 'OFFLINE_CLOCK_TAMPER_SUSPECTED',
+                        maNV: req.user.maNV,
+                        maDoiTuong: maHoaDon,
+                        giaTriMoi: { driftMinutes: clockCheckTT.driftMinutes, offlineCreatedAt: req.body?.offlineCreatedAt },
+                        lyDo: `⏰ Nghi vấn chỉnh đồng hồ thiết bị Offline khi thanh toán (lệch ${clockCheckTT.driftMinutes} phút) trên HĐ #${maHoaDon}!`,
+                    }).catch(() => {});
+                }
+            }
 
             if (laOfflineSync) {
                 const offlineClientId = req.body?.offlineClientId ? String(req.body.offlineClientId).trim().slice(0, 64) : null;
@@ -7202,6 +7443,9 @@ app.post('/api/order/thanhtoan', kiemTraToken, choPhepVaiTro(1, 4), kiemTraHanSu
                 io.to(roomTen(tId, 'thungan')).to(roomTen(tId, 'phucvu')).emit('BAN_THAY_DOI', { maBan, trangThai: 3 });
             }
             if (ketQua.daHoanTat) {
+                if (ketQua.kdsEmitPlan && typeof ketQua.kdsEmitPlan.emit === 'function') {
+                    ketQua.kdsEmitPlan.emit();
+                }
                 io.to(roomTen(tId, 'thungan')).emit('HOADON_DA_TT', { maHoaDon });
                 void kiemTraCanhBaoTanSuatGianLan(pool, {
                     tenantId: tId,
@@ -7825,6 +8069,9 @@ async function xuLyBienDongSoDuVietQR({
                 io.to(roomTen(tId, 'thungan')).to(roomTen(tId, 'phucvu')).emit('BAN_THAY_DOI', { maBan, trangThai: 3 });
             }
             if (ketQua.daHoanTat) {
+                if (ketQua.kdsEmitPlan && typeof ketQua.kdsEmitPlan.emit === 'function') {
+                    ketQua.kdsEmitPlan.emit();
+                }
                 io.to(roomTen(tId, 'thungan')).emit('HOADON_DA_TT', { maHoaDon: ketQua.maHoaDon });
             }
             const payloadEmit = {
@@ -9939,24 +10186,121 @@ app.post('/api/nhansu/phanca', kiemTraToken, choPhepVaiTro(1), async (req, res) 
     if (!maNV || !maCa || !ngayLam) return res.status(400).json({ message: 'Vui lòng cung cấp đủ maNV, maCa và ngayLam!' });
 
     try {
-        const maPhanCa = await pool.withTenant(tenantId, async (client) => {
+        const resultObj = await pool.withTenant(tenantId, async (client) => {
             const [ownNV, ownCa] = await Promise.all([
                 client.query("SELECT 1 FROM NhanVien WHERE MaNV = $1 AND COALESCE(TenantId, 'DEFAULT') = $2", [maNV, tenantId]),
-                client.query("SELECT 1 FROM CaLamViec WHERE MaCa = $1 AND COALESCE(TenantId, 'DEFAULT') = $2", [maCa, tenantId]),
+                client.query("SELECT MaCa, TenCa, GioBatDau, GioKetThuc FROM CaLamViec WHERE MaCa = $1 AND COALESCE(TenantId, 'DEFAULT') = $2", [maCa, tenantId]),
             ]);
-            if (ownNV.rows.length === 0 || ownCa.rows.length === 0) return null;
+            if (ownNV.rows.length === 0 || ownCa.rows.length === 0) return { notFound: true };
+
+            const targetCa = ownCa.rows[0];
+            // [Wave 3B — P1-04] Kiểm tra trùng khung giờ ca trong cùng ngày trước khi lưu
+            const existingShifts = await client.query(
+                `SELECT pc.MaPhanCa, pc.MaCa, clv.TenCa, clv.GioBatDau, clv.GioKetThuc
+                   FROM PhanCa pc
+                   JOIN CaLamViec clv ON pc.MaCa = clv.MaCa
+                  WHERE pc.MaNV = $1
+                    AND pc.NgayLam = $2::date
+                    AND COALESCE(pc.TenantId, 'DEFAULT') = $3`,
+                [maNV, ngayLam, tenantId]
+            );
+            for (const row of existingShifts.rows) {
+                if (isShiftTimeOverlapping(targetCa.giobatdau, targetCa.gioketthuc, row.giobatdau, row.gioketthuc)) {
+                    return {
+                        overlap: {
+                            maPhanCa: row.maphanca,
+                            maCa: row.maca,
+                            tenCa: row.tenca,
+                            gioBatDau: row.giobatdau,
+                            gioKetThuc: row.gioketthuc,
+                        },
+                    };
+                }
+            }
+
             const result = await client.query(
                 'INSERT INTO PhanCa (MaNV, MaCa, NgayLam, TrangThai, TenantId) VALUES ($1, $2, $3, 1, $4) RETURNING MaPhanCa',
                 [maNV, maCa, ngayLam, tenantId]
             );
-            return result.rows[0].maphanca;
+            return { maPhanCa: result.rows[0].maphanca };
         });
-        if (!maPhanCa) {
+        if (resultObj.notFound) {
             return res.status(404).json({ message: 'Nhân viên hoặc ca làm việc không thuộc quán hiện tại!' });
         }
-        res.json({ message: 'Xếp lịch phân ca thành công!', maPhanCa });
+        if (resultObj.overlap) {
+            return res.status(409).json({
+                code: 'SHIFT_OVERLAP_CONFLICT',
+                maLoi: 'SHIFT_OVERLAP_CONFLICT',
+                message: `Nhân viên đã có ca "${resultObj.overlap.tenCa}" (${resultObj.overlap.gioBatDau} - ${resultObj.overlap.gioKetThuc}) trùng khung giờ trong ngày ${ngayLam}!`,
+                conflictShift: resultObj.overlap,
+            });
+        }
+        res.json({ message: 'Xếp lịch phân ca thành công!', maPhanCa: resultObj.maPhanCa });
     } catch (error) {
         guiLoi(res, error, 'Lỗi API Phân ca:');
+    }
+});
+
+// [Wave 3B — P1-04] Lấy hoặc tự sinh bí mật HMAC Kiosk QR cho chi nhánh
+async function resolveBranchKioskConfig(client, tenantId, requestedBranchId) {
+    const branchId = normalizeBranchId(requestedBranchId || 'DEFAULT');
+    let res = await client.query(
+        `SELECT branchid, machinhanh, kiosk_hmac_secret, geo_lat, geo_lng, geofence_radius_m, allowed_public_ips
+           FROM public.chinhanh
+          WHERE tenantid = $1 AND (branchid = $2 OR machinhanh = $2)
+          LIMIT 1`,
+        [tenantId, branchId]
+    );
+    if (res.rows.length === 0) {
+        res = await client.query(
+            `SELECT branchid, machinhanh, kiosk_hmac_secret, geo_lat, geo_lng, geofence_radius_m, allowed_public_ips
+               FROM public.chinhanh
+              WHERE tenantid = $1
+              ORDER BY CASE WHEN trangthai = 'ACTIVE' THEN 0 ELSE 1 END, branchid ASC
+              LIMIT 1`,
+            [tenantId]
+        );
+    }
+    const row = res.rows[0] || null;
+    const resolvedBranchId = row ? row.branchid || row.machinhanh : branchId;
+    const fallbackSecret = crypto
+        .createHmac('sha256', String(process.env.JWT_SECRET || 'cafe-pos-kiosk-secret'))
+        .update(`kiosk:${tenantId}:${resolvedBranchId}`)
+        .digest('hex');
+    return {
+        branchRow: row,
+        branchId: resolvedBranchId,
+        kioskSecret: row?.kiosk_hmac_secret || null,
+        effectiveSecret: row?.kiosk_hmac_secret || fallbackSecret,
+        geoLat: row?.geo_lat ?? null,
+        geoLng: row?.geo_lng ?? null,
+        geofenceRadiusM: Number(row?.geofence_radius_m || 50),
+        allowedPublicIps: Array.isArray(row?.allowed_public_ips) ? row.allowed_public_ips : [],
+    };
+}
+
+// [Wave 3B — P1-04] Endpoint sinh mã QR chấm công động đổi mỗi 30 giây cho màn hình Kiosk quầy
+app.get('/api/hr/kiosk-qr-token', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {
+    const tenantId = layTenantId(req);
+    const reqBranchId = req.query.branchId || req.user.maChiNhanh || 'DEFAULT';
+    try {
+        const payload = await pool.withTenant(tenantId, async (client) => {
+            const cfg = await resolveBranchKioskConfig(client, tenantId, reqBranchId);
+            let secret = cfg.kioskSecret;
+            if (!secret && cfg.branchRow) {
+                secret = crypto.randomBytes(24).toString('hex');
+                await client.query(
+                    `UPDATE public.chinhanh
+                        SET kiosk_hmac_secret = $1
+                      WHERE tenantid = $2 AND branchid = $3`,
+                    [secret, tenantId, cfg.branchId]
+                );
+            }
+            return createKioskQrPayload(tenantId, cfg.branchId, secret || cfg.effectiveSecret, Date.now());
+        });
+        res.json(payload);
+    } catch (error) {
+        guiLoi(res, error, 'Lỗi API Kiosk QR Token:');
     }
 });
 
@@ -9989,19 +10333,94 @@ async function ganCoMissedClockOutChoTenant(client, tenantId) {
 
 app.post('/api/nhansu/chamcong', kiemTraToken, async (req, res) => {
     if (!req.body) return res.status(400).json({ message: 'Dữ liệu gửi lên không được để trống!' });
-    const { maPhanCa } = req.body;
+    const { maPhanCa, kioskQrToken, checkinLat, checkinLng, branchId } = req.body;
     const maNV = req.user.maNV;
     const tenantId = layTenantId(req);
     if (!maPhanCa) return res.status(400).json({ message: 'Thiếu mã phân ca (maPhanCa)!' });
 
     try {
         const todayVN = todayDateVN();
-        const chamCong = await pool.withTenant(tenantId, async (client) => {
+        const clientIp = req.headers['x-forwarded-for'] || req.ip || '';
+        const outcome = await pool.withTenant(tenantId, async (client) => {
             await ganCoMissedClockOutChoTenant(client, tenantId);
+
+            // [Wave 3B — P1-04] Xác thực chấm công 3 lớp (Kiosk QR 30s + GPS Geofencing / IP tĩnh)
+            const kioskCfg = await resolveBranchKioskConfig(client, tenantId, branchId || req.user.maChiNhanh);
+            const requireQr = Boolean(kioskCfg.kioskSecret) || (kioskQrToken !== undefined && kioskQrToken !== null && String(kioskQrToken).trim() !== '');
+            let verifyMethod = 'MANUAL';
+
+            if (requireQr) {
+                const qrCheck = verifyKioskQrToken(kioskQrToken, tenantId, kioskCfg.branchId, kioskCfg.effectiveSecret, Date.now());
+                if (!qrCheck.valid) {
+                    await ghiAuditLog(client, {
+                        tenantId,
+                        maNV,
+                        vaiTro: req.user.vaiTro,
+                        hanhDong: 'HR_CHECKIN_REJECTED_QR',
+                        doiTuong: 'CHAMCONG',
+                        maDoiTuong: String(maPhanCa),
+                        giaTriMoi: { branchId: kioskCfg.branchId, reason: qrCheck.reason },
+                        lyDo: `Chấm công bị chặn do mã Kiosk QR không hợp lệ/hết hạn (${qrCheck.reason})`,
+                        ip: req.ip,
+                        batBuoc: true,
+                    });
+                    return {
+                        forbidden: {
+                            code: 'INVALID_KIOSK_QR',
+                            message: 'Mã QR chấm công không hợp lệ hoặc đã hết hạn (> 60 giây)! Vui lòng quét lại mã mới tại quầy.',
+                            reason: qrCheck.reason,
+                        },
+                    };
+                }
+                verifyMethod = 'KIOSK_QR';
+            }
+
+            const locCheck = verifyLocationOrIp({
+                branchGeoLat: kioskCfg.geoLat,
+                branchGeoLng: kioskCfg.geoLng,
+                geofenceRadiusM: kioskCfg.geofenceRadiusM,
+                allowedPublicIps: kioskCfg.allowedPublicIps,
+                checkinLat,
+                checkinLng,
+                clientIp,
+            });
+            if (!locCheck.ok) {
+                await ghiAuditLog(client, {
+                    tenantId,
+                    maNV,
+                    vaiTro: req.user.vaiTro,
+                    hanhDong: 'HR_CHECKIN_REJECTED_LOCATION',
+                    doiTuong: 'CHAMCONG',
+                    maDoiTuong: String(maPhanCa),
+                    giaTriMoi: {
+                        branchId: kioskCfg.branchId,
+                        reason: locCheck.reason,
+                        distanceMeters: locCheck.distanceMeters,
+                        radiusMeters: kioskCfg.geofenceRadiusM,
+                        checkinLat: checkinLat ?? null,
+                        checkinLng: checkinLng ?? null,
+                    },
+                    lyDo: `Chấm công bị chặn do ngoài phạm vi chi nhánh (${locCheck.reason}${locCheck.distanceMeters != null ? `, cách ${locCheck.distanceMeters}m` : ''})`,
+                    ip: req.ip,
+                    batBuoc: true,
+                });
+                return {
+                    forbidden: {
+                        code: 'OUT_OF_GEOFENCE',
+                        message: `Bạn đang đứng ngoài bán kính cho phép (${kioskCfg.geofenceRadiusM}m) hoặc không dùng mạng Wi-Fi cửa hàng!`,
+                        reason: locCheck.reason,
+                        distanceMeters: locCheck.distanceMeters,
+                    },
+                };
+            }
+            if (locCheck.method === 'GPS_GEOFENCE' || locCheck.method === 'STATIC_IP') {
+                verifyMethod = requireQr ? `QR+${locCheck.method}` : locCheck.method;
+            }
+
             // [Wave 1 — P0-07] Bắt buộc phân ca phải thuộc đúng ngày hôm nay (pc.NgayLam = todayDateVN())
             const caResult = await client.query(`
                 SELECT pc.MaPhanCa, pc.NgayLam, clv.GioBatDau,
-                       CASE WHEN (CURRENT_TIMESTAMP AT TIME ZONE '${VN_TZ}')::time > clv.GioBatDau THEN 'Đi trễ' ELSE 'Đúng giờ' END AS TinhTrang
+                       to_char((CURRENT_TIMESTAMP AT TIME ZONE '${VN_TZ}')::time, 'HH24:MI:SS') AS GioHienTaiVN
                 FROM PhanCa pc
                 JOIN CaLamViec clv ON pc.MaCa = clv.MaCa
                 WHERE pc.MaPhanCa = $1
@@ -10010,17 +10429,33 @@ app.post('/api/nhansu/chamcong', kiemTraToken, async (req, res) => {
                   AND pc.NgayLam = $4::date
             `, [maPhanCa, maNV, tenantId, todayVN]);
 
-            if (caResult.rows.length === 0) return null;
+            if (caResult.rows.length === 0) return { notFound: true };
 
-            const ghiChu = caResult.rows[0].tinhtrang;
+            const caRow = caResult.rows[0];
+            // [Wave 3B — P1-04] Ân hạn đi trễ 5 phút: late_minutes = Math.max(0, diffMin - 5)
+            const lateMinutes = calculateLateMinutes(caRow.giobatdau, caRow.giohientaivn, 5);
+            const ghiChu = lateMinutes > 0 ? `Đi trễ ${lateMinutes} phút` : 'Đúng giờ';
+            const parsedLat = checkinLat !== undefined && checkinLat !== null && checkinLat !== '' && Number.isFinite(Number(checkinLat))
+                ? Number(checkinLat) : null;
+            const parsedLng = checkinLng !== undefined && checkinLng !== null && checkinLng !== '' && Number.isFinite(Number(checkinLng))
+                ? Number(checkinLng) : null;
+
             const checkInResult = await client.query(
-                'INSERT INTO ChamCong (MaPhanCa, ThoiGianCheckIn, GhiChu) VALUES ($1, CURRENT_TIMESTAMP, $2) RETURNING MaChamCong, ThoiGianCheckIn, GhiChu',
-                [maPhanCa, ghiChu]
+                `INSERT INTO ChamCong (MaPhanCa, ThoiGianCheckIn, GhiChu, verify_method, checkin_lat, checkin_lng, late_minutes)
+                 VALUES ($1, CURRENT_TIMESTAMP, $2, $3, $4, $5, $6)
+                 RETURNING MaChamCong, ThoiGianCheckIn, GhiChu, verify_method, checkin_lat, checkin_lng, late_minutes`,
+                [maPhanCa, ghiChu, verifyMethod, parsedLat, parsedLng, lateMinutes]
             );
-            return checkInResult.rows[0];
+            return { chamCong: checkInResult.rows[0] };
         });
-        if (!chamCong) return res.status(404).json({ message: 'Không tìm thấy lịch phân ca hợp lệ của bạn trong ngày hôm nay!' });
-        res.json({ message: 'Check-in vào ca thành công!', chamCong });
+
+        if (outcome.forbidden) {
+            return res.status(403).json(outcome.forbidden);
+        }
+        if (outcome.notFound) {
+            return res.status(404).json({ message: 'Không tìm thấy lịch phân ca hợp lệ của bạn trong ngày hôm nay!' });
+        }
+        res.status(201).json({ message: 'Check-in vào ca thành công!', chamCong: outcome.chamCong });
     } catch (error) {
         if (error && error.code === '23505') {
             return res.status(409).json({
@@ -11977,6 +12412,190 @@ app.post('/api/kho/san-xuat-me', kiemTraToken, choPhepVaiTro(1, 2), async (req, 
         });
     } catch (error) {
         guiLoi(res, error, 'Lỗi API Sản xuất mẻ Bán thành phẩm:');
+    }
+});
+
+// [Wave 3B — P1-04] Quét mẻ Bán thành phẩm/Nguyên liệu sắp hết hạn (<= 15 phút) & bắn cảnh báo lên KDS đúng chi nhánh
+async function checkExpiringBatchesAndEmitKds({ tenantId, branchId = 'DEFAULT', withinMinutes = 15 } = {}) {
+    const cleanBranch = normalizeBranchId(branchId || 'DEFAULT');
+    const mins = Math.max(1, Math.min(240, Number(withinMinutes || 15)));
+    const batches = await pool.withTenant(tenantId, async (client) => {
+        const res = await client.query(
+            `SELECT lt.id, lt.branchid, lt.manl, nl.tennl, nl.donvitinh,
+                    lt.malo, lt.soluongconlai, lt.thoigianhethan, lt.trangthai,
+                    ROUND(EXTRACT(EPOCH FROM (lt.thoigianhethan - now())) / 60.0)::int AS minutes_left
+               FROM public.lo_tonkho lt
+               JOIN public.nguyenlieu nl ON nl.manl = lt.manl AND COALESCE(nl.tenantid, 'DEFAULT') = lt.tenantid
+              WHERE lt.tenantid = $1
+                AND lt.branchid = $2
+                AND lt.trangthai = 'ACTIVE'
+                AND lt.soluongconlai > 0
+                AND lt.thoigianhethan IS NOT NULL
+                AND lt.thoigianhethan <= now() + ($3 || ' minutes')::interval
+              ORDER BY lt.thoigianhethan ASC
+              LIMIT 30`,
+            [tenantId, cleanBranch, String(mins)]
+        );
+        return res.rows.map((r) => ({
+            lotId: Number(r.id),
+            branchId: r.branchid,
+            maNL: r.manl,
+            tenNL: r.tennl,
+            donViTinh: r.donvitinh,
+            maLo: r.malo,
+            soLuongConLai: Number(r.soluongconlai),
+            thoiGianHetHan: r.thoigianhethan,
+            minutesLeft: Number(r.minutes_left),
+            isExpired: Number(r.minutes_left) <= 0,
+        }));
+    });
+
+    if (batches.length > 0 && io) {
+        io.to(roomBranchKds(tenantId, cleanBranch))
+            .to(roomTen(tenantId, 'barista'))
+            .emit('kds:batch_expiring_warning', {
+                tenantId,
+                branchId: cleanBranch,
+                batches,
+                checkedAt: new Date().toISOString(),
+            });
+    }
+    return batches;
+}
+
+app.get('/api/kds/expiring-batches', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
+    const tenantId = layTenantId(req);
+    const branchId = normalizeBranchId(req.query.branchId || req.headers['x-branch-id'] || req.user?.maChiNhanh || 'DEFAULT');
+    const withinMinutes = Number(req.query.withinMinutes || 15);
+    try {
+        const batches = await checkExpiringBatchesAndEmitKds({ tenantId, branchId, withinMinutes });
+        res.json({ branchId, withinMinutes, batches });
+    } catch (error) {
+        guiLoi(res, error, 'Lỗi API Cảnh báo HSD bán thành phẩm KDS:');
+    }
+});
+
+// [Wave 3B — P1-04] Xuất hủy 1 chạm mẻ hết hạn (EXPIRED_BATCH) từ màn hình KDS
+app.post('/api/kds/batches/:lotId/discard-expired', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) => {
+    const tenantId = layTenantId(req);
+    const lotId = Number(req.params.lotId);
+    const lyDo = String(req.body?.lyDo || 'Xuất hủy mẻ bán thành phẩm hết hạn từ KDS').trim().slice(0, 255);
+    if (!Number.isInteger(lotId) || lotId <= 0) {
+        return res.status(400).json({ message: 'lotId không hợp lệ!' });
+    }
+
+    try {
+        const ketQua = await chayGiaoDich(async (client) => {
+            const lotRes = await client.query(
+                `SELECT lt.id, lt.branchid, lt.manl, lt.malo, lt.soluongconlai, lt.giavonlo, lt.trangthai,
+                        nl.tennl, nl.donvitinh, COALESCE(nl.giavondonvi, 0) AS giavondonvi
+                   FROM public.lo_tonkho lt
+                   JOIN public.nguyenlieu nl ON nl.manl = lt.manl AND COALESCE(nl.tenantid, 'DEFAULT') = lt.tenantid
+                  WHERE lt.id = $1 AND lt.tenantid = $2
+                  FOR UPDATE OF lt`,
+                [lotId, tenantId]
+            );
+            if (lotRes.rows.length === 0) {
+                throw new LoiNghiepVu(404, 'Không tìm thấy lô bán thành phẩm cần xuất hủy!');
+            }
+            const lot = lotRes.rows[0];
+            if (lot.trangthai !== 'ACTIVE' || Number(lot.soluongconlai) <= 0) {
+                throw new LoiNghiepVu(409, 'Lô này đã được sử dụng hết hoặc đã xuất hủy trước đó!');
+            }
+
+            const qtyDiscard = Number(lot.soluongconlai);
+            const branchId = normalizeBranchId(lot.branchid || 'DEFAULT');
+            const lockedMap = await lockBranchStockOrdered(client, { tenantId, branchId, maNLList: [lot.manl] });
+            const st = lockedMap.get(lot.manl);
+            const tonBefore = st ? Number(st.soLuongTon) : qtyDiscard;
+            const tonAfter = Math.max(0, lam4(tonBefore - qtyDiscard));
+            const giaVon = Number(lot.giavonlo || st?.giaVonDonVi || lot.giavondonvi || 0);
+
+            await client.query(
+                `UPDATE public.lo_tonkho
+                    SET soluongconlai = 0, trangthai = 'EXPIRED', updatedat = now()
+                  WHERE id = $1 AND tenantid = $2`,
+                [lotId, tenantId]
+            );
+
+            await updateBranchStockRow(client, {
+                tenantId,
+                branchId,
+                maNL: lot.manl,
+                nextQty: tonAfter,
+                nextWac: st ? Number(st.giaVonDonVi) : giaVon,
+            });
+
+            const caMo = await layCaDangMo(client, tenantId, branchId);
+            const phieu = await client.query(
+                `INSERT INTO PhieuGiaoDichKho (MaNV, LoaiGD, GhiChu, TenantId, BranchId, MaCaThuNgan, NgayChungTu, TrangThaiDuyet)
+                 VALUES ($1, 4, $2, $3, $4, $5, $6::date, 'POSTED') RETURNING MaGiaoDich`,
+                [
+                    req.user.maNV,
+                    `[EXPIRED_BATCH] Hủy lô ${lot.malo} (${lot.tennl}): ${lyDo}`.slice(0, 255),
+                    tenantId,
+                    branchId,
+                    caMo ? String(caMo.macathungan) : null,
+                    todayDateVN(),
+                ]
+            );
+            const maGD = phieu.rows[0].magiaodich;
+
+            await insertLedgerLine(client, {
+                maGiaoDich: maGD,
+                maNL: lot.manl,
+                soLuong: -qtyDiscard,
+                donGiaNhap: giaVon,
+                tinhTrang: `EXPIRED_BATCH:${lot.malo}`,
+                tonTruoc: tonBefore,
+                tonSau: tonAfter,
+                giaVonTruoc: st ? Number(st.giaVonDonVi) : giaVon,
+                giaVonSau: st ? Number(st.giaVonDonVi) : giaVon,
+            });
+
+            await ghiAuditLog(client, {
+                tenantId,
+                maNV: req.user.maNV,
+                vaiTro: req.user.vaiTro,
+                hanhDong: 'EXPIRED_BATCH',
+                doiTuong: 'LO_TONKHO',
+                maDoiTuong: String(lotId),
+                giaTriCu: { maLo: lot.malo, soLuongConLai: qtyDiscard, trangThai: lot.trangthai },
+                giaTriMoi: { maLo: lot.malo, soLuongConLai: 0, trangThai: 'EXPIRED', maGiaoDich: maGD, branchId },
+                lyDo,
+                ip: req.ip,
+                batBuoc: true,
+            });
+
+            return {
+                lotId,
+                branchId,
+                maLo: lot.malo,
+                maNL: lot.manl,
+                tenNL: lot.tennl,
+                soLuongHuy: qtyDiscard,
+                donViTinh: lot.donvitinh,
+                maGiaoDich: maGD,
+            };
+        }, tenantId);
+
+        const remaining = await checkExpiringBatchesAndEmitKds({ tenantId, branchId: ketQua.branchId, withinMinutes: 15 });
+        io.to(roomBranchKds(tenantId, ketQua.branchId))
+            .to(roomTen(tenantId, 'barista'))
+            .emit('kds:batch_expiring_warning', {
+                tenantId,
+                branchId: ketQua.branchId,
+                batches: remaining,
+                discardedLotId: lotId,
+                checkedAt: new Date().toISOString(),
+            });
+
+        res.json({
+            message: `🗑️ Đã xuất hủy mẻ hết hạn "${ketQua.tenNL}" (${ketQua.maLo}, -${ketQua.soLuongHuy} ${ketQua.donViTinh})!`,
+            ...ketQua,
+        });
+    } catch (error) {
+        guiLoi(res, error, 'Lỗi API Xuất hủy mẻ hết hạn KDS:');
     }
 });
 

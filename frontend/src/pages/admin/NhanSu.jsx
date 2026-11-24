@@ -1,9 +1,12 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import toast from 'react-hot-toast'
+import QRCode from 'qrcode'
 import { nhanSuService } from '../../services/nhanSuService'
 import { useAuthStore } from '../../store/authStore'
 import { ROLE_LABEL } from '../../constants/roles'
 import { formatVND, getTodayISO } from '../../utils/format'
+import ConfirmPinModal from '../../components/ConfirmPinModal'
+import axiosClient from '../../api/axiosClient'
 
 // Cắt "07:00:00" thành "07:00" cho gọn
 const formatGio = (gio) => (gio ? String(gio).slice(0, 5) : '')
@@ -111,12 +114,73 @@ export default function NhanSu() {
     }
   }
 
+  const [staffDialog, setStaffDialog] = useState(null) // { kind: 'lock'|'resetPassword'|'setPin', nv }
+  const [weeklyShifts, setWeeklyShifts] = useState([])
+  const [kioskQr, setKioskQr] = useState({ token: '', qrDataUrl: '', expiresInSec: 30, branchId: 'DEFAULT' })
+
+  const weekDates = (() => {
+    const today = new Date()
+    const day = today.getDay()
+    const diffToMon = day === 0 ? -6 : 1 - day
+    const mon = new Date(today)
+    mon.setDate(today.getDate() + diffToMon)
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(mon)
+      d.setDate(mon.getDate() + i)
+      const iso = d.toISOString().slice(0, 10)
+      const labels = ['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN']
+      return { iso, label: `${labels[i]} (${iso.slice(8, 10)}/${iso.slice(5, 7)})` }
+    })
+  })()
+
+  const loadWeeklyShifts = useCallback(async () => {
+    try {
+      const res = await axiosClient.get('/nhansu/phanca', { silent: true })
+      const list = Array.isArray(res?.danhSachPhanCa)
+        ? res.danhSachPhanCa
+        : Array.isArray(res)
+        ? res
+        : []
+      setWeeklyShifts(list)
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const refreshKioskQr = useCallback(async () => {
+    try {
+      const res = await axiosClient.get('/hr/kiosk-qr-token', { silent: true })
+      if (res?.token) {
+        const qrDataUrl = await QRCode.toDataURL(res.token, { width: 180, margin: 1 })
+        setKioskQr({
+          token: res.token,
+          qrDataUrl,
+          expiresInSec: Number(res.expiresInSec || 30),
+          branchId: res.branchId || 'DEFAULT',
+        })
+      }
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadWeeklyShifts()
+    void refreshKioskQr()
+    const qrTimer = setInterval(() => void refreshKioskQr(), 30000)
+    const tickTimer = setInterval(() => {
+      setKioskQr((prev) => ({ ...prev, expiresInSec: Math.max(0, Number(prev.expiresInSec || 0) - 1) }))
+    }, 1000)
+    return () => {
+      clearInterval(qrTimer)
+      clearInterval(tickTimer)
+    }
+  }, [loadWeeklyShifts, refreshKioskQr])
+
   const handleToggleStaff = async (nv) => {
     const next = nv.trangThaiLamViec === false
-    if (
-      !next &&
-      !window.confirm(`Khóa ngay tài khoản "${nv.tenNV}"? Nhân viên này sẽ bị đăng xuất & ngắt Socket.IO lập tức.`)
-    ) {
+    if (!next) {
+      setStaffDialog({ kind: 'lock', nv })
       return
     }
     try {
@@ -128,32 +192,39 @@ export default function NhanSu() {
     }
   }
 
-  const handleResetPassword = async (nv) => {
-    const mk = window.prompt(`Nhập mật khẩu mới (tối thiểu 6 ký tự) cho ${nv.tenNV}:`)
-    if (!mk) return
-    try {
-      const res = await nhanSuService.datLaiMatKhauNV(nv.maNV, mk)
-      toast.success(res.message)
-    } catch {
-      // Interceptor xử lý
-    }
+  const handleResetPassword = (nv) => {
+    setStaffDialog({ kind: 'resetPassword', nv })
   }
 
-  const handleSetManagerPin = async (nv) => {
-    const pin = window.prompt(
-      `Đặt mã PIN (4–6 chữ số) cho ${nv.tenNV} (dùng chuyển ca nhanh trên POS${
-        Number(nv.vaiTro) === 1 || nv.laCaTruong ? ' & duyệt hủy món / hoàn tiền O(1)' : ''
-      }):`
-    )
-    if (!pin) return
-    if (!/^\d{4,6}$/.test(pin.trim())) {
-      toast.error('Mã PIN phải gồm 4 đến 6 chữ số!')
-      return
-    }
+  const handleSetManagerPin = (nv) => {
+    setStaffDialog({ kind: 'setPin', nv })
+  }
+
+  const handleConfirmStaffDialog = async (val) => {
+    if (!staffDialog) return
+    const { kind, nv } = staffDialog
+    setStaffDialog(null)
     try {
-      const res = await nhanSuService.datPinNV(nv.maNV, pin.trim())
-      toast.success(res.message)
-      await reloadNhanVien()
+      if (kind === 'lock') {
+        const res = await nhanSuService.doiTrangThaiNV(nv.maNV, false)
+        toast.success(res.message)
+        await reloadNhanVien()
+      } else if (kind === 'resetPassword') {
+        if (!val || val.length < 6) {
+          toast.error('Mật khẩu mới phải từ 6 ký tự trở lên!')
+          return
+        }
+        const res = await nhanSuService.datLaiMatKhauNV(nv.maNV, val)
+        toast.success(res.message)
+      } else if (kind === 'setPin') {
+        if (!/^\d{4,6}$/.test(String(val || '').trim())) {
+          toast.error('Mã PIN phải gồm 4 đến 6 chữ số!')
+          return
+        }
+        const res = await nhanSuService.datPinNV(nv.maNV, String(val).trim())
+        toast.success(res.message)
+        await reloadNhanVien()
+      }
     } catch {
       // Interceptor xử lý
     }
@@ -532,6 +603,123 @@ export default function NhanSu() {
           </tbody>
         </table>
       </div>
+
+      {/* [Wave 3B — P1-04] Mã QR Chấm Công Động (tự đổi mỗi 30 giây) + Bảng Lịch Phân Ca Tuần (NV × 7 ngày) */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <div className="lg:col-span-4 bg-white rounded-2xl border border-amber-200 p-5 shadow-sm flex flex-col items-center text-center space-y-3">
+          <div className="w-full flex items-center justify-between">
+            <h2 className="text-sm font-extrabold text-amber-900">🔐 Mã QR Chấm Công Động (30s)</h2>
+            <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[11px] font-bold">
+              Đổi sau {kioskQr.expiresInSec}s
+            </span>
+          </div>
+          {kioskQr.qrDataUrl ? (
+            <img
+              src={kioskQr.qrDataUrl}
+              alt="Kiosk QR Chấm công động 30 giây"
+              className="w-44 h-44 rounded-xl border border-stone-200 p-1 bg-white"
+            />
+          ) : (
+            <div className="w-44 h-44 rounded-xl bg-stone-100 flex items-center justify-center text-xs text-stone-400">
+              Đang tạo mã QR...
+            </div>
+          )}
+          <p className="text-[11px] text-stone-500">
+            Chống chụp ảnh gửi nhóm chấm công hộ — tự xoay chữ ký HMAC-SHA256 mỗi 30 giây • Chi nhánh: <b>{kioskQr.branchId}</b>
+          </p>
+          <button
+            type="button"
+            onClick={() => void refreshKioskQr()}
+            className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold cursor-pointer"
+          >
+            🔄 Làm mới QR ngay
+          </button>
+        </div>
+
+        <div className="lg:col-span-8 bg-white rounded-2xl border border-stone-200 p-5 shadow-sm space-y-3 overflow-x-auto">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-extrabold text-stone-900">📅 Bảng Lịch Phân Ca Tuần (Nhân viên × 7 ngày)</h2>
+            <button
+              type="button"
+              onClick={() => void loadWeeklyShifts()}
+              className="text-xs font-bold text-amber-700 hover:underline cursor-pointer"
+            >
+              ↻ Tải lại lịch
+            </button>
+          </div>
+          <table className="w-full text-xs border-collapse min-w-[640px]">
+            <thead>
+              <tr className="bg-stone-100 text-stone-700">
+                <th className="p-2 text-left border border-stone-200">Nhân viên</th>
+                {weekDates.map((d) => (
+                  <th key={d.iso} className="p-2 text-center border border-stone-200">
+                    {d.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {nhanVienList.map((nv) => (
+                <tr key={nv.maNV} className="hover:bg-stone-50">
+                  <td className="p-2 font-bold text-stone-800 border border-stone-200">{nv.tenNV}</td>
+                  {weekDates.map((d) => {
+                    const matched = weeklyShifts.filter(
+                      (s) =>
+                        String(s.maNV || s.manv) === String(nv.maNV) &&
+                        String(s.ngayLam || s.ngaylam || '').slice(0, 10) === d.iso
+                    )
+                    return (
+                      <td key={d.iso} className="p-1.5 text-center border border-stone-200 align-top">
+                        {matched.length === 0 ? (
+                          <span className="text-stone-300">—</span>
+                        ) : (
+                          <div className="space-y-1">
+                            {matched.map((m, idx) => (
+                              <span
+                                key={m.maPhanCa || m.maphanca || idx}
+                                className="block px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[10px]"
+                              >
+                                {m.tenCa || m.tenca || `Ca #${m.maCa || m.maca}`}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                    )
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <ConfirmPinModal
+        open={Boolean(staffDialog)}
+        mode={staffDialog?.kind === 'lock' ? 'confirm' : 'pin'}
+        showKeypad={staffDialog?.kind === 'setPin'}
+        danger={staffDialog?.kind === 'lock'}
+        title={
+          staffDialog?.kind === 'lock'
+            ? `Khóa tài khoản "${staffDialog.nv.tenNV}"`
+            : staffDialog?.kind === 'resetPassword'
+            ? `Đặt lại mật khẩu cho ${staffDialog.nv.tenNV}`
+            : staffDialog
+            ? `Đặt mã PIN (4–6 số) cho ${staffDialog.nv.tenNV}`
+            : ''
+        }
+        message={
+          staffDialog?.kind === 'lock'
+            ? `Khóa ngay tài khoản "${staffDialog.nv.tenNV}"? Nhân viên này sẽ bị đăng xuất & ngắt Socket.IO lập tức.`
+            : staffDialog?.kind === 'resetPassword'
+            ? 'Nhập mật khẩu mới (tối thiểu 6 ký tự):'
+            : 'Nhập mã PIN gồm 4–6 chữ số (được che ••••):'
+        }
+        minLength={staffDialog?.kind === 'resetPassword' ? 6 : staffDialog?.kind === 'setPin' ? 4 : 0}
+        confirmText={staffDialog?.kind === 'lock' ? 'Khóa ngay' : 'Lưu thay đổi'}
+        onConfirm={handleConfirmStaffDialog}
+        onCancel={() => setStaffDialog(null)}
+      />
     </div>
   )
 }

@@ -102,7 +102,11 @@ export default function CfdPage() {
                     {formatVND(
                       m.thanhTien ??
                         (Number(m.donGia) +
-                          (m.toppings || []).reduce((s, t) => s + Number(t.donGia) * Number(t.soLuong || 1), 0)) *
+                          Number(m.giaModifiers || 0) +
+                          (m.toppings || []).reduce(
+                            (s, t) => s + Number(t.donGia) * Number(t.soLuongMoiLy ?? t.soLuong ?? 1),
+                            0
+                          )) *
                           Number(m.soLuong)
                     )}
                   </span>
@@ -112,6 +116,12 @@ export default function CfdPage() {
           )}
 
           <div className="border-t border-stone-800 pt-4 mt-4 space-y-1.5">
+            {Number(state.discountAmount || state.promoPreview?.tongGiamGia || 0) > 0 && (
+              <div className="flex justify-between text-sm text-amber-300 font-bold">
+                <span>🎁 Giảm giá khuyến mãi / điểm:</span>
+                <span>-{formatVND(Number(state.discountAmount || state.promoPreview?.tongGiamGia || 0))}</span>
+              </div>
+            )}
             {state.paidAmount > 0 && (
               <>
                 <div className="flex justify-between text-sm text-stone-400">
