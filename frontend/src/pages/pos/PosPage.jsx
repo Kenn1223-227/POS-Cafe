@@ -13,6 +13,7 @@ import { ecosystemService } from '../../services/ecosystemService'
 import { useAuthStore } from '../../store/authStore'
 import { usePosStore } from '../../store/posStore'
 import { useSocketEvents } from '../../socket/useSocketEvents'
+import { getSocket } from '../../socket/socketClient'
 import { useBarcodeScanner } from '../../hooks/useBarcodeScanner'
 import { ROLES } from '../../constants/roles'
 import TableMap from './components/TableMap'
@@ -21,7 +22,14 @@ import ToppingModal from './components/ToppingModal'
 import CustomerBox from './components/CustomerBox'
 import Cart from './components/Cart'
 import ThuChiModal from './components/ThuChiModal'
-import DongCaModal from './components/DongCaModal'
+import DongCaModal, {
+  DenominationCounterGrid,
+  calcDenominationTotal,
+  buildDenominationMap,
+} from './components/DongCaModal'
+import PosErrorBoundary from './components/PosErrorBoundary'
+import ConfirmPinModal from '../../components/ConfirmPinModal'
+import axiosClient from '../../api/axiosClient'
 import OfflineQueueModal from './components/OfflineQueueModal'
 import PrintBridgeModal from './components/PrintBridgeModal'
 import PaidOrdersRefundModal from './components/PaidOrdersRefundModal'
@@ -109,6 +117,18 @@ export default function PosPage() {
 
   const [showThuChiModal, setShowThuChiModal] = useState(false)
   const [showDongCaModal, setShowDongCaModal] = useState(false)
+  const [preCloseWarning, setPreCloseWarning] = useState(null)
+  const [onlineHeldOrders, setOnlineHeldOrders] = useState([])
+  const [showOpenShiftModal, setShowOpenShiftModal] = useState(false)
+  const [openShiftCounts, setOpenShiftCounts] = useState({})
+  const payKeyRef = useRef({ fingerprint: '', key: '' })
+  const [autoPrintLabelsOnCheckout, setAutoPrintLabelsOnCheckout] = useState(() => {
+    try {
+      return localStorage.getItem('pos_auto_print_labels_checkout') === '1'
+    } catch {
+      return false
+    }
+  })
   const [showOpenOrdersModal, setShowOpenOrdersModal] = useState(false)
   const [showBankModal, setShowBankModal] = useState(false)
   const [bankForm, setBankForm] = useState(() => getVietQrConfig())
@@ -287,15 +307,22 @@ export default function PosPage() {
   const loadLiveOperations = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return
     try {
-      const [banList, shift, openList] = await Promise.all([
+      const [banList, shift, openList, luuTamRes] = await Promise.all([
         banService.getAll(),
         caService.getCaHienTai(),
         orderService.getDangMo().catch(() => []),
+        orderService.getLuuTam().catch(() => []),
       ])
       const openArr = Array.isArray(openList) ? openList : []
+      const onlineHeldArr = Array.isArray(luuTamRes)
+        ? luuTamRes
+        : Array.isArray(luuTamRes?.danhSach)
+        ? luuTamRes.danhSach
+        : []
       setTables(banList)
       setCurrentShift(shift)
       setOpenInvoices(openArr)
+      setOnlineHeldOrders(onlineHeldArr)
       void saveCatalogSnapshot({ tables: banList, shift, openInvoices: openArr }, currentTenantId)
     } catch (err) {
       if (isNetworkError(err)) setIsOnline(false)
@@ -395,6 +422,21 @@ export default function PosPage() {
     }
   }, [loadPosData, refreshOutboxList, refreshFailedPrintCount, triggerOutboxSync])
 
+  const [reprintPrompt, setReprintPrompt] = useState(null) // { step: 'pin'|'reason', hoaDon, extraOpts, pin }
+  const [combos, setCombos] = useState([])
+  const [pickingCombo, setPickingCombo] = useState(null)
+  const [comboSelections, setComboSelections] = useState({})
+
+  useEffect(() => {
+    axiosClient
+      .get('/combos', { silent: true })
+      .then((res) => {
+        if (Array.isArray(res?.danhSachCombo)) setCombos(res.danhSachCombo)
+        else if (Array.isArray(res)) setCombos(res)
+      })
+      .catch(() => {})
+  }, [])
+
   // Đồng bộ Màn hình phụ Khách hàng (Customer Facing Display - /cfd) qua BroadcastChannel
   const postCfdMessage = useCallback((payload) => {
     if (typeof BroadcastChannel === 'undefined') return
@@ -404,15 +446,25 @@ export default function PosPage() {
   }, [])
 
   useEffect(() => {
-    const total = activeInvoice
+    const rawTotal = activeInvoice
       ? Number(activeInvoice.tongTamTinh || 0)
       : cart.reduce((s, item) => {
-          const tp = (item.toppings || []).reduce((ts, t) => ts + Number(t.donGia) * Number(t.soLuong || 1), 0)
-          return s + (Number(item.donGia) + tp) * Number(item.soLuong)
+          const tp = (item.toppings || []).reduce(
+            (ts, t) => ts + Number(t.donGia) * Number(t.soLuongMoiLy ?? t.soLuong ?? 1),
+            0
+          )
+          const mod = Number(item.giaModifiers || 0)
+          return s + (Number(item.donGia) + mod + tp) * Number(item.soLuong)
         }, 0)
+    const discountAmount = Number(promoPreview?.tongGiamGia || activeInvoice?.tongGiamGia || 0)
+    const total = Math.max(0, rawTotal - discountAmount)
     const paidAmount = activeInvoice ? Number(activeInvoice.daThanhToan || 0) : 0
     const remainingAmount = activeInvoice
-      ? Number(activeInvoice.conLaiCanThu ?? Math.max(0, total - paidAmount))
+      ? Number(
+          promoPreview?.tongSauGiam != null
+            ? Math.max(0, Number(promoPreview.tongSauGiam) - paidAmount)
+            : activeInvoice.conLaiCanThu ?? Math.max(0, total - paidAmount)
+        )
       : total
     const transferMemo = activeInvoice ? `POSHD${activeInvoice.maHoaDon}` : 'POSCAFE'
 
@@ -422,13 +474,15 @@ export default function PosPage() {
       customer,
       cart,
       activeInvoice,
+      promoPreview,
+      discountAmount,
       total,
       paidAmount,
       remainingAmount,
       transferMemo,
       vietQrUrl: remainingAmount > 0 ? buildVietQrUrl({ amount: remainingAmount, addInfo: transferMemo }) : null,
     })
-  }, [cart, activeInvoice, selectedTable, customer, postCfdMessage])
+  }, [cart, activeInvoice, selectedTable, customer, promoPreview, postCfdMessage])
 
   const activeInvoiceId = activeInvoice?.maHoaDon || null
 
@@ -444,11 +498,69 @@ export default function PosPage() {
     }
   }, [activeInvoiceId, setActiveInvoice])
 
+  useEffect(() => {
+    try {
+      const sock = getSocket()
+      if (sock?.connected) {
+        sock.emit('room:subscribe', {
+          branchId: user?.branchId || 'DEFAULT',
+          role: 'POS',
+        })
+      }
+    } catch {
+      // ignore
+    }
+  }, [user?.branchId])
+
   useSocketEvents({
     connect: () => {
       setIsOnline(true)
+      try {
+        getSocket()?.emit('room:subscribe', {
+          branchId: user?.branchId || 'DEFAULT',
+          role: 'POS',
+        })
+      } catch {
+        // ignore
+      }
       void triggerOutboxSync(false)
       void loadPosData()
+    },
+    'menu:86_updated': (payload) => {
+      const prods = Array.isArray(payload?.affectedProducts) ? payload.affectedProducts : []
+      const mods = Array.isArray(payload?.affectedModifiers) ? payload.affectedModifiers : []
+      const tps = Array.isArray(payload?.affectedToppings) ? payload.affectedToppings : []
+      if (prods.length > 0 || mods.length > 0) {
+        const prodMap = new Map(prods.map((p) => [p.maMon, Boolean(p.tamHet)]))
+        const modMap = new Map(mods.map((m) => [Number(m.optionId), Boolean(m.tamHet)]))
+        setMenu((prev) =>
+          prev.map((m) => ({
+            ...m,
+            tamHet: prodMap.has(m.maMon) ? prodMap.get(m.maMon) : m.tamHet,
+            modifierGroups: Array.isArray(m.modifierGroups)
+              ? m.modifierGroups.map((g) => ({
+                  ...g,
+                  options: (g.options || []).map((o) =>
+                    modMap.has(Number(o.id)) ? { ...o, tamHet: modMap.get(Number(o.id)) } : o
+                  ),
+                }))
+              : m.modifierGroups,
+          }))
+        )
+      }
+      if (tps.length > 0) {
+        const tpMap = new Map(tps.map((t) => [t.maTopping, Boolean(t.tamHet)]))
+        setToppings((prev) =>
+          prev.map((t) => (tpMap.has(t.maTopping) ? { ...t, tamHet: tpMap.get(t.maTopping) } : t))
+        )
+      }
+      if (payload?.tenNL) {
+        toast(
+          payload.action === 'UNLOCK' || payload.tamHet === false
+            ? `✅ Đã mở bán lại theo ${payload.tenNL}`
+            : `🚫 Tạm hết (86) chi nhánh ${payload.branchId || ''}: ${payload.tenNL}`
+        )
+      }
     },
     BAN_THAY_DOI: ({ maBan, trangThai }) => {
       setTables((prev) => prev.map((b) => (b.maBan === maBan ? { ...b, trangThai } : b)))
@@ -564,14 +676,48 @@ export default function PosPage() {
     }
   }
 
-  const handleOpenShift = async (e) => {
-    e.preventDefault()
+  // [Wave 2 — P0-06] Cô lập giỏ hàng & đơn lưu tạm theo tenantId khi đổi tài khoản quán trên cùng thiết bị
+  useEffect(() => {
+    usePosStore.getState().syncTenantStorage(currentTenantId)
+  }, [currentTenantId])
+
+  const handleOpenDongCa = async () => {
+    setPreCloseWarning(null)
+    if (typeof navigator === 'undefined' || navigator.onLine) {
+      try {
+        const check = await caService.preCloseCheck()
+        if (check) {
+          setPreCloseWarning(check)
+          const openCount = Number(check.soHoaDonDangMo || 0)
+          const heldCount = Number(check.soDonLuuTam || 0)
+          if (openCount > 0 || heldCount > 0) {
+            toast(`⚠️ Còn ${openCount} bàn/đơn đang mở và ${heldCount} đơn lưu tạm chưa chốt!`, {
+              icon: '⚠️',
+              duration: 5000,
+            })
+          }
+        }
+      } catch {
+        // Không chặn mở modal nếu pre-close-check lỗi tạm thời
+      }
+    }
+    setShowDongCaModal(true)
+  }
+
+  const handleOpenShift = async (e, useDenomCounts = false) => {
+    if (e?.preventDefault) e.preventDefault()
     setOpeningShift(true)
     try {
-      const res = await caService.moCa(Number(tienDauCaInput || 0))
+      const denomMap = useDenomCounts ? buildDenominationMap(openShiftCounts) : null
+      const amount = useDenomCounts ? calcDenominationTotal(openShiftCounts) : Number(tienDauCaInput || 0)
+      const res = await caService.moCa(amount, {
+        ...(denomMap && Object.keys(denomMap).length > 0 ? { chiTietMenhGiaDauCa: denomMap } : {}),
+      })
       toast.success(res?.message || 'Đã mở ca thu ngân thành công!', {
         duration: res?.soGiaoDichTuDongGanCa > 0 ? 7000 : 3000,
       })
+      setShowOpenShiftModal(false)
+      setOpenShiftCounts({})
       await loadPosData()
     } catch {
       // Interceptor xử lý
@@ -635,23 +781,8 @@ export default function PosPage() {
         const status = err?.response?.status
         const code = err?.response?.data?.code || err?.response?.data?.maLoi
         if (status === 403 && (code === 'REPRINT_FORBIDDEN' || code === 'CAN_QUYEN_IN_LAI')) {
-          const pin = window.prompt(
-            'In lại hóa đơn (lần 2+) yêu cầu mã PIN Quản lý / Ca trưởng (4–6 số):'
-          )
-          if (!pin || !pin.trim()) {
-            toast.error('Đã hủy in lại hóa đơn (cần PIN Quản lý)!')
-            return
-          }
-          const lyDo = window.prompt('Lý do in lại hóa đơn:', 'Khách yêu cầu in lại bill') || 'In lại bill theo yêu cầu'
-          try {
-            printMeta = await orderService.issuePrintToken(hoaDon.maHoaDon, {
-              managerPin: pin.trim(),
-              lyDo: lyDo.trim(),
-            })
-          } catch (retryErr) {
-            toast.error(retryErr?.response?.data?.message || 'PIN Quản lý không hợp lệ — từ chối in lại!')
-            return
-          }
+          setReprintPrompt({ step: 'pin', hoaDon, extraOpts, pin: '' })
+          return
         } else if (err?.response) {
           // Lỗi từ máy chủ (400/401/403/404) -> không bỏ qua kiểm soát in!
           return
@@ -673,7 +804,7 @@ export default function PosPage() {
     [user?.tenNV, user?.tenQuan]
   )
 
-  const handleSubmitOrder = useCallback(async () => {
+  const handleSubmitOrder = useCallback(async (submitOpts = {}) => {
     if (cart.length === 0) return
     if (!currentShift) {
       toast.error('Bạn cần mở ca thu ngân trước khi tạo đơn!')
@@ -682,7 +813,12 @@ export default function PosPage() {
     if (submitLockRef.current) return
     submitLockRef.current = true
     setSubmitting(true)
-    const payload = buildOrderPayload()
+    const basePayload = buildOrderPayload()
+    const payload = {
+      ...basePayload,
+      ...(submitOpts?.choThanhToanTruoc ? { choThanhToanTruoc: true } : {}),
+      ...(submitOpts?.phuongThucDuKien ? { phuongThucDuKien: submitOpts.phuongThucDuKien } : {}),
+    }
     const dauVanTay = JSON.stringify(payload)
     if (!orderKeyRef.current || orderKeyRef.current.dauVanTay !== dauVanTay) {
       orderKeyRef.current = { key: newIdempotencyKey(), dauVanTay }
@@ -973,6 +1109,9 @@ export default function PosPage() {
     thanhToan,
     choPhepThuMotPhan,
     chiaTienId = null,
+    managerPin = null,
+    idChungTu = null,
+    nguonXacNhan = null,
   }) => {
     if (payLockRef.current) return
     payLockRef.current = true
@@ -988,8 +1127,22 @@ export default function PosPage() {
       choPhepThuMotPhan,
       ...(chiaTienId ? { chiaTienId } : {}),
       ...(activeInvoice?.version ? { expectedVersion: activeInvoice.version } : {}),
+      ...(managerPin ? { managerPin } : {}),
+      ...(idChungTu ? { idChungTu } : {}),
+      ...(nguonXacNhan ? { nguonXacNhan } : {}),
     }
-    const payIdemKey = newIdempotencyKey()
+    // [Wave 2 — P0-02] Cố định Idempotency-Key theo fingerprint đơn hàng để retry sau 502/504 không trừ tiền 2 lần
+    const splitAmountSum = Array.isArray(thanhToan)
+      ? thanhToan.reduce((s, r) => s + Number(r.soTien || 0), 0)
+      : Number(activeInvoice?.conLaiCanThu ?? activeInvoice?.tongTamTinh ?? 0)
+    const methodSig = Array.isArray(thanhToan)
+      ? thanhToan.map((r) => `${r.phuongThucTT}:${r.soTien}`).join('+')
+      : String(phuongThucTT || 'TIEN_MAT')
+    const payFingerprint = `${maHoaDon}:${activeInvoice?.version ?? 0}:${splitAmountSum}:${methodSig}`
+    if (payKeyRef.current.fingerprint !== payFingerprint || !payKeyRef.current.key) {
+      payKeyRef.current = { fingerprint: payFingerprint, key: newIdempotencyKey() }
+    }
+    const payIdemKey = payKeyRef.current.key
 
     const enqueuePayLocally = async () => {
       const job = await saveOfflineOrder({
@@ -1029,6 +1182,7 @@ export default function PosPage() {
         return
       }
       const res = await orderService.thanhToan(payPayload, payIdemKey, { silent: true })
+      payKeyRef.current = { fingerprint: '', key: '' }
       playCashSuccessSound()
       if (res.daHoanTat) {
         toast.success(
@@ -1045,6 +1199,9 @@ export default function PosPage() {
           phuongThucTT === 'TIEN_MAT' ||
           (Array.isArray(thanhToan) && thanhToan.some((t) => t.phuongThucTT === 'TIEN_MAT' && Number(t.soTien) > 0))
         await handlePrintInvoice(res.hoaDon, { isCashPayment: hasCashPayment })
+        if (autoPrintLabelsOnCheckout && res.hoaDon) {
+          printCupLabels50x30(res.hoaDon)
+        }
         setActiveInvoice(null)
         setCustomer(null)
         handleClearPromo()
@@ -1090,9 +1247,13 @@ export default function PosPage() {
   }
 
   const handleStartVietQrOrder = useCallback(async () => {
-    await handleSubmitOrder()
+    // [Wave 3B — P1-02] Counter VietQR trả trước: gửi cờ AWAITING_PAYMENT để không bắn KDS / không trừ kho trước khi tiền về!
+    await handleSubmitOrder({
+      choThanhToanTruoc: true,
+      phuongThucDuKien: 'VIETQR_PREPAID',
+    })
     setPreferVietQrKey((k) => k + 1)
-    toast('📱 Đã mở đơn & bật mã VietQR chờ Webhook ngân hàng tự động xác nhận!', { icon: '🏦' })
+    toast('📱 Đã mở đơn AWAITING_PAYMENT & bật mã VietQR (chỉ bắn KDS khi tiền về 100%)!', { icon: '🏦' })
   }, [handleSubmitOrder])
 
   const handleVoidInvoiceItem = (item) => {
@@ -1135,6 +1296,7 @@ export default function PosPage() {
         hoanKho: !daPha,
         managerPin: canPin ? voidPin.trim() : null,
         maNVDuyet: canPin && voidApproverId ? voidApproverId : null,
+        expectedVersion: activeInvoice?.version || 1,
       })
       toast.success(res.message)
       setActiveInvoice(res.hoaDon)
@@ -1173,6 +1335,7 @@ export default function PosPage() {
         splitItems,
         toMaBan: splitDestTable || null,
         mode,
+        expectedVersion: activeInvoice?.version || 1,
       })
       toast.success(res.message)
       setShowSplitModal(false)
@@ -1477,16 +1640,36 @@ export default function PosPage() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setShowDongCaModal(true)}
+                    onClick={handleOpenDongCa}
+                    data-testid="pos-open-dongca-btn"
                     className="min-h-10 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold cursor-pointer transition shadow"
                   >
                     🔒 Đóng ca
                   </button>
+                  <label
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-stone-800 border border-stone-600 text-[11px] text-amber-200 cursor-pointer"
+                    title="Tự động bắn in tem cốc ngay sau khi chốt thanh toán"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={autoPrintLabelsOnCheckout}
+                      onChange={(e) => {
+                        const next = e.target.checked
+                        setAutoPrintLabelsOnCheckout(next)
+                        try {
+                          localStorage.setItem('pos_auto_print_labels_checkout', next ? '1' : '0')
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                    />
+                    <span>🏷️ Tự in tem</span>
+                  </label>
                 </>
               )}
             </div>
           ) : canManageCash ? (
-            <form onSubmit={handleOpenShift} className="flex items-center gap-1.5">
+            <form onSubmit={(e) => handleOpenShift(e, false)} className="flex items-center gap-1.5">
               <span className="text-xs text-amber-300 font-semibold">⚠️ Chưa mở ca:</span>
               <input
                 type="number"
@@ -1495,6 +1678,15 @@ export default function PosPage() {
                 placeholder="Tiền đầu ca..."
                 className="w-28 min-h-9 px-2 py-1 rounded-lg bg-stone-800 border border-stone-600 text-xs text-white"
               />
+              <button
+                type="button"
+                onClick={() => setShowOpenShiftModal(true)}
+                data-testid="pos-open-shift-denom-btn"
+                className="min-h-9 px-2.5 py-1 bg-amber-600 hover:bg-amber-500 rounded-lg text-xs font-bold cursor-pointer"
+                title="Đếm tiền đầu ca theo mệnh giá tờ để khớp quỹ bàn giao"
+              >
+                🧮 Đếm mệnh giá
+              </button>
               <button
                 type="submit"
                 disabled={openingShift}
@@ -1695,10 +1887,38 @@ export default function PosPage() {
         </div>
       )}
 
-      {/* Thanh đơn Lưu Tạm (Hold / Park Orders) */}
-      {heldOrders.length > 0 && (
-        <div className="bg-amber-100 border-b border-amber-300 px-4 py-2 flex flex-wrap items-center gap-2 text-xs">
-          <span className="font-extrabold text-amber-900">⏸️ Đơn đang giữ tạm ({heldOrders.length}):</span>
+      {/* Thanh đơn Lưu Tạm (Online DB /api/order/luu-tam + Local Offline Fallback) */}
+      {(onlineHeldOrders.length > 0 || heldOrders.length > 0) && (
+        <div
+          data-testid="pos-held-orders-bar"
+          className="bg-amber-100 border-b border-amber-300 px-4 py-2 flex flex-wrap items-center gap-2 text-xs"
+        >
+          <span className="font-extrabold text-amber-900">
+            ⏸️ Đơn đang giữ tạm ({onlineHeldOrders.length + heldOrders.length}):
+          </span>
+          {onlineHeldOrders.map((h) => (
+            <div
+              key={`online-${h.maHoaDon || h.id}`}
+              className="inline-flex items-center gap-1 bg-emerald-50 border border-emerald-400 rounded-xl px-2.5 py-1 shadow-xs"
+            >
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const hd = await orderService.getById(h.maHoaDon || h.id)
+                    setActiveInvoice(hd)
+                    toast.success(`☁️ Đã mở lại đơn tạm online #${h.maHoaDon || h.id}`)
+                  } catch {
+                    toast.error('Không thể tải chi tiết đơn lưu tạm online!')
+                  }
+                }}
+                className="font-bold text-emerald-900 hover:underline cursor-pointer"
+              >
+                ☁️ {h.tenKhachVangLai || h.ghiChu || h.label || `Đơn tạm #${h.maHoaDon || h.id}`}
+                {h.soMon ? ` (${h.soMon} món)` : ''}
+              </button>
+            </div>
+          ))}
           {heldOrders.map((h) => (
             <div
               key={h.id}
@@ -1728,22 +1948,36 @@ export default function PosPage() {
 
       <div className="flex-1 p-4 grid grid-cols-1 lg:grid-cols-12 gap-4">
         <div className="lg:col-span-8 space-y-4">
-          <TableMap
-            tables={tables}
-            selectedTable={selectedTable}
-            onSelectTable={handleSelectTable}
-            onRefresh={loadPosData}
-            userRole={user?.vaiTro}
-          />
-          <MenuGrid
-            menu={menu}
-            onPickProduct={setPickingProduct}
-            onQuickAdd={(item) => {
-              addToCart(item)
-              toast.success(`+1 ${item.tenMon} (${item.kichThuoc})`, { duration: 1200 })
-            }}
-            searchInputRef={searchInputRef}
-          />
+          <PosErrorBoundary section="Sơ đồ bàn (TableMap)">
+            <TableMap
+              tables={tables}
+              selectedTable={selectedTable}
+              onSelectTable={handleSelectTable}
+              onRefresh={loadPosData}
+              userRole={user?.vaiTro}
+            />
+          </PosErrorBoundary>
+          <PosErrorBoundary section="Thực đơn (MenuGrid)">
+            <MenuGrid
+              menu={menu}
+              combos={combos}
+              onPickProduct={setPickingProduct}
+              onPickCombo={(cmb) => {
+                const initSel = {}
+                for (const sl of cmb.slots || []) {
+                  const first = (sl.items || [])[0]
+                  if (first) initSel[sl.id] = first.maMon
+                }
+                setComboSelections(initSel)
+                setPickingCombo(cmb)
+              }}
+              onQuickAdd={(item) => {
+                addToCart(item)
+                toast.success(`+1 ${item.tenMon} (${item.kichThuoc})`, { duration: 1200 })
+              }}
+              searchInputRef={searchInputRef}
+            />
+          </PosErrorBoundary>
         </div>
 
         <div className="lg:col-span-4 flex flex-col gap-3">
@@ -1753,7 +1987,8 @@ export default function PosPage() {
             inputRef={customerInputRef}
           />
           <div className="flex-1">
-            <Cart
+            <PosErrorBoundary section="Giỏ hàng & Thanh toán (Cart)">
+              <Cart
               selectedTable={selectedTable}
               orderType={orderType}
               onChangeOrderType={setOrderType}
@@ -1785,6 +2020,7 @@ export default function PosPage() {
                       danhSachMon: buildOrderPayload().danhSachMon,
                     })
                     clearCart()
+                    await loadLiveOperations()
                     toast.success(res.message || '⏸️ Đã lưu tạm đơn lên máy chủ!')
                     return
                   } catch {
@@ -1829,10 +2065,12 @@ export default function PosPage() {
               submitting={submitting}
               paying={paying}
             />
+            </PosErrorBoundary>
           </div>
         </div>
       </div>
 
+      <PosErrorBoundary section="Hộp thoại nghiệp vụ (Modals)">
       <ToppingModal
         key={editingCartTarget ? `edit-${editingCartTarget.idx}-${editingCartTarget.item.cartKey}` : pickingProduct?.maMon || 'none'}
         product={editingCartTarget?.product || pickingProduct}
@@ -1861,13 +2099,66 @@ export default function PosPage() {
 
       <DongCaModal
         isOpen={showDongCaModal}
-        onClose={() => setShowDongCaModal(false)}
+        onClose={() => {
+          setShowDongCaModal(false)
+          setPreCloseWarning(null)
+        }}
         currentShift={currentShift}
+        preCloseWarning={preCloseWarning}
         onShiftClosed={() => {
           setCurrentShift(null)
+          setPreCloseWarning(null)
           loadPosData()
         }}
       />
+
+      {showOpenShiftModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div>
+                <h3 className="font-extrabold text-base text-gray-800">
+                  🧮 Kiểm Đếm Quỹ Đầu Ca Theo Mệnh Giá
+                </h3>
+                <p className="text-xs text-gray-500">
+                  Đếm khớp từng tờ tiền lẻ nhận bàn giao để triệt tiêu cảnh báo lệch ca
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowOpenShiftModal(false)}
+                className="w-9 h-9 rounded-full bg-gray-100 hover:bg-gray-200 font-bold text-gray-600 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <DenominationCounterGrid
+              counts={openShiftCounts}
+              onChange={setOpenShiftCounts}
+              totalLabel="Tổng quỹ tiền mặt đầu ca:"
+            />
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowOpenShiftModal(false)}
+                className="flex-1 min-h-11 border rounded-xl text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                disabled={openingShift}
+                onClick={(e) => handleOpenShift(e, true)}
+                className="flex-1 min-h-11 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold cursor-pointer disabled:opacity-50"
+              >
+                {openingShift
+                  ? 'Đang mở ca...'
+                  : `✅ Xác nhận Mở ca (${formatVND(calcDenominationTotal(openShiftCounts))})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <PaidOrdersRefundModal
         isOpen={showPaidHistoryModal}
@@ -2027,6 +2318,173 @@ export default function PosPage() {
         onRefreshPos={loadLiveOperations}
         onCountsChange={setEcoCounts}
       />
+
+      {/* [Wave 3B — P1-02] Modal PIN & Lý do In lại hóa đơn (thay thế hoàn toàn window.prompt) */}
+      <ConfirmPinModal
+        open={Boolean(reprintPrompt)}
+        mode={reprintPrompt?.step === 'pin' ? 'pin' : 'input'}
+        showKeypad={reprintPrompt?.step === 'pin'}
+        title={reprintPrompt?.step === 'pin' ? '🔒 Yêu cầu PIN Quản lý để In lại Bill' : '📝 Lý do in lại hóa đơn'}
+        message={
+          reprintPrompt?.step === 'pin'
+            ? 'In lại hóa đơn (lần 2+) yêu cầu mã PIN Quản lý / Ca trưởng (4–6 số):'
+            : 'Nhập lý do in lại hóa đơn (bắt buộc lưu Audit Log):'
+        }
+        placeholder={reprintPrompt?.step === 'pin' ? '••••' : 'Khách yêu cầu in lại bill'}
+        defaultValue={reprintPrompt?.step === 'reason' ? 'Khách yêu cầu in lại bill' : ''}
+        minLength={reprintPrompt?.step === 'pin' ? 4 : 3}
+        confirmText={reprintPrompt?.step === 'pin' ? 'Tiếp tục' : 'Xác nhận in lại'}
+        onCancel={() => {
+          setReprintPrompt(null)
+          toast.error('Đã hủy in lại hóa đơn!')
+        }}
+        onConfirm={async (val) => {
+          if (!reprintPrompt) return
+          if (reprintPrompt.step === 'pin') {
+            setReprintPrompt({ ...reprintPrompt, step: 'reason', pin: val })
+            return
+          }
+          const { hoaDon, extraOpts, pin } = reprintPrompt
+          setReprintPrompt(null)
+          try {
+            const printMeta = await orderService.issuePrintToken(hoaDon.maHoaDon, {
+              managerPin: pin,
+              lyDo: val || 'In lại bill theo yêu cầu',
+            })
+            const res = await printReceiptK80(hoaDon, {
+              ...printMeta,
+              ...extraOpts,
+              thuNgan: user?.tenNV || '',
+              tenQuan: user?.tenQuan || '',
+            })
+            if (res?.mode === 'BRIDGE') {
+              toast.success(`🖨️ Đã in lại Bill #${hoaDon.maHoaDon} (Silent Print)`, { duration: 2500 })
+            }
+          } catch (retryErr) {
+            toast.error(retryErr?.response?.data?.message || 'PIN Quản lý không hợp lệ — từ chối in lại!')
+          }
+        }}
+      />
+
+      {/* [Wave 3B — P1-02] Modal chọn món theo Slot cho Combo */}
+      {pickingCombo && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div>
+                <h3 className="text-lg font-extrabold text-purple-900">🎁 {pickingCombo.tenCombo}</h3>
+                <p className="text-xs text-purple-700 font-bold">
+                  Giá Combo: {formatVND(pickingCombo.giaBanCombo)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPickingCombo(null)}
+                className="w-10 h-10 rounded-full bg-gray-100 hover:bg-gray-200 font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-3 max-h-80 overflow-y-auto">
+              {(pickingCombo.slots || []).map((sl) => (
+                <div key={sl.id} className="space-y-1.5">
+                  <label className="block text-xs font-extrabold uppercase text-stone-700">
+                    {sl.tenSlot} (Chọn {sl.soLuongChon || 1})
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(sl.items || []).map((it) => {
+                      const active = comboSelections[sl.id] === it.maMon
+                      return (
+                        <button
+                          key={`${sl.id}-${it.maMon}`}
+                          type="button"
+                          onClick={() => setComboSelections((prev) => ({ ...prev, [sl.id]: it.maMon }))}
+                          className={`min-h-11 px-3 py-2 rounded-xl text-xs font-bold border text-left cursor-pointer ${
+                            active
+                              ? 'bg-purple-700 text-white border-purple-700'
+                              : 'bg-stone-50 text-stone-800 border-stone-200 hover:bg-purple-50'
+                          }`}
+                        >
+                          {it.tenMon || it.maMon} ({it.kichThuocMacDinh || 'M'})
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const slots = pickingCombo.slots || []
+                const count = Math.max(1, slots.length)
+                const perSlotPrice = Math.round(Number(pickingCombo.giaBanCombo || 0) / count)
+                slots.forEach((sl, idx) => {
+                  const chosenCode = comboSelections[sl.id] || sl.items?.[0]?.maMon
+                  const chosen = (sl.items || []).find((i) => i.maMon === chosenCode) || sl.items?.[0]
+                  if (!chosen) return
+                  const price =
+                    idx === count - 1
+                      ? Math.max(0, Number(pickingCombo.giaBanCombo || 0) - perSlotPrice * (count - 1))
+                      : perSlotPrice
+                  addToCart({
+                    maMon: chosen.maMon,
+                    tenMon: `[Combo] ${chosen.tenMon || chosen.maMon}`,
+                    kichThuoc: chosen.kichThuocMacDinh || 'M',
+                    donGia: price,
+                    giaModifiers: 0,
+                    modifiers: [],
+                    soLuong: 1,
+                    ghiChu: `Combo: ${pickingCombo.tenCombo}`,
+                    maCombo: pickingCombo.maCombo,
+                    tenComboSnapshot: pickingCombo.tenCombo,
+                    isTakeaway: false,
+                    courseNo: 1,
+                    fireStatus: 'FIRED',
+                    toppings: [],
+                  })
+                })
+                toast.success(`🎁 Đã thêm ${pickingCombo.tenCombo} vào giỏ!`)
+                setPickingCombo(null)
+              }}
+              className="w-full min-h-12 rounded-xl bg-purple-700 hover:bg-purple-800 text-white font-extrabold text-sm cursor-pointer"
+            >
+              ➕ Thêm Combo vào giỏ ({formatVND(pickingCombo.giaBanCombo)})
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* [Wave 3B — P1-02] Mobile Thumb Zone: thanh thao tác nhanh cố định ở đáy màn hình < 768px */}
+      <div
+        data-testid="mobile-thumb-zone"
+        className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur border-t border-stone-200 px-3 py-2 flex items-center justify-between gap-2 shadow-lg"
+      >
+        <button
+          type="button"
+          onClick={() => searchInputRef.current?.focus()}
+          className="min-h-11 px-3 rounded-xl bg-stone-100 text-stone-800 text-xs font-extrabold flex-1 cursor-pointer"
+        >
+          🔍 Tìm món
+        </button>
+        <button
+          type="button"
+          disabled={cart.length === 0 || submitting}
+          onClick={() => void handleSubmitOrder()}
+          className="min-h-11 px-3 rounded-xl bg-amber-600 text-white text-xs font-extrabold flex-1 cursor-pointer disabled:opacity-40"
+        >
+          🧾 Gửi đơn ({cart.reduce((s, i) => s + Number(i.soLuong || 1), 0)})
+        </button>
+        <button
+          type="button"
+          disabled={cart.length === 0 || submitting}
+          onClick={() => void handleStartVietQrOrder()}
+          className="min-h-11 px-3 rounded-xl bg-emerald-600 text-white text-xs font-extrabold flex-1 cursor-pointer disabled:opacity-40"
+        >
+          📱 VietQR
+        </button>
+      </div>
+      </PosErrorBoundary>
     </div>
   )
 }

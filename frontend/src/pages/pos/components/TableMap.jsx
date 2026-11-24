@@ -2,6 +2,7 @@ import { useState, useEffect, memo } from 'react'
 import toast from 'react-hot-toast'
 import { banService } from '../../../services/banService'
 import { formatVND } from '../../../utils/format'
+import ConfirmPinModal from '../../../components/ConfirmPinModal'
 
 const TableMap = memo(function TableMap({
   tables,
@@ -19,6 +20,7 @@ const TableMap = memo(function TableMap({
   const [mergeTargetMaBan, setMergeTargetMaBan] = useState('')
   const [newBan, setNewBan] = useState({ maBan: '', tenBan: '', khuVuc: 'Khu chính' })
   const [loading, setLoading] = useState(false)
+  const [reservedTableConfirm, setReservedTableConfirm] = useState(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
 
   useEffect(() => {
@@ -97,9 +99,15 @@ const TableMap = memo(function TableMap({
     if (!selectedTable || !mergeTargetMaBan) return
     setLoading(true)
     try {
+      const destTableObj = tables.find((t) => t.maBan === mergeTargetMaBan)
+      const destVersion =
+        destTableObj?.hoaDonHienTai?.version ||
+        destTableObj?.version ||
+        1
       const res = await banService.gopBan({
         fromMaBan: selectedTable.maBan,
         toMaBan: mergeTargetMaBan,
+        expectedVersion: destVersion,
       })
       toast.success(res.message || 'Gộp bàn thành công!')
       setShowMergeModal(false)
@@ -260,10 +268,8 @@ const TableMap = memo(function TableMap({
 
           const handleClickTable = () => {
             if (!isServing && resv) {
-              const ok = window.confirm(
-                `⚠️ ${ban.tenBan} có lịch ĐẶT TRƯỚC lúc ${resvTime} - ${resv.tenKhach} (${resv.soKhach} khách). Bạn vẫn muốn xếp khách vãng lai ngồi bàn này?`
-              )
-              if (!ok) return
+              setReservedTableConfirm({ ban, resv, resvTime })
+              return
             }
             onSelectTable(ban)
           }
@@ -502,6 +508,22 @@ const TableMap = memo(function TableMap({
           </div>
         </div>
       )}
+      <ConfirmPinModal
+        open={Boolean(reservedTableConfirm)}
+        mode="confirm"
+        title="Bàn đã có lịch đặt trước"
+        message={
+          reservedTableConfirm
+            ? `⚠️ ${reservedTableConfirm.ban.tenBan} có lịch ĐẶT TRƯỚC lúc ${reservedTableConfirm.resvTime} - ${reservedTableConfirm.resv.tenKhach} (${reservedTableConfirm.resv.soKhach} khách). Bạn vẫn muốn xếp khách vãng lai ngồi bàn này?`
+            : ''
+        }
+        confirmText="Vẫn xếp bàn này"
+        onConfirm={() => {
+          if (reservedTableConfirm?.ban) onSelectTable(reservedTableConfirm.ban)
+          setReservedTableConfirm(null)
+        }}
+        onCancel={() => setReservedTableConfirm(null)}
+      />
     </div>
   )
 })

@@ -20,6 +20,7 @@ const {
     todayDateVN,
     ensureBranchRecord,
     computeSafeWacOnStockIn,
+    recordCogsAdjustment,
     allocateLandedCost,
     lockBranchStockOrdered,
     updateBranchStockRow,
@@ -154,6 +155,8 @@ function registerInventoryCogsPhase4Routes(app, deps) {
                         tenantId,
                         branchId,
                         maNL: line.manl,
+                        refMaGiaoDich: maGDReversal,
+                        createdBy: req.user.maNV,
                     });
 
                     await insertLedgerLine(client, {
@@ -1320,6 +1323,21 @@ function registerInventoryCogsPhase4Routes(app, deps) {
                         chiPhiPhanBo: landed,
                     });
                     totalCogsAdj = lam2(totalCogsAdj + wac.cogsAdjustment);
+                    if (Math.abs(wac.cogsAdjustment) >= 0.01) {
+                        await recordCogsAdjustment(client, {
+                            tenantId,
+                            branchId,
+                            businessDate: ngayChungTu || todayDateVN(),
+                            maNL: item.maNL,
+                            sourceType: 'NEGATIVE_STOCK_CATCHUP',
+                            refMaGiaoDich: maGD,
+                            qtyAffected: Math.min(Math.abs(st.soLuongTon), item.slBase),
+                            oldUnitCost: st.giaVonDonVi,
+                            newUnitCost: wac.donGiaNhapThucTe,
+                            adjustmentAmount: wac.cogsAdjustment,
+                            createdBy: req.user.maNV,
+                        });
+                    }
                     const tonSau = lam3(st.soLuongTon + item.slBase);
 
                     await insertLedgerLine(client, {

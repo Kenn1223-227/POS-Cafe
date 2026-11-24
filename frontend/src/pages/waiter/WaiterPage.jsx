@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { useSocketEvents } from '../../socket/useSocketEvents'
+import { getSocket } from '../../socket/socketClient'
 import { orderService } from '../../services/orderService'
 import { useAuthStore } from '../../store/authStore'
 import { playNewOrderSound } from '../../utils/sound'
@@ -80,14 +81,62 @@ export default function WaiterPage() {
     }
   }, [dongBo])
 
+  useEffect(() => {
+    try {
+      const sock = getSocket()
+      if (sock?.connected) {
+        sock.emit('room:subscribe', {
+          branchId: user?.branchId || 'DEFAULT',
+          role: 'WAITER',
+        })
+      }
+    } catch {
+      // ignore
+    }
+  }, [user?.branchId])
+
   // Socket làm tín hiệu kéo lại dữ liệu mới nhất từ server (không cộng tay payload)
   useSocketEvents({
-    connect: dongBo,
+    connect: () => {
+      try {
+        getSocket()?.emit('room:subscribe', {
+          branchId: user?.branchId || 'DEFAULT',
+          role: 'WAITER',
+        })
+      } catch {
+        // ignore
+      }
+      dongBo()
+    },
+    'menu:86_updated': (payload) => {
+      if (payload?.tenNL || payload?.tenMon) {
+        toast(
+          payload.action === 'UNLOCK' || payload.tamHet === false
+            ? `✅ Đã mở bán lại: ${payload.tenNL || payload.tenMon}`
+            : `🚫 Tạm hết (86): ${payload.tenNL || payload.tenMon}`
+        )
+      }
+    },
+    ORDER_RUSH_UPDATED: (info) => {
+      toast(info?.rush ? `🔥 Đơn #${info.maHoaDon} vừa được đặt ưu tiên GẤP!` : `Đã gỡ cờ GẤP đơn #${info?.maHoaDon}`)
+      dongBo()
+    },
     MON_DA_XONG: dongBo,
     MON_DA_PHUC_VU: dongBo,
     MON_BI_HUY: dongBo,
     BAN_CHUYEN: dongBo,
   })
+
+  const handleToggleRush = async (item) => {
+    try {
+      const isCurrentlyRush = Number(item.mucDoUuTien || 0) >= 2
+      await orderService.setOrderRush(item.maHoaDon, { rush: !isCurrentlyRush })
+      toast.success(!isCurrentlyRush ? `🔥 Đã đặt đơn #${item.maHoaDon} GẤP!` : `Đã gỡ cờ GẤP đơn #${item.maHoaDon}`)
+      dongBo()
+    } catch {
+      // interceptor handles error
+    }
+  }
 
   const handleDelivered = async (item) => {
     if (dangXuLy.has(item.maCTHD)) return
@@ -192,9 +241,39 @@ export default function WaiterPage() {
                       </span>
                     </div>
 
-                    <p className="text-xl font-extrabold text-emerald-700 mt-1">
-                      Số lượng: ×{item.soLuong}
-                    </p>
+                    <div className="flex items-center justify-between mt-1">
+                      <p className="text-xl font-extrabold text-emerald-700">
+                        Số lượng: ×{item.soLuong}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleRush(item)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-extrabold cursor-pointer ${
+                          Number(item.mucDoUuTien || 0) >= 2
+                            ? 'bg-red-600 text-white'
+                            : 'bg-amber-100 text-amber-900 hover:bg-amber-200'
+                        }`}
+                      >
+                        🔥 {Number(item.mucDoUuTien || 0) >= 2 ? 'ĐANG GẤP' : 'GẤP'}
+                      </button>
+                    </div>
+
+                    {Array.isArray(item.modifiersSnapshot) && item.modifiersSnapshot.length > 0 && (
+                      <div className="mt-2 p-2 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-900 flex flex-wrap gap-1">
+                        {item.modifiersSnapshot.map((m, idx) => {
+                          const mQty = Number(m.qty ?? m.soLuong ?? 1)
+                          return (
+                            <span
+                              key={`${m.optionId || idx}`}
+                              className="px-2 py-0.5 rounded bg-sky-100 font-bold"
+                            >
+                              {m.tenInNgan || m.tenOption}
+                              {mQty > 1 ? ` x${mQty}` : ''}
+                            </span>
+                          )
+                        })}
+                      </div>
+                    )}
 
                     {item.toppings?.length > 0 && (
                       <div className="mt-2 p-2 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-0.5">

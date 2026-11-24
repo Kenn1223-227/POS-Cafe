@@ -29,6 +29,22 @@ BEGIN
             EXECUTE format('ALTER TABLE public.phieuthuchilatvat DROP CONSTRAINT IF EXISTS %I', con_name);
         END LOOP;
 
+        -- Đảm bảo LoaiPhieu có kiểu INT nếu DB cũ đang để VARCHAR
+        BEGIN
+            ALTER TABLE public.phieuthuchilatvat
+                ALTER COLUMN LoaiPhieu TYPE INT USING (
+                    CASE
+                        WHEN LoaiPhieu::text IN ('1', 'THU') THEN 1
+                        WHEN LoaiPhieu::text IN ('2', 'CHI') THEN 2
+                        WHEN LoaiPhieu::text IN ('3', 'RUT_KET') THEN 3
+                        WHEN LoaiPhieu::text IN ('4', 'THOI_CK_DU') THEN 4
+                        ELSE 1
+                    END
+                );
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END;
+
         ALTER TABLE public.phieuthuchilatvat
             ADD CONSTRAINT chk_phieuthuchi_loaiphieu CHECK (LoaiPhieu IN (1, 2, 3));
     END IF;

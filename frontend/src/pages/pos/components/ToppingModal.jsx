@@ -48,6 +48,14 @@ export default function ToppingModal({
   const [ghiChuThem, setGhiChuThem] = useState(() => initialCartItem?.ghiChu || '')
   const [isTakeaway, setIsTakeaway] = useState(() => Boolean(initialCartItem?.isTakeaway))
   const [holdCourse2, setHoldCourse2] = useState(() => initialCartItem?.fireStatus === 'HELD')
+  const isWeightedItem = ['GRAM', 'KG'].includes(String(product?.donViBanHang || '').toUpperCase())
+  const isMarketPriceItem = Boolean(product?.laMonThoiGia)
+  const [trongLuongGram, setTrongLuongGram] = useState(() =>
+    Number(initialCartItem?.trongLuongGram || (String(product?.donViBanHang || '').toUpperCase() === 'KG' ? 1000 : 100))
+  )
+  const [giaThoiGiaInput, setGiaThoiGiaInput] = useState(() =>
+    String(initialCartItem?.donGia ?? product?.sizes?.[0]?.giaBan ?? '')
+  )
   const [selectedToppings, setSelectedToppings] = useState(() => {
     const map = {}
     for (const t of initialCartItem?.toppings || []) {
@@ -99,6 +107,24 @@ export default function ToppingModal({
         } else if (totalInGrp < Number(grp.chonToiDa || 99)) {
           grpSel[opt.id] = 1
         }
+      }
+      return { ...prev, [grp.id]: grpSel }
+    })
+  }
+
+  const changeModifierQty = (grp, opt, delta) => {
+    if (opt.tamHet) return
+    const maxPerOpt = Math.max(1, Number(opt.toiDaSoLuong || 1))
+    const maxGrpTotal = Math.max(1, Number(grp.chonToiDa || 99))
+    setSelectedMods((prev) => {
+      const grpSel = { ...(prev[grp.id] || {}) }
+      const cur = Number(grpSel[opt.id] || 0)
+      const totalInGrp = Object.values(grpSel).reduce((s, q) => s + Number(q || 0), 0)
+      const next = cur + delta
+      if (next <= 0) {
+        delete grpSel[opt.id]
+      } else if (next <= maxPerOpt && totalInGrp - cur + next <= maxGrpTotal) {
+        grpSel[opt.id] = next
       }
       return { ...prev, [grp.id]: grpSel }
     })
@@ -196,7 +222,17 @@ export default function ToppingModal({
   })
 
   const toppingCostPerCup = toppingsArray.reduce((sum, t) => sum + t.donGia * t.soLuongMoiLy, 0)
-  const unitPrice = Number(selectedSize?.giaBan || 0) + modifiersCostPerCup + toppingCostPerCup
+  const baseItemPrice = isMarketPriceItem
+    ? Math.max(0, Number(giaThoiGiaInput || 0))
+    : isWeightedItem
+    ? Math.round(
+        Number(selectedSize?.giaBan || 0) *
+          (String(product?.donViBanHang || '').toUpperCase() === 'KG'
+            ? Math.max(1, Number(trongLuongGram || 0)) / 1000
+            : Math.max(1, Number(trongLuongGram || 0)))
+      )
+    : Number(selectedSize?.giaBan || 0)
+  const unitPrice = baseItemPrice + modifiersCostPerCup + toppingCostPerCup
   const lineTotal = unitPrice * soLuong
 
   const buildStructuredNote = () => {
@@ -215,7 +251,7 @@ export default function ToppingModal({
       maMon: product.maMon,
       tenMon: product.tenMon,
       kichThuoc: selectedSize.kichThuoc,
-      donGia: Number(selectedSize.giaBan),
+      donGia: baseItemPrice,
       giaModifiers: modifiersCostPerCup,
       modifiers: modifiersArray,
       soLuong: Number(soLuong),
@@ -223,6 +259,8 @@ export default function ToppingModal({
       isTakeaway,
       courseNo: holdCourse2 ? 2 : 1,
       fireStatus: holdCourse2 ? 'HELD' : 'FIRED',
+      ...(isWeightedItem ? { trongLuongGram: Math.max(1, Number(trongLuongGram || 0)) } : {}),
+      ...(isMarketPriceItem ? { donGiaTuyChinh: baseItemPrice } : {}),
       toppings: toppingsArray,
     })
     onClose()
@@ -256,7 +294,41 @@ export default function ToppingModal({
             onSelectSize={setSelectedSize}
           />
 
-          {/* Structured Modifiers từ DB (Forced Modifiers + Smart Defaults + Free K + 86'ing) */}
+          {/* [Wave 3B — P1-02] Món Cân Ký (GRAM/KG) & Món Thời Giá */}
+          {isWeightedItem && (
+            <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-1.5">
+              <label className="block text-xs font-extrabold text-amber-900">
+                ⚖️ Trọng lượng cân thực tế (gram) — Đơn vị: {product.donViBanHang}
+              </label>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={trongLuongGram}
+                onChange={(e) => setTrongLuongGram(Math.max(1, Number(e.target.value || 0)))}
+                className="w-full rounded-xl border border-amber-300 bg-white px-3 py-2 text-sm font-bold text-stone-900"
+              />
+            </div>
+          )}
+
+          {isMarketPriceItem && (
+            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 space-y-1.5">
+              <label className="block text-xs font-extrabold text-emerald-900">
+                🏷️ Giá bán thời giá (VNĐ)
+              </label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={giaThoiGiaInput}
+                onChange={(e) => setGiaThoiGiaInput(e.target.value)}
+                placeholder="Nhập giá bán..."
+                className="w-full rounded-xl border border-emerald-300 bg-white px-3 py-2 text-sm font-bold text-stone-900"
+              />
+            </div>
+          )}
+
+          {/* Structured Modifiers từ DB (Forced Modifiers + Smart Defaults + Free K + qty > 1 + 86'ing) */}
           {modifierGroups.length > 0 ? (
             <div className="space-y-3">
               {modifierGroups.map((grp) => {
@@ -279,30 +351,62 @@ export default function ToppingModal({
                     </label>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                       {(grp.options || []).map((opt) => {
-                        const active = Boolean(grpSel[opt.id])
+                        const qty = Number(grpSel[opt.id] || 0)
+                        const active = qty > 0
                         const isOut = Boolean(opt.tamHet)
+                        const maxQty = Math.max(1, Number(opt.toiDaSoLuong || 1))
                         return (
-                          <button
-                            type="button"
+                          <div
                             key={opt.id}
-                            disabled={isOut}
-                            onClick={() => toggleModifierOption(grp, opt)}
-                            className={`min-h-11 px-2.5 py-2 rounded-xl text-xs font-bold border text-left transition ${
+                            className={`min-h-11 px-2.5 py-2 rounded-xl text-xs font-bold border text-left transition flex flex-col justify-between ${
                               isOut
                                 ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed line-through'
                                 : active
-                                ? 'bg-amber-700 text-white border-amber-700 shadow-sm cursor-pointer'
-                                : 'bg-stone-50 text-gray-700 border-gray-200 hover:bg-amber-50 cursor-pointer'
+                                ? 'bg-amber-700 text-white border-amber-700 shadow-sm'
+                                : 'bg-stone-50 text-gray-700 border-gray-200 hover:bg-amber-50'
                             }`}
                           >
-                            <div className="truncate">{opt.tenOption}</div>
-                            {Number(opt.giaCongThem) > 0 && (
-                              <div className={`text-[10px] ${active ? 'text-amber-200' : 'text-amber-700'}`}>
-                                +{formatVND(opt.giaCongThem)}
+                            <button
+                              type="button"
+                              disabled={isOut}
+                              onClick={() => toggleModifierOption(grp, opt)}
+                              className="w-full text-left cursor-pointer disabled:cursor-not-allowed"
+                            >
+                              <div className="truncate">{opt.tenOption}</div>
+                              {Number(opt.giaCongThem) > 0 && (
+                                <div className={`text-[10px] ${active ? 'text-amber-200' : 'text-amber-700'}`}>
+                                  +{formatVND(opt.giaCongThem)}
+                                </div>
+                              )}
+                              {isOut && <div className="text-[9px] text-red-600 font-extrabold no-underline">HẾT (86)</div>}
+                            </button>
+                            {!isOut && maxQty > 1 && active && (
+                              <div className="mt-1.5 flex items-center justify-between gap-1 bg-black/15 rounded-lg px-1.5 py-0.5">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    changeModifierQty(grp, opt, -1)
+                                  }}
+                                  className="w-6 h-6 rounded bg-white/20 hover:bg-white/30 font-extrabold text-white cursor-pointer"
+                                >
+                                  −
+                                </button>
+                                <span className="text-xs font-extrabold">×{qty}</span>
+                                <button
+                                  type="button"
+                                  disabled={qty >= maxQty}
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    changeModifierQty(grp, opt, 1)
+                                  }}
+                                  className="w-6 h-6 rounded bg-white/20 hover:bg-white/30 font-extrabold text-white cursor-pointer disabled:opacity-40"
+                                >
+                                  +
+                                </button>
                               </div>
                             )}
-                            {isOut && <div className="text-[9px] text-red-600 font-extrabold no-underline">HẾT (86)</div>}
-                          </button>
+                          </div>
                         )
                       })}
                     </div>

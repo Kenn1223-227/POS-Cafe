@@ -18,6 +18,7 @@ import {
 } from '../../utils/sound'
 import { printKdsItemLabels50x30 } from '../../utils/printHelper'
 import { subscribeLanEvents, updateLanItemStatus } from '../../utils/lanHub'
+import axiosClient from '../../api/axiosClient'
 
 const KHOA_QUEUE_CU = 'barista_kds_queue'
 const KHOA_TRAM_KDS = 'barista_kds_station'
@@ -285,7 +286,48 @@ export default function BaristaPage() {
     }
   }, [stationFilter, viewMode, user?.tenantId, user?.branchId])
 
+  const [expiringBatches, setExpiringBatches] = useState([])
+  const [discardingLotId, setDiscardingLotId] = useState(null)
+
+  const loadExpiringBatches = useCallback(async () => {
+    try {
+      const res = await axiosClient.get('/kds/expiring-batches', { silent: true })
+      if (Array.isArray(res?.batches)) setExpiringBatches(res.batches)
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadExpiringBatches()
+    const timer = setInterval(() => void loadExpiringBatches(), 60000)
+    return () => clearInterval(timer)
+  }, [loadExpiringBatches])
+
+  const handleDiscardExpiredBatch = async (lotId) => {
+    setDiscardingLotId(lotId)
+    try {
+      const res = await axiosClient.post(`/kds/batches/${lotId}/discard-expired`, {
+        lyDo: 'Xuất hủy 1 chạm mẻ hết hạn từ màn hình KDS',
+      })
+      toast.success(res?.message || '🗑️ Đã xuất hủy mẻ hết hạn!')
+      setExpiringBatches((prev) => prev.filter((b) => Number(b.lotId) !== Number(lotId)))
+    } catch {
+      // Interceptor xử lý
+    } finally {
+      setDiscardingLotId(null)
+    }
+  }
+
   useSocketEvents({
+    'kds:batch_expiring_warning': (payload) => {
+      if (Array.isArray(payload?.batches)) {
+        setExpiringBatches(payload.batches)
+        if (payload.batches.length > 0 && soundRef.current) {
+          playRushOrRemakeSound()
+        }
+      }
+    },
     CONNECTION_STATE: ({ disconnectedOver5s: isAlert }) => {
       setDisconnectedOver5s(Boolean(isAlert))
     },
@@ -320,6 +362,17 @@ export default function BaristaPage() {
       if (info?.seq) lastSeqRef.current = Math.max(lastSeqRef.current, Number(info.seq))
       if (soundRef.current) playRushOrRemakeSound()
       toast.error(`⚡ VÉ LÀM LẠI (0đ • Ưu tiên cao nhất): ${info?.mon?.tenMon || ''}`, { duration: 7000 })
+      void dongBo()
+    },
+    ORDER_RUSH_UPDATED: (info) => {
+      if (info?.seq) lastSeqRef.current = Math.max(lastSeqRef.current, Number(info.seq))
+      if (info?.rush && soundRef.current) playRushOrRemakeSound()
+      toast(
+        info?.rush
+          ? `🔥 ĐƠN GẤP: #${info.maHoaDon} vừa được đặt ưu tiên cao nhất!`
+          : `Đã gỡ cờ GẤP cho đơn #${info?.maHoaDon}`,
+        { duration: 5000 }
+      )
       void dongBo()
     },
     ORDER_ALL_READY: (info) => {
@@ -619,10 +672,22 @@ export default function BaristaPage() {
       }
       const sl = Number(item.soLuong || 1)
       acc[key].tongLy += sl
+      const modLabel =
+        Array.isArray(item.modifiersSnapshot) && item.modifiersSnapshot.length > 0
+          ? item.modifiersSnapshot
+              .map((m) => {
+                const mQty = Number(m.qty ?? m.soLuong ?? 1)
+                const lbl = m.tenInNgan || m.tenOption || ''
+                return mQty > 1 ? `${lbl} x${mQty}` : lbl
+              })
+              .filter(Boolean)
+              .join(', ')
+          : ''
       const tpLabel = item.toppings?.length
         ? ` (+${item.toppings.map((t) => t.tenTopping).join(', ')})`
         : ''
-      const noteKey = `${(item.ghiChu || 'Bình thường').trim()}${tpLabel}`
+      const baseNote = [modLabel, (item.ghiChu || '').trim()].filter(Boolean).join(' • ') || 'Bình thường'
+      const noteKey = `${baseNote}${tpLabel}`
       acc[key].nhomGhiChuMap[noteKey] = (acc[key].nhomGhiChuMap[noteKey] || 0) + sl
       acc[key].chiTiet.push(item)
       return acc
@@ -684,6 +749,30 @@ export default function BaristaPage() {
 
   return (
     <div className="min-h-screen bg-stone-900 text-stone-100 flex flex-col">
+      {/* [Wave 3B — P1-04] Cảnh báo HSD Bán thành phẩm sắp hết hạn trên KDS + nút 1 chạm Hủy mẻ */}
+      {expiringBatches.length > 0 && (
+        <div className="bg-red-900/95 border-b border-red-500 px-5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-black text-amber-300 uppercase">⏰ Cảnh báo HSD Bán thành phẩm:</span>
+            {expiringBatches.map((b) => (
+              <span
+                key={b.lotId}
+                className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-red-950/80 border border-red-400/50 text-white"
+              >
+                <b>{b.tenNL}</b> ({b.maLo}) — {b.isExpired ? 'ĐÃ HẾT HẠN' : `còn ${b.minutesLeft} phút`}
+                <button
+                  type="button"
+                  disabled={discardingLotId === b.lotId}
+                  onClick={() => handleDiscardExpiredBatch(b.lotId)}
+                  className="px-2 py-0.5 rounded bg-red-600 hover:bg-red-500 text-white font-extrabold cursor-pointer disabled:opacity-50"
+                >
+                  {discardingLotId === b.lotId ? 'Đang hủy...' : '🗑️ Hủy mẻ hết hạn'}
+                </button>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       <header className="bg-stone-950 px-5 py-3.5 flex flex-wrap items-center justify-between gap-3 border-b border-stone-800">
         <div>
           <h1 className="text-xl font-extrabold text-amber-400">
@@ -1080,6 +1169,18 @@ export default function BaristaPage() {
                                 {item.tenBan || 'Mang đi'} (#{item.maHoaDon}) • x{item.soLuong}
                               </span>
                             </p>
+                            {Array.isArray(item.modifiersSnapshot) && item.modifiersSnapshot.length > 0 && (
+                              <p className="text-sky-300 font-semibold">
+                                ⚙️{' '}
+                                {item.modifiersSnapshot
+                                  .map((m) => {
+                                    const mQty = Number(m.qty ?? m.soLuong ?? 1)
+                                    const lbl = m.tenInNgan || m.tenOption || ''
+                                    return mQty > 1 ? `${lbl} x${mQty}` : lbl
+                                  })
+                                  .join(', ')}
+                              </p>
+                            )}
                             {item.toppings?.length > 0 && (
                               <p className="text-amber-100">
                                 + {item.toppings.map((t) => `${t.tenTopping} x${t.soLuong}`).join(', ')}
@@ -1242,14 +1343,57 @@ export default function BaristaPage() {
                           Size {item.kichThuoc}
                         </span>
                       </div>
-                      <div className="flex items-center justify-between mt-2">
+                      <div className="flex items-center justify-between mt-2 gap-2">
                         <p className="text-2xl font-black text-emerald-400">×{item.soLuong}</p>
-                        {nhan && (
-                          <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${nhan.cls}`}>
-                            {nhan.text}
-                          </span>
-                        )}
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const nextRush = !(Number(item.mucDoUuTien || 0) >= 2)
+                                await orderService.setOrderRush(item.maHoaDon, { rush: nextRush })
+                                toast.success(
+                                  nextRush
+                                    ? `🔥 Đã đặt ưu tiên GẤP đơn #${item.maHoaDon}`
+                                    : `Đã gỡ cờ GẤP đơn #${item.maHoaDon}`
+                                )
+                                void dongBo()
+                              } catch {
+                                // interceptor handles error
+                              }
+                            }}
+                            className={`px-2 py-1 rounded-lg text-xs font-extrabold cursor-pointer ${
+                              Number(item.mucDoUuTien || 0) >= 2
+                                ? 'bg-red-600 text-white'
+                                : 'bg-stone-700 hover:bg-red-700 text-amber-200'
+                            }`}
+                          >
+                            🔥 {Number(item.mucDoUuTien || 0) >= 2 ? 'GẤP' : 'Đặt gấp'}
+                          </button>
+                          {nhan && (
+                            <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${nhan.cls}`}>
+                              {nhan.text}
+                            </span>
+                          )}
+                        </div>
                       </div>
+
+                      {Array.isArray(item.modifiersSnapshot) && item.modifiersSnapshot.length > 0 && (
+                        <div className="mt-2 p-2 rounded-xl bg-sky-950/60 border border-sky-600/50 text-xs text-sky-200 flex flex-wrap gap-1">
+                          {item.modifiersSnapshot.map((m, idx) => {
+                            const mQty = Number(m.qty ?? m.soLuong ?? 1)
+                            return (
+                              <span
+                                key={`${m.optionId || idx}`}
+                                className="px-2 py-0.5 rounded bg-sky-800/80 font-bold"
+                              >
+                                {m.tenInNgan || m.tenOption}
+                                {mQty > 1 ? ` x${mQty}` : ''}
+                              </span>
+                            )
+                          })}
+                        </div>
+                      )}
 
                       {item.toppings?.length > 0 && (
                         <div className="mt-2.5 p-2.5 rounded-xl bg-stone-900 border border-amber-700/50 text-sm text-amber-100 space-y-0.5">

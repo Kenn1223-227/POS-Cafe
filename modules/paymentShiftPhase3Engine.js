@@ -455,17 +455,44 @@ async function computeEndOfDayReconciliation(
         }
     }
 
-    const whRes = await client.query(
-        `SELECT TrangThaiXuLy, TrangThaiXuLyDu, COUNT(*) AS cnt,
-                COALESCE(SUM(SoTien), 0) AS tong_nhan,
-                COALESCE(SUM(SoTienConLai), 0) AS tong_du
-           FROM public.vietqr_webhook_events
-          WHERE COALESCE(TenantId, 'DEFAULT') = $1
-            AND ($2::text IS NULL OR ThoiGianNhan >= ($2::text::timestamp AT TIME ZONE '${vnTz}'))
-            AND ($3::text IS NULL OR ThoiGianNhan < (($3::text::date + 1)::timestamp AT TIME ZONE '${vnTz}'))
-          GROUP BY TrangThaiXuLy, TrangThaiXuLyDu`,
-        [tId, filterByShift ? null : tuNgay, filterByShift ? null : denNgay]
-    );
+    // [Wave 1 — P0-07] Khi đối soát theo ca, lọc vietqr_webhook_events theo đúng khung [ThoiGianMoCa, COALESCE(ThoiGianDongCa, now())]
+    let whRes;
+    if (filterByShift) {
+        const shiftWindowRes = await client.query(
+            `SELECT ThoiGianMoCa, COALESCE(ThoiGianDongCa, now()) AS ThoiGianKetThuc
+               FROM CaThuNgan
+              WHERE MaCaThuNgan = $1 AND COALESCE(TenantId, 'DEFAULT') = $2`,
+            [maCaThuNgan, tId]
+        );
+        const win = shiftWindowRes.rows[0];
+        if (win) {
+            whRes = await client.query(
+                `SELECT TrangThaiXuLy, TrangThaiXuLyDu, COUNT(*) AS cnt,
+                        COALESCE(SUM(SoTien), 0) AS tong_nhan,
+                        COALESCE(SUM(SoTienConLai), 0) AS tong_du
+                   FROM public.vietqr_webhook_events
+                  WHERE COALESCE(TenantId, 'DEFAULT') = $1
+                    AND ThoiGianNhan >= $2::timestamptz
+                    AND ThoiGianNhan <= $3::timestamptz
+                  GROUP BY TrangThaiXuLy, TrangThaiXuLyDu`,
+                [tId, win.thoigianmoca, win.thoigianketthuc]
+            );
+        } else {
+            whRes = { rows: [] };
+        }
+    } else {
+        whRes = await client.query(
+            `SELECT TrangThaiXuLy, TrangThaiXuLyDu, COUNT(*) AS cnt,
+                    COALESCE(SUM(SoTien), 0) AS tong_nhan,
+                    COALESCE(SUM(SoTienConLai), 0) AS tong_du
+               FROM public.vietqr_webhook_events
+              WHERE COALESCE(TenantId, 'DEFAULT') = $1
+                AND ($2::text IS NULL OR ThoiGianNhan >= ($2::text::timestamp AT TIME ZONE '${vnTz}'))
+                AND ($3::text IS NULL OR ThoiGianNhan < (($3::text::date + 1)::timestamp AT TIME ZONE '${vnTz}'))
+              GROUP BY TrangThaiXuLy, TrangThaiXuLyDu`,
+            [tId, tuNgay, denNgay]
+        );
+    }
 
     let webhookMatchedTotal = 0;
     let webhookUnmatchedTotal = 0;

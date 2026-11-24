@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { applyMixedRateTaxToOrder } = require('./vnTaxAndEInvoiceService');
 
 const VN_TZ = 'Asia/Ho_Chi_Minh';
 const lam3 = (x) => Math.round(Number(x || 0) * 1000) / 1000;
@@ -445,34 +446,50 @@ function tinhTongKeToanHoaDon({
 // =============================================================================
 // 7. SỐ THỨ TỰ NGÀY KHÔNG TRÙNG (001..999+ — BỎ MODULO 99)
 // =============================================================================
-async function capSoThuTuNgayKhongTrung(client, tenantId = 'DEFAULT') {
+async function capSoThuTuNgayKhongTrung(client, tenantId = 'DEFAULT', branchId = 'MAIN') {
     const tId = String(tenantId || 'DEFAULT');
+    const bId = String(branchId || 'MAIN').trim() || 'MAIN';
     const todayVN = ngayHomNayVN();
     let seq = 1;
 
-    await client.query('SAVEPOINT sp_daily_counter_v2');
+    await client.query('SAVEPOINT sp_branch_daily_counter');
     try {
         const r = await client.query(
-            `INSERT INTO Tenant_Daily_Counter (TenantId, NgayVN, LastSeq)
-             VALUES ($1, $2::date, 1)
-             ON CONFLICT (TenantId, NgayVN)
-             DO UPDATE SET LastSeq = Tenant_Daily_Counter.LastSeq + 1
-             RETURNING LastSeq AS stt`,
-            [tId, todayVN]
+            `INSERT INTO public.branch_daily_counter (tenant_id, branch_id, business_date, last_seq)
+             VALUES ($1, $2, $3::date, 1)
+             ON CONFLICT (tenant_id, branch_id, business_date)
+             DO UPDATE SET last_seq = public.branch_daily_counter.last_seq + 1, updated_at = now()
+             RETURNING last_seq AS stt`,
+            [tId, bId, todayVN]
         );
-        await client.query('RELEASE SAVEPOINT sp_daily_counter_v2');
+        await client.query('RELEASE SAVEPOINT sp_branch_daily_counter');
         seq = Number(r.rows[0].stt);
     } catch {
-        await client.query('ROLLBACK TO SAVEPOINT sp_daily_counter_v2').catch(() => {});
-        const cntRes = await client.query(
-            `SELECT COUNT(*)::int + 1 AS stt
-               FROM HoaDon
-              WHERE COALESCE(TenantId, 'DEFAULT') = $1
-                AND ThoiGianTao >= ($2::timestamp AT TIME ZONE '${VN_TZ}')
-                AND ThoiGianTao < (($2::date + 1)::timestamp AT TIME ZONE '${VN_TZ}')`,
-            [tId, todayVN]
-        );
-        seq = Number(cntRes.rows[0]?.stt || 1);
+        await client.query('ROLLBACK TO SAVEPOINT sp_branch_daily_counter').catch(() => {});
+        await client.query('SAVEPOINT sp_daily_counter_v2');
+        try {
+            const r = await client.query(
+                `INSERT INTO Tenant_Daily_Counter (TenantId, NgayVN, LastSeq)
+                 VALUES ($1, $2::date, 1)
+                 ON CONFLICT (TenantId, NgayVN)
+                 DO UPDATE SET LastSeq = Tenant_Daily_Counter.LastSeq + 1
+                 RETURNING LastSeq AS stt`,
+                [tId, todayVN]
+            );
+            await client.query('RELEASE SAVEPOINT sp_daily_counter_v2');
+            seq = Number(r.rows[0].stt);
+        } catch {
+            await client.query('ROLLBACK TO SAVEPOINT sp_daily_counter_v2').catch(() => {});
+            const cntRes = await client.query(
+                `SELECT COUNT(*)::int + 1 AS stt
+                   FROM HoaDon
+                  WHERE COALESCE(TenantId, 'DEFAULT') = $1
+                    AND ThoiGianTao >= ($2::timestamp AT TIME ZONE '${VN_TZ}')
+                    AND ThoiGianTao < (($2::date + 1)::timestamp AT TIME ZONE '${VN_TZ}')`,
+                [tId, todayVN]
+            );
+            seq = Number(cntRes.rows[0]?.stt || 1);
+        }
     }
 
     const soThuTuHienThi = String(seq).padStart(3, '0');
@@ -480,16 +497,29 @@ async function capSoThuTuNgayKhongTrung(client, tenantId = 'DEFAULT') {
 }
 
 // =============================================================================
-// 8. KHÓA LẠC QUAN (OPTIMISTIC LOCKING) CHỐNG RACE CONDITION
+// 8. KHÓA LẠC QUAN (OPTIMISTIC LOCKING) CHỐNG RACE CONDITION — BẮT BUỘC (428)
 // =============================================================================
 async function kiemTraVaTangVersionHoaDon(
     client,
-    { maHoaDon, tenantId = 'DEFAULT', expectedVersion = null, layHoaDonChiTiet, LoiNghiepVu }
+    { maHoaDon, tenantId = 'DEFAULT', expectedVersion = null, mandatory = true, layHoaDonChiTiet, LoiNghiepVu }
 ) {
     const hasExpected =
         expectedVersion !== undefined &&
         expectedVersion !== null &&
         String(expectedVersion).trim() !== '';
+
+    if (mandatory && !hasExpected) {
+        const latest = layHoaDonChiTiet ? await layHoaDonChiTiet(client, maHoaDon).catch(() => null) : null;
+        throw new LoiNghiepVu(
+            428,
+            `Thiếu expectedVersion (Precondition Required) khi thao tác hóa đơn #${maHoaDon}!`,
+            {
+                maLoi: 'EXPECTED_VERSION_REQUIRED',
+                code: 'EXPECTED_VERSION_REQUIRED',
+                currentVersion: latest?.version ?? null,
+            }
+        );
+    }
 
     await client.query('SAVEPOINT sp_hd_opt_lock');
     try {
@@ -568,7 +598,8 @@ async function recalculateInvoiceTotals(
                 COALESCE((to_jsonb(HoaDon)->>'phidonggoi')::numeric, 0) AS PhiDongGoi,
                 COALESCE(to_jsonb(HoaDon)->>'cachtinhthue', 'INCLUDED') AS CachTinhThue,
                 COALESCE((to_jsonb(HoaDon)->>'thuevatphantram')::numeric, 0) AS ThueVATPhanTram,
-                COALESCE((to_jsonb(HoaDon)->>'phiphucvuphantram')::numeric, 0) AS PhiPhucVuPhanTram
+                COALESCE((to_jsonb(HoaDon)->>'phiphucvuphantram')::numeric, 0) AS PhiPhucVuPhanTram,
+                COALESCE((to_jsonb(HoaDon)->>'buoc_lam_tron')::int, 1000) AS BuocLamTron
            FROM HoaDon
           WHERE MaHoaDon = $1 AND COALESCE(TenantId, 'DEFAULT') = $2`,
         [maHoaDon, tenantId]
@@ -579,7 +610,7 @@ async function recalculateInvoiceTotals(
     // Đọc các dòng món còn hiệu lực
     const monRes = await client.query(
         `SELECT c.MaCTHD, c.SoLuong, c.DonGia,
-                COALESCE(c.GiaGiam, 0) AS GiaGiam,
+                COALESCE((to_jsonb(c)->>'giagiam')::numeric, 0) AS GiaGiam,
                 COALESCE((to_jsonb(c)->>'giamodifiers')::numeric, 0) AS GiaModifiers,
                 COALESCE((to_jsonb(c)->>'chietkhaumon')::numeric, 0) AS ChietKhauMon,
                 COALESCE((to_jsonb(c)->>'lamontang')::boolean, FALSE) AS LaMonTang,
@@ -707,6 +738,7 @@ async function recalculateInvoiceTotals(
         phiDongGoi: Number(hd.phidonggoi || 0),
         cachTinhThue: hd.cachtinhthue,
         thueVATPhanTram: Number(hd.thuevatphantram || 0),
+        buocLamTron: Number(hd.buoclamtron || 1000),
     });
 
     await client.query('SAVEPOINT sp_recalc_hd_upd');
@@ -775,10 +807,27 @@ async function recalculateInvoiceTotals(
         });
     }
 
+    // [Wave 3A — P1-01] Đồng bộ snapshot thuế đa mức (8%/10%/5%/0%/KCT) & einvoice_lookup_code
+    let mixedTaxResult = null;
+    await client.query('SAVEPOINT sp_recalc_mixed_tax');
+    try {
+        mixedTaxResult = await applyMixedRateTaxToOrder(client, {
+            tenantId,
+            maHoaDon,
+            orderDiscountTotal: newTienGiamKM + newTienGiamDiem,
+            serviceChargePct: Number(hd.phiphucvuphantram || 0),
+            taxMode: hd.cachtinhthue || 'INCLUDED',
+        });
+        await client.query('RELEASE SAVEPOINT sp_recalc_mixed_tax');
+    } catch {
+        await client.query('ROLLBACK TO SAVEPOINT sp_recalc_mixed_tax').catch(() => {});
+    }
+
     return {
         promoAdjusted,
         promoAdjustReasons,
         totals,
+        mixedTax: mixedTaxResult,
     };
 }
 

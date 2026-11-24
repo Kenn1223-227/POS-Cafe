@@ -8,6 +8,8 @@ const {
     updateBranchStockRow,
     insertLedgerLine,
 } = require('./inventoryCogsPhase4Engine');
+const { maskPhoneForRole } = require('./vnTaxAndEInvoiceService');
+const { loadBranchAvailability86Map } = require('./kdsPhase2Engine');
 
 // =============================================================================
 // PHÂN HỆ 8: CHIẾN LƯỢC MỞ RỘNG TỆP KHÁCH HÀNG & HỆ SINH THÁI TÍNH NĂNG
@@ -521,7 +523,7 @@ function registerEcosystemPhase8Routes(
             }
         }
 
-        const [spRes, tpRes, zoneRes, bakeryMap] = await Promise.all([
+        const [spRes, tpRes, zoneRes, bakeryMap, branch86] = await Promise.all([
             client.query(
                 `SELECT sp.MaMon, sp.TenMon, sp.NhomMon, COALESCE(sp.TamHet, FALSE) AS TamHet,
                         sz.KichThuoc, sz.GiaBan
@@ -554,6 +556,7 @@ function registerEcosystemPhase8Routes(
                 }
             })(),
             layBanDoGiamGiaLoBanhHomNay(client, tenantId),
+            loadBranchAvailability86Map(client, tenantId, branchId || 'DEFAULT'),
         ]);
 
         const zonePriceMap = new Map(zoneRes.rows.map((r) => [`${r.mamon}|${r.kichthuoc}`, Number(r.giaban)]));
@@ -562,11 +565,12 @@ function registerEcosystemPhase8Routes(
         for (const row of spRes.rows) {
             if (!menuMap.has(row.mamon)) {
                 const md = bakeryMap.get(row.mamon);
+                const bProd = branch86?.products?.get(String(row.mamon));
                 const item = {
                     maMon: row.mamon,
                     tenMon: row.tenmon,
                     nhomMon: row.nhommon,
-                    tamHet: Boolean(row.tamhet),
+                    tamHet: bProd !== undefined ? Boolean(bProd.isSoldOut) : Boolean(row.tamhet),
                     bakeryMarkdown: md?.dangGiamGia
                         ? {
                               phanTramGiam: md.phanTramGiam,
@@ -592,12 +596,15 @@ function registerEcosystemPhase8Routes(
             });
         }
 
-        const toppings = tpRes.rows.map((t) => ({
-            maTopping: t.matopping,
-            tenTopping: t.tentopping,
-            giaTopping: parseFloat(t.giatopping),
-            tamHet: Boolean(t.tamhet),
-        }));
+        const toppings = tpRes.rows.map((t) => {
+            const bTp = branch86?.toppings?.get(String(t.matopping));
+            return {
+                maTopping: t.matopping,
+                tenTopping: t.tentopping,
+                giaTopping: parseFloat(t.giatopping),
+                tamHet: bTp !== undefined ? Boolean(bTp.isSoldOut) : Boolean(t.tamhet),
+            };
+        });
 
         const upsells = goiYBanKemSmartUpsell({
             cartMaMonList: [],
@@ -1064,24 +1071,42 @@ function registerEcosystemPhase8Routes(
     app.get('/api/crm/customers', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {
         const tenantId = layTenantId(req);
         const search = String(req.query.q || '').trim();
+        const isManager = Number(req.user?.vaiTro) === 1;
+
+        // [Wave 3A — NĐ 13/2023] Cấm thu ngân tải hàng loạt toàn bộ tệp khách hàng
+        if (!isManager && !search) {
+            return res.status(403).json({
+                message: 'Thu ngân không được phép tải hàng loạt tệp khách hàng. Vui lòng nhập từ khóa (SĐT/tên) để tra cứu (NĐ 13/2023/NĐ-CP)!',
+                customers: [],
+            });
+        }
+
+        const rowLimit = isManager ? 100 : 5;
         try {
             const params = [tenantId];
             let extraWhere = '';
             if (search) {
                 params.push(`%${search}%`);
-                extraWhere = ` AND (TenKH ILIKE $${params.length} OR SoDienThoai ILIKE $${params.length})`;
+                extraWhere = ` AND (COALESCE(to_jsonb(KhachHang)->>'tenkh', to_jsonb(KhachHang)->>'hoten', '') ILIKE $${params.length} OR SoDienThoai ILIKE $${params.length})`;
             }
+            params.push(rowLimit);
             const r = await qTenant(
                 req,
-                `SELECT MaKH, TenKH, SoDienThoai, COALESCE(DiemTichLuy, 0) AS DiemTichLuy,
+                `SELECT MaKH,
+                        COALESCE(to_jsonb(KhachHang)->>'tenkh', to_jsonb(KhachHang)->>'hoten', '') AS TenKH,
+                        SoDienThoai,
+                        COALESCE(DiemTichLuy, 0) AS DiemTichLuy,
                         COALESCE(HangThanhVien, 'DONG') AS HangThanhVien,
                         COALESCE(TongChiTieu, 0) AS TongChiTieu,
                         COALESCE(SoDuVi, 0) AS SoDuVi,
-                        NgaySinh, COALESCE(ZaloOptIn, TRUE) AS ZaloOptIn, LanMuaCuoi
+                        NgaySinh,
+                        COALESCE(ZaloOptIn, FALSE) AS ZaloOptIn,
+                        LanMuaCuoi,
+                        anonymized_at
                    FROM KhachHang
                   WHERE COALESCE(TenantId, 'DEFAULT') = $1 ${extraWhere}
                   ORDER BY TongChiTieu DESC, DiemTichLuy DESC
-                  LIMIT 100`,
+                  LIMIT $${params.length}`,
                 params
             );
             const customers = r.rows.map((k) => {
@@ -1089,16 +1114,17 @@ function registerEcosystemPhase8Routes(
                 return {
                     maKH: k.makh,
                     tenKH: k.tenkh,
-                    soDienThoai: k.sodienthoai,
+                    soDienThoai: maskPhoneForRole(k.sodienthoai, req.user?.vaiTro),
                     diemTichLuy: Number(k.diemtichluy || 0),
                     hangThanhVien: k.hangthanhvien || tier.hang,
                     tenHang: tier.tenHang,
                     cashbackPct: tier.cashbackPct,
                     tongChiTieu: Number(k.tongchitieu || 0),
                     soDuVi: Number(k.soduvi || 0),
-                    ngaySinh: k.ngaysinh,
+                    ngaySinh: isManager ? k.ngaysinh : null,
                     zaloOptIn: Boolean(k.zalooptin),
                     lanMuaCuoi: k.lanmuacuoi,
+                    anonymizedAt: k.anonymized_at || null,
                 };
             });
 
@@ -1117,6 +1143,142 @@ function registerEcosystemPhase8Routes(
             });
         } catch (error) {
             guiLoi(res, error, 'Lỗi API CRM Khách hàng:');
+        }
+    });
+
+    // [Wave 3A — NĐ 13/2023] Ghi nhận đồng thuận xử lý dữ liệu cá nhân & đồng bộ ZaloOptIn
+    app.post('/api/crm/customers/:maKH/consent', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) => {
+        const tenantId = layTenantId(req);
+        const maKH = String(req.params.maKH || '').trim();
+        const channel = String(req.body?.channel || 'POS_COUNTER').trim().toUpperCase();
+        const purpose = String(req.body?.purpose || '').trim().toUpperCase();
+        const granted = Boolean(req.body?.granted);
+
+        if (!['POS_COUNTER', 'QR_MENU', 'ZALO_MINIAPP'].includes(channel)) {
+            return res.status(400).json({ message: 'channel phải thuộc POS_COUNTER, QR_MENU, ZALO_MINIAPP!' });
+        }
+        if (!['LOYALTY_POINTS', 'ZNS_RECEIPT', 'MARKETING_PROMO'].includes(purpose)) {
+            return res.status(400).json({ message: 'purpose phải thuộc LOYALTY_POINTS, ZNS_RECEIPT, MARKETING_PROMO!' });
+        }
+
+        try {
+            const consent = await chayGiaoDich(async (client) => {
+                const khCheck = await client.query(
+                    `SELECT MaKH FROM public.KhachHang WHERE MaKH = $1 AND COALESCE(TenantId, 'DEFAULT') = $2`,
+                    [maKH, tenantId]
+                );
+                if (khCheck.rows.length === 0) {
+                    throw new LoiNghiepVu(404, 'Không tìm thấy khách hàng!');
+                }
+
+                const ins = await client.query(
+                    `INSERT INTO public.customer_consent_logs
+                        (tenant_id, ma_kh, channel, purpose, granted, ip_address, recorded_by)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                     RETURNING *`,
+                    [tenantId, maKH, channel, purpose, granted, req.ip || null, req.user?.maNV || 'SYSTEM']
+                );
+
+                if (purpose === 'ZNS_RECEIPT' || purpose === 'MARKETING_PROMO') {
+                    await client.query(
+                        `UPDATE public.KhachHang
+                            SET ZaloOptIn = $3
+                          WHERE MaKH = $1 AND COALESCE(TenantId, 'DEFAULT') = $2`,
+                        [maKH, tenantId, granted]
+                    );
+                }
+                return ins.rows[0];
+            }, tenantId);
+
+            return res.status(201).json({
+                message: 'Đã ghi nhận đồng thuận khách hàng theo Nghị định 13/2023/NĐ-CP!',
+                consent,
+            });
+        } catch (error) {
+            guiLoi(res, error, 'Lỗi ghi nhận đồng thuận khách hàng:');
+        }
+    });
+
+    // [Wave 3A — NĐ 13/2023] Quyền được xóa / ẩn danh PII khách hàng (Chỉ Quản lý vaiTro = 1)
+    app.post('/api/crm/customers/:maKH/anonymize', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+        const tenantId = layTenantId(req);
+        const maKH = String(req.params.maKH || '').trim();
+        const lyDo = String(req.body?.lyDo || 'Yêu cầu xóa dữ liệu cá nhân theo NĐ 13/2023/NĐ-CP').trim().slice(0, 255);
+
+        try {
+            const result = await chayGiaoDich(async (client) => {
+                const khRes = await client.query(
+                    `SELECT MaKH, SoDienThoai,
+                            COALESCE(to_jsonb(KhachHang)->>'tenkh', to_jsonb(KhachHang)->>'hoten', '') AS TenKH,
+                            anonymized_at
+                       FROM public.KhachHang
+                      WHERE MaKH = $1 AND COALESCE(TenantId, 'DEFAULT') = $2
+                      FOR UPDATE`,
+                    [maKH, tenantId]
+                );
+                if (khRes.rows.length === 0) {
+                    throw new LoiNghiepVu(404, 'Không tìm thấy khách hàng để ẩn danh!');
+                }
+                const oldKh = khRes.rows[0];
+                const anonPhone = `ANON-${crypto.createHash('sha256').update(`${tenantId}:${maKH}:${Date.now()}`).digest('hex').slice(0, 10).toUpperCase()}`;
+
+                await client.query(
+                    `UPDATE public.KhachHang
+                        SET SoDienThoai = $3,
+                            Email = NULL,
+                            NgaySinh = NULL,
+                            ZaloOptIn = FALSE,
+                            anonymized_at = now()
+                      WHERE MaKH = $1 AND COALESCE(TenantId, 'DEFAULT') = $2`,
+                    [maKH, tenantId, anonPhone]
+                );
+
+                // Cập nhật tên ẩn danh tương thích cả schema có TenKH lẫn schema_base có HoTen
+                for (const nameCol of ['TenKH', 'HoTen']) {
+                    await client.query(`SAVEPOINT sp_anon_${nameCol}`);
+                    try {
+                        await client.query(
+                            `UPDATE public.KhachHang
+                                SET ${nameCol} = 'Khách hàng đã ẩn danh'
+                              WHERE MaKH = $1 AND COALESCE(TenantId, 'DEFAULT') = $2`,
+                            [maKH, tenantId]
+                        );
+                        await client.query(`RELEASE SAVEPOINT sp_anon_${nameCol}`);
+                    } catch {
+                        await client.query(`ROLLBACK TO SAVEPOINT sp_anon_${nameCol}`).catch(() => {});
+                    }
+                }
+
+                await ghiAuditLog(client, {
+                    tenantId,
+                    maNV: req.user?.maNV || 'SYSTEM',
+                    vaiTro: req.user?.vaiTro,
+                    hanhDong: 'CUSTOMER_PII_ANONYMIZED',
+                    doiTuong: 'KHACHHANG',
+                    maDoiTuong: maKH,
+                    giaTriCu: {
+                        maKH,
+                        maskedPhone: maskPhoneForRole(oldKh.sodienthoai, 4),
+                    },
+                    giaTriMoi: {
+                        maKH,
+                        anonPhone,
+                        anonymized: true,
+                    },
+                    lyDo,
+                    ip: req.ip,
+                    batBuoc: true,
+                });
+
+                return { maKH, anonPhone, anonymized: true };
+            }, tenantId);
+
+            return res.json({
+                message: 'Đã ẩn danh toàn bộ thông tin định danh (PII) khách hàng, giữ nguyên liên kết hóa đơn kế toán!',
+                ...result,
+            });
+        } catch (error) {
+            guiLoi(res, error, 'Lỗi ẩn danh dữ liệu khách hàng:');
         }
     });
 

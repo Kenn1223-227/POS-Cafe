@@ -9,6 +9,7 @@ import {
   enqueueFailedPrintJob,
   updatePersistentPrintJob,
 } from '../offline/offlineDb'
+import { buildVietQrSvgDataUrl } from './vietqrEmvco'
 
 function readCurrentUserMeta() {
   try {
@@ -44,66 +45,46 @@ const OFFLINE_QR_CACHE_KEY = 'pos_vietqr_offline_dataurl'
 export function getVietQrConfig() {
   try {
     const raw = localStorage.getItem(BANK_STORAGE_KEY)
-    return raw ? JSON.parse(raw) : { bankId: 'MB', accountNo: '', accountName: 'QUAN CAFE POS' }
+    return raw ? JSON.parse(raw) : { bankId: '', accountNo: '', accountName: 'QUAN CAFE POS' }
   } catch {
-    return { bankId: 'MB', accountNo: '', accountName: 'QUAN CAFE POS' }
+    return { bankId: '', accountNo: '', accountName: 'QUAN CAFE POS' }
   }
-}
-
-// Cache sẵn ảnh VietQR tĩnh của quán dưới dạng DataURL để vẫn hiển thị mã QR khi mất mạng Internet
-function precacheStaticQrOffline(cfg) {
-  if (!cfg?.bankId || !cfg?.accountNo || typeof fetch === 'undefined') return
-  const staticUrl = `https://img.vietqr.io/image/${encodeURIComponent(cfg.bankId)}-${encodeURIComponent(cfg.accountNo)}-compact2.png?accountName=${encodeURIComponent(cfg.accountName || '')}`
-  fetch(staticUrl)
-    .then((r) => (r.ok ? r.blob() : null))
-    .then((blob) => {
-      if (!blob) return
-      const reader = new FileReader()
-      reader.onloadend = () => {
-        if (typeof reader.result === 'string') {
-          try {
-            localStorage.setItem(OFFLINE_QR_CACHE_KEY, JSON.stringify({
-              key: `${cfg.bankId}|${cfg.accountNo}`,
-              dataUrl: reader.result,
-            }))
-          } catch {
-            // Bỏ qua nếu localStorage đầy
-          }
-        }
-      }
-      reader.readAsDataURL(blob)
-    })
-    .catch(() => {})
 }
 
 export function saveVietQrConfig(cfg) {
   localStorage.setItem(BANK_STORAGE_KEY, JSON.stringify(cfg))
-  if (typeof navigator !== 'undefined' && navigator.onLine) {
-    precacheStaticQrOffline(cfg)
+  try {
+    const dataUrl = buildVietQrSvgDataUrl({
+      bankId: cfg?.bankId,
+      accountNo: cfg?.accountNo,
+      amount: 0,
+      memo: '',
+    })
+    if (dataUrl) {
+      localStorage.setItem(
+        OFFLINE_QR_CACHE_KEY,
+        JSON.stringify({ key: `${cfg.bankId}|${cfg.accountNo}`, dataUrl })
+      )
+    }
+  } catch {
+    // Bank BIN chưa hợp lệ — không cache QR lỗi
   }
 }
 
 export function buildVietQrUrl({ amount, addInfo }) {
   const cfg = getVietQrConfig()
   if (!cfg.bankId || !cfg.accountNo) return null
-
-  // Khi mất mạng: dùng bản ảnh VietQR đã cache cục bộ trong thiết bị
-  if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    try {
-      const cached = JSON.parse(localStorage.getItem(OFFLINE_QR_CACHE_KEY) || 'null')
-      if (cached && cached.key === `${cfg.bankId}|${cfg.accountNo}` && cached.dataUrl) {
-        return cached.dataUrl
-      }
-    } catch {
-      // ignore
-    }
+  // [Wave 1 — P0-03] Vẽ QR SVG 100% cục bộ từ EMVCo payload (không phụ thuộc img.vietqr.io)
+  try {
+    return buildVietQrSvgDataUrl({
+      bankId: cfg.bankId,
+      accountNo: cfg.accountNo,
+      amount: Math.max(0, Math.round(Number(amount) || 0)),
+      memo: addInfo || '',
+    })
+  } catch {
+    return null
   }
-
-  const params = new URLSearchParams()
-  if (amount > 0) params.set('amount', String(Math.round(amount)))
-  if (addInfo) params.set('addInfo', addInfo)
-  if (cfg.accountName) params.set('accountName', cfg.accountName)
-  return `https://img.vietqr.io/image/${encodeURIComponent(cfg.bankId)}-${encodeURIComponent(cfg.accountNo)}-compact2.png?${params.toString()}`
 }
 
 // In bằng hidden iframe (tránh bị trình duyệt chặn popup sau async await)
@@ -205,11 +186,39 @@ export async function printReceiptK80(
   const tienGiamKM = Number(hoaDon.tienGiamKM || 0)
   const tienGiamDiem = Number(hoaDon.tienGiamDiem || 0)
   const diemSuDung = Number(hoaDon.diemSuDung || 0)
-  const discountRowsHtml = tienGiamKM > 0 || tienGiamDiem > 0
+  const phiPhucVu = Number(hoaDon.phiPhucVu ?? hoaDon.tienPhiPhucVu ?? 0)
+  const thueVAT = Number(hoaDon.thueVAT ?? hoaDon.tienThueVAT ?? hoaDon.tienVat ?? 0)
+  const maskPhoneReceipt = (sdt) => {
+    const raw = String(sdt || '').trim()
+    if (!raw) return ''
+    if (raw.length < 7) {
+      if (raw.length <= 2) return '***'
+      return `${raw.slice(0, 1)}***${raw.slice(-1)}`
+    }
+    return `${raw.slice(0, 4)}***${raw.slice(-3)}`
+  }
+
+  const taxBreakdown = Array.isArray(hoaDon.taxBreakdown || hoaDon.tax_breakdown_json)
+    ? hoaDon.taxBreakdown || hoaDon.tax_breakdown_json
+    : []
+  const taxBreakdownHtml = taxBreakdown.length > 0
+    ? taxBreakdown
+        .map((b) => {
+          const rateLbl = b.isKct ? 'KCT (0%)' : `VAT ${Number(b.vatRate || 0)}%`
+          return `<div style="display:flex;justify-content:space-between;font-size:10.5px"><span>${escapeHtml(rateLbl)} (DT ${escapeHtml(formatVND(b.taxableBase || 0))}):</span><span>${escapeHtml(formatVND(b.vatAmount || 0))}</span></div>`
+        })
+        .join('')
+    : thueVAT > 0
+      ? `<div style="display:flex;justify-content:space-between"><span>Thuế VAT${Number(hoaDon.tyLeThueVAT || 0) > 0 ? ` (${Number(hoaDon.tyLeThueVAT)}%)` : ''}:</span><span>+${escapeHtml(formatVND(thueVAT))}</span></div>`
+      : ''
+
+  const discountRowsHtml = tienGiamKM > 0 || tienGiamDiem > 0 || phiPhucVu > 0 || thueVAT > 0 || taxBreakdown.length > 0
     ? `<div style="font-size:11px;margin-bottom:4px">
         <div style="display:flex;justify-content:space-between"><span>Tạm tính:</span><span>${escapeHtml(formatVND(hoaDon.tongTamTinh || 0))}</span></div>
         ${tienGiamKM > 0 ? `<div style="display:flex;justify-content:space-between"><span>Giảm KM${hoaDon.maKhuyenMai ? ` (${escapeHtml(hoaDon.maKhuyenMai)})` : ''}:</span><span>-${escapeHtml(formatVND(tienGiamKM))}</span></div>` : ''}
         ${tienGiamDiem > 0 ? `<div style="display:flex;justify-content:space-between"><span>Đổi điểm (${diemSuDung} điểm):</span><span>-${escapeHtml(formatVND(tienGiamDiem))}</span></div>` : ''}
+        ${phiPhucVu > 0 ? `<div style="display:flex;justify-content:space-between"><span>Phí phục vụ${Number(hoaDon.tyLePhiPhucVu || 0) > 0 ? ` (${Number(hoaDon.tyLePhiPhucVu)}%)` : ''}:</span><span>+${escapeHtml(formatVND(phiPhucVu))}</span></div>` : ''}
+        ${taxBreakdownHtml}
        </div>`
     : ''
   const tongCong = escapeHtml(formatVND(hoaDon.tongTienThanhToan ?? hoaDon.tongSauGiam ?? hoaDon.tongTamTinh))
@@ -244,7 +253,15 @@ export async function printReceiptK80(
     .join('')
 
   const khLine = hoaDon.khachHang
-    ? `<p style="font-size:11px;margin:2px 0">KH: ${escapeHtml(hoaDon.khachHang.tenKH)} (${escapeHtml(hoaDon.khachHang.soDienThoai)}) • ⭐ ${Number(hoaDon.khachHang.diemTichLuy || 0)} điểm</p>`
+    ? `<p style="font-size:11px;margin:2px 0">KH: ${escapeHtml(hoaDon.khachHang.tenKH)} (${escapeHtml(maskPhoneReceipt(hoaDon.khachHang.soDienThoai))}) • ⭐ ${Number(hoaDon.khachHang.diemTichLuy || 0)} điểm</p>`
+    : ''
+
+  const einvoiceCode = String(hoaDon.einvoiceLookupCode || hoaDon.einvoice_lookup_code || '').trim()
+  const einvoiceFooterHtml = einvoiceCode && !laTamTinh
+    ? `<div style="margin-top:6px;padding:4px 6px;border:1px dashed #000;text-align:center;font-size:10px">
+         <div><b>XUẤT HÓA ĐƠN ĐIỆN TỬ (MTT)</b></div>
+         <div>Mã tra cứu: <b>${escapeHtml(einvoiceCode)}</b></div>
+       </div>`
     : ''
 
   // [Chống Gian lận Bill Recycling] Mã đối chiếu 4 ký tự cuối + giờ in đậm + thông điệp nhắc khách kiểm tra
@@ -299,6 +316,7 @@ export async function printReceiptK80(
         <div style="margin-top:2px">Quý khách vui lòng kiểm tra ĐÚNG GIỜ IN &amp; SỐ THỨ TỰ trên hóa đơn.</div>
       </div>
       <p style="text-align:center;font-size:10px;margin-top:6px">Cảm ơn Quý khách &amp; Hẹn gặp lại!</p>
+      ${einvoiceFooterHtml}
       ${plgFooterHtml}
     </body></html>`
 

@@ -4,15 +4,59 @@ import { caService } from '../../../services/caService'
 import { useAuthStore } from '../../../store/authStore'
 import { formatVND } from '../../../utils/format'
 import { printZReportK80 } from '../../../utils/printHelper'
+import ConfirmPinModal from '../../../components/ConfirmPinModal'
 
 const MENH_GIA = [500000, 200000, 100000, 50000, 20000, 10000, 5000, 2000, 1000]
 
-// [P0/P1] Đối soát MÙ thực sự (Blind Cash Reconciliation) + Bảng đếm mệnh giá + In Z-Report K80
-export default function DongCaModal({ isOpen, onClose, currentShift, onShiftClosed }) {
+export function calcDenominationTotal(counts = {}) {
+  return MENH_GIA.reduce((s, mg) => s + mg * (Number(counts[mg]) || 0), 0)
+}
+
+export function buildDenominationMap(counts = {}) {
+  return Object.fromEntries(
+    MENH_GIA.map((mg) => [String(mg), Math.floor(Number(counts[mg]) || 0)]).filter(([, sl]) => sl > 0)
+  )
+}
+
+export function DenominationCounterGrid({ counts = {}, onChange, totalLabel = 'Tổng tiền mặt đã đếm:' }) {
+  const total = calcDenominationTotal(counts)
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-3 gap-2">
+        {MENH_GIA.map((mg) => (
+          <div
+            key={mg}
+            className="flex items-center justify-between gap-1.5 bg-stone-50 border border-stone-200 rounded-xl px-2.5 py-2"
+          >
+            <span className="text-xs font-bold text-stone-700">
+              {mg >= 1000 ? `${mg / 1000}k` : mg}
+            </span>
+            <input
+              type="number"
+              min="0"
+              placeholder="0"
+              value={counts[mg] ?? ''}
+              onChange={(e) => onChange({ ...counts, [mg]: e.target.value })}
+              className="w-16 px-2 py-1.5 bg-white border rounded-lg text-xs font-bold text-right"
+            />
+          </div>
+        ))}
+      </div>
+      <div className="p-3 rounded-xl bg-blue-50 border border-blue-200 flex justify-between items-center">
+        <span className="text-xs font-bold text-blue-900">{totalLabel}</span>
+        <span className="text-lg font-black text-blue-800">{formatVND(total)}</span>
+      </div>
+    </div>
+  )
+}
+
+// [P0/P1] Đối soát MÙ thực sự (Blind Cash Reconciliation) + Bảng đếm mệnh giá + Tiền giữ lại két + In Z-Report K80
+export default function DongCaModal({ isOpen, onClose, currentShift, preCloseWarning = null, onShiftClosed }) {
   const { user } = useAuthStore()
   const [useCounter, setUseCounter] = useState(true)
   const [counts, setCounts] = useState({})
   const [manualCash, setManualCash] = useState('')
+  const [tienGiuLaiKet, setTienGiuLaiKet] = useState('')
   const [ghiChuChenhLech, setGhiChuChenhLech] = useState('')
   const [recountNeeded, setRecountNeeded] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -22,12 +66,13 @@ export default function DongCaModal({ isOpen, onClose, currentShift, onShiftClos
   if (!isOpen || (!currentShift && !ketQuaChot)) return null
 
   const maCaHienThi = currentShift?.maCaThuNgan || ketQuaChot?.doiSoat?.maCaThuNgan
-  const tongTuMenhGia = MENH_GIA.reduce((s, mg) => s + mg * (Number(counts[mg]) || 0), 0)
+  const tongTuMenhGia = calcDenominationTotal(counts)
   const tienThucTeNum = useCounter ? tongTuMenhGia : manualCash === '' ? null : Number(manualCash)
 
   const handleCloseAndReset = () => {
     setCounts({})
     setManualCash('')
+    setTienGiuLaiKet('')
     setGhiChuChenhLech('')
     setRecountNeeded(false)
     setKetQuaChot(null)
@@ -51,7 +96,9 @@ export default function DongCaModal({ isOpen, onClose, currentShift, onShiftClos
     }
   }
 
-  const handleDongCa = async (e) => {
+  const [confirmDongCaOpen, setConfirmDongCaOpen] = useState(false)
+
+  const handleDongCa = (e) => {
     e.preventDefault()
     if (tienThucTeNum === null || Number.isNaN(tienThucTeNum) || tienThucTeNum < 0) {
       toast.error('Vui lòng kiểm đếm và nhập số tiền mặt thực tế (>= 0)!')
@@ -61,19 +108,19 @@ export default function DongCaModal({ isOpen, onClose, currentShift, onShiftClos
       toast.error('Vui lòng nhập lý do giải trình chênh lệch tối thiểu 10 ký tự để xác nhận lần 2!')
       return
     }
-    if (!window.confirm(`Xác nhận chốt ca với tiền mặt thực tế ${formatVND(tienThucTeNum)}?`)) return
+    setConfirmDongCaOpen(true)
+  }
 
-    const chiTietMenhGia = useCounter
-      ? Object.fromEntries(
-          MENH_GIA.map((mg) => [String(mg), Math.floor(Number(counts[mg]) || 0)]).filter(([, sl]) => sl > 0)
-        )
-      : undefined
+  const executeDongCa = async () => {
+    setConfirmDongCaOpen(false)
+    const chiTietMenhGia = useCounter ? buildDenominationMap(counts) : undefined
 
     setSubmitting(true)
     try {
       const res = await caService.dongCa(tienThucTeNum, {
         ghiChuChenhLech: ghiChuChenhLech.trim() || undefined,
         chiTietMenhGia: chiTietMenhGia && Object.keys(chiTietMenhGia).length > 0 ? chiTietMenhGia : undefined,
+        tienGiuLaiKet: Math.max(0, Number(tienGiuLaiKet || 0)),
         confirmRecount: recountNeeded,
       })
       toast.success(res.message || 'Đã chốt ca thành công!')
@@ -198,6 +245,20 @@ export default function DongCaModal({ isOpen, onClose, currentShift, onShiftClos
           </div>
         ) : (
           <form onSubmit={handleDongCa} className="space-y-4">
+            {preCloseWarning && (preCloseWarning.soHoaDonDangMo > 0 || preCloseWarning.soDonLuuTam > 0 || preCloseWarning.soBanChuaDong > 0 || (preCloseWarning.warnings || []).length > 0) && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-300 text-xs text-rose-900 space-y-1">
+                <p className="font-extrabold">⚠️ Cảnh báo trước khi đóng ca (Pre-Close Check):</p>
+                {Number(preCloseWarning.soHoaDonDangMo || 0) > 0 && (
+                  <p>• Còn {preCloseWarning.soHoaDonDangMo} hóa đơn/bàn đang mở chưa thanh toán.</p>
+                )}
+                {Number(preCloseWarning.soDonLuuTam || 0) > 0 && (
+                  <p>• Còn {preCloseWarning.soDonLuuTam} đơn lưu tạm chưa xử lý.</p>
+                )}
+                {Array.isArray(preCloseWarning.warnings) &&
+                  preCloseWarning.warnings.map((w, idx) => <p key={idx}>• {typeof w === 'string' ? w : w.message || JSON.stringify(w)}</p>)}
+              </div>
+            )}
+
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900">
               🛡️ <b>Chế độ Kiểm tiền mù (Chống gian lận):</b> Hãy đếm chính xác toàn bộ tiền mặt
               trong két theo từng tờ tiền rồi xác nhận. Số chênh lệch sẽ được ghi nhận vào nhật ký kiểm toán.
@@ -225,32 +286,11 @@ export default function DongCaModal({ isOpen, onClose, currentShift, onShiftClos
             </div>
 
             {useCounter ? (
-              <div className="space-y-2">
-                <div className="grid grid-cols-3 gap-2">
-                  {MENH_GIA.map((mg) => (
-                    <div
-                      key={mg}
-                      className="flex items-center justify-between gap-1.5 bg-stone-50 border border-stone-200 rounded-xl px-2.5 py-2"
-                    >
-                      <span className="text-xs font-bold text-stone-700">
-                        {mg >= 1000 ? `${mg / 1000}k` : mg}
-                      </span>
-                      <input
-                        type="number"
-                        min="0"
-                        placeholder="0"
-                        value={counts[mg] ?? ''}
-                        onChange={(e) => setCounts((prev) => ({ ...prev, [mg]: e.target.value }))}
-                        className="w-16 px-2 py-1.5 bg-white border rounded-lg text-xs font-bold text-right"
-                      />
-                    </div>
-                  ))}
-                </div>
-                <div className="p-3 rounded-xl bg-blue-50 border border-blue-200 flex justify-between items-center">
-                  <span className="text-xs font-bold text-blue-900">Tổng tiền mặt đã đếm:</span>
-                  <span className="text-lg font-black text-blue-800">{formatVND(tongTuMenhGia)}</span>
-                </div>
-              </div>
+              <DenominationCounterGrid
+                counts={counts}
+                onChange={setCounts}
+                totalLabel="Tổng tiền mặt đã đếm:"
+              />
             ) : (
               <div>
                 <label className="block text-xs font-bold text-gray-700 mb-1">
@@ -267,6 +307,22 @@ export default function DongCaModal({ isOpen, onClose, currentShift, onShiftClos
                 />
               </div>
             )}
+
+            <div>
+              <label className="block text-xs font-bold text-gray-700 mb-1">
+                💰 Tiền lẻ giữ lại két cho ca sau (VND)
+              </label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={tienGiuLaiKet}
+                onChange={(e) => setTienGiuLaiKet(e.target.value)}
+                data-testid="dongca-tien-giu-lai-ket"
+                placeholder="VD: 500000 (để khớp quỹ bàn giao đầu ca sau)"
+                className="w-full min-h-11 px-3 py-2 border rounded-xl text-xs font-bold outline-none focus:ring-2 focus:ring-amber-600"
+              />
+            </div>
 
             {recountNeeded && (
               <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-900 font-semibold">
@@ -307,6 +363,16 @@ export default function DongCaModal({ isOpen, onClose, currentShift, onShiftClos
           </form>
         )}
       </div>
+      <ConfirmPinModal
+        open={confirmDongCaOpen}
+        mode="confirm"
+        danger
+        title="Xác nhận Chốt Ca"
+        message={`Xác nhận chốt ca với tiền mặt thực tế ${formatVND(tienThucTeNum)}?`}
+        confirmText="Chốt ca ngay"
+        onConfirm={executeDongCa}
+        onCancel={() => setConfirmDongCaOpen(false)}
+      />
     </div>
   )
 }

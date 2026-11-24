@@ -57,6 +57,12 @@ const ALERT_EVENT_META = [
         defaultEnabled: true,
     },
     {
+        key: 'OFFLINE_CLOCK_TAMPER_SUSPECTED',
+        label: '⏰ Nghi vấn chỉnh đồng hồ thiết bị Offline (lệch > 10 phút)',
+        severity: 'HIGH',
+        defaultEnabled: true,
+    },
+    {
         key: 'DISCOUNT_VELOCITY_ABUSE',
         label: '📉 Nghi vấn lạm dụng mã giảm giá (Tỷ lệ đơn giảm giá của thu ngân bất thường)',
         severity: 'HIGH',

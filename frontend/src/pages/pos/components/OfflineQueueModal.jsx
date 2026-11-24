@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { formatDateTime, formatVND } from '../../../utils/format'
 import { printCupLabels50x30, printReceiptK80 } from '../../../utils/printHelper'
 import { getOrCreatePosDeviceId } from '../../../offline/offlineDb'
+import ConfirmPinModal from '../../../components/ConfirmPinModal'
 
 const STATUS_BADGE = {
   PENDING: { text: '⏳ Chờ mạng', cls: 'bg-amber-100 text-amber-900' },
@@ -25,6 +27,7 @@ export default function OfflineQueueModal({
   onDeleteJob,
   thuNgan = '',
 }) {
+  const [deleteTarget, setDeleteTarget] = useState(null)
   if (!isOpen) return null
 
   const totalQueuedAmount = jobs.reduce((s, j) => s + Number(j.totalAmount || 0), 0)
@@ -135,11 +138,7 @@ export default function OfflineQueueModal({
                     )}
                     <button
                       type="button"
-                      onClick={() => {
-                        if (window.confirm(`Xóa đơn offline ${job.payload?.offlineClientId || job.localInvoice?.maHoaDon} khỏi hàng đợi?`)) {
-                          onDeleteJob(job.id)
-                        }
-                      }}
+                      onClick={() => setDeleteTarget(job)}
                       className="px-3 py-1.5 rounded-lg bg-red-50 hover:bg-red-100 font-bold text-red-600 cursor-pointer"
                     >
                       🗑️ Xóa
@@ -151,6 +150,23 @@ export default function OfflineQueueModal({
           )}
         </div>
       </div>
+      <ConfirmPinModal
+        open={Boolean(deleteTarget)}
+        mode="confirm"
+        danger
+        title="Xóa đơn Offline khỏi hàng đợi"
+        message={
+          deleteTarget
+            ? `Xóa đơn offline ${deleteTarget.payload?.offlineClientId || deleteTarget.localInvoice?.maHoaDon} khỏi hàng đợi?`
+            : ''
+        }
+        confirmText="Xóa khỏi hàng đợi"
+        onConfirm={() => {
+          if (deleteTarget) onDeleteJob(deleteTarget.id)
+          setDeleteTarget(null)
+        }}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   )
 }

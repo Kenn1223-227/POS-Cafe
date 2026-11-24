@@ -11,12 +11,22 @@ const REFRESH_COOKIE_NAME = 'pos_refresh_token';
 const REFRESH_TTL_STANDARD_DAYS = Math.max(1, Number(process.env.JWT_REFRESH_DAYS || 7));
 const REFRESH_TTL_DEVICE_DAYS = Math.max(7, Number(process.env.JWT_DEVICE_SESSION_DAYS || 30));
 
-// Cache ngắn 30 giây kiểm tra trạng thái nhân viên đang hoạt động (khóa tài khoản có hiệu lực tức thì)
+// Cache ngắn 30 giây kiểm tra trạng thái nhân viên đang hoạt động (key theo ${tenantId}:${maNV} tránh đụng cross-tenant)
 const STAFF_STATUS_TTL_MS = 30 * 1000;
-const staffStatusCache = new Map(); // maNV -> { active: boolean, expiresAt: number }
+const staffStatusCache = new Map(); // `${tenantId}:${maNV}` -> { active: boolean, expiresAt: number }
 
-const xoaCacheTrangThaiNV = (maNV) => {
-    if (maNV) staffStatusCache.delete(String(maNV));
+const buildStaffCacheKey = (maNV, tenantId = 'DEFAULT') => `${String(tenantId || 'DEFAULT')}:${String(maNV)}`;
+
+const xoaCacheTrangThaiNV = (maNV, tenantId = null) => {
+    if (!maNV) return;
+    if (tenantId) {
+        staffStatusCache.delete(buildStaffCacheKey(maNV, tenantId));
+        return;
+    }
+    const suffix = `:${String(maNV)}`;
+    for (const k of staffStatusCache.keys()) {
+        if (k.endsWith(suffix)) staffStatusCache.delete(k);
+    }
 };
 
 // ==========================================
@@ -102,10 +112,11 @@ function hashRefreshToken(rawToken) {
     return crypto.createHash('sha256').update(String(rawToken || '')).digest('hex');
 }
 
-async function kiemTraNhanVienConHoatDong(maNV) {
-    const key = String(maNV || '');
-    if (!key) return false;
-    const cached = staffStatusCache.get(key);
+async function kiemTraNhanVienConHoatDong(maNV, tenantId = 'DEFAULT') {
+    const rawId = String(maNV || '');
+    if (!rawId) return false;
+    const cacheKey = buildStaffCacheKey(rawId, tenantId);
+    const cached = staffStatusCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
         return cached.active;
     }
@@ -113,14 +124,14 @@ async function kiemTraNhanVienConHoatDong(maNV) {
         let active;
         try {
             // Ưu tiên hàm SECURITY DEFINER phạm vi hẹp (chạy được với app_runtime NOBYPASSRLS + Fail-Closed RLS)
-            const fnRes = await pool.query('SELECT public.fn_check_staff_active($1) AS active', [key]);
+            const fnRes = await pool.query('SELECT public.fn_check_staff_active($1) AS active', [rawId]);
             active = fnRes.rows[0]?.active === true;
         } catch {
             // Fallback tương thích ngược nếu Migration 007 chưa được chạy
-            const r = await pool.query('SELECT TrangThaiLamViec FROM NhanVien WHERE MaNV = $1', [key]);
+            const r = await pool.query('SELECT TrangThaiLamViec FROM NhanVien WHERE MaNV = $1', [rawId]);
             active = r.rows.length > 0 && r.rows[0].trangthailamviec === true;
         }
-        staffStatusCache.set(key, { active, expiresAt: Date.now() + STAFF_STATUS_TTL_MS });
+        staffStatusCache.set(cacheKey, { active, expiresAt: Date.now() + STAFF_STATUS_TTL_MS });
         return active;
     } catch {
         // [P0/P1 FIX] Không mở cửa mù (Fail-Open) cho token chưa từng xác thực!
@@ -142,7 +153,7 @@ const kiemTraToken = (req, res, next) => {
                 message: 'Token Platform Admin không dùng trực tiếp cho API bán hàng của quán! Hãy dùng chức năng Hỗ trợ giả lập (Impersonate).',
             });
         }
-        const conHoatDong = await kiemTraNhanVienConHoatDong(user.maNV);
+        const conHoatDong = await kiemTraNhanVienConHoatDong(user.maNV, user.tenantId || 'DEFAULT');
         if (!conHoatDong) {
             return res.status(401).json({ message: 'Tài khoản nhân viên đã bị khóa hoặc ngừng làm việc!' });
         }
