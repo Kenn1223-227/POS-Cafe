@@ -523,7 +523,7 @@ function registerEcosystemPhase8Routes(
             }
         }
 
-        const [spRes, tpRes, zoneRes, bakeryMap, branch86] = await Promise.all([
+        const [spRes, tpRes, zoneRes, bakeryMap, branch86, modData] = await Promise.all([
             client.query(
                 `SELECT sp.MaMon, sp.TenMon, sp.NhomMon, COALESCE(sp.TamHet, FALSE) AS TamHet,
                         sz.KichThuoc, sz.GiaBan
@@ -557,7 +557,78 @@ function registerEcosystemPhase8Routes(
             })(),
             layBanDoGiamGiaLoBanhHomNay(client, tenantId),
             loadBranchAvailability86Map(client, tenantId, branchId || 'DEFAULT'),
+            (async () => {
+                await client.query('SAVEPOINT sp_qr_modifiers');
+                try {
+                    const [linkRes, grpRes, optRes] = await Promise.all([
+                        client.query(
+                            `SELECT mamon, groupid, thutuhienthi
+                               FROM public.sanpham_modifier_groups
+                              WHERE tenantid = $1
+                              ORDER BY thutuhienthi ASC, groupid ASC`,
+                            [tenantId]
+                        ),
+                        client.query(
+                            `SELECT id, tengroup, loai, batbuoc, chontoithieu, chontoida, soluongmienphi, thutuhienthi
+                               FROM public.modifier_groups
+                              WHERE tenantid = $1 AND danghoatdong = TRUE
+                              ORDER BY thutuhienthi ASC, id ASC`,
+                            [tenantId]
+                        ),
+                        client.query(
+                            `SELECT id, groupid, tenoption, teninngan, lamacdinh, giacongthem, toidasoluong, tamhet, thutuhienthi
+                               FROM public.modifier_options
+                              WHERE tenantid = $1
+                              ORDER BY thutuhienthi ASC, id ASC`,
+                            [tenantId]
+                        ),
+                    ]);
+                    await client.query('RELEASE SAVEPOINT sp_qr_modifiers');
+                    return { links: linkRes.rows, groups: grpRes.rows, options: optRes.rows };
+                } catch {
+                    await client.query('ROLLBACK TO SAVEPOINT sp_qr_modifiers').catch(() => {});
+                    return { links: [], groups: [], options: [] };
+                }
+            })(),
         ]);
+
+        // Dựng bản đồ modifierGroups theo MaMon (kết hợp 86 chi nhánh từ branch_availability_86)
+        const optsByGroup = new Map();
+        for (const o of modData.options || []) {
+            const bMod = branch86?.modifiers?.get(String(o.id));
+            const list = optsByGroup.get(Number(o.groupid)) || [];
+            list.push({
+                id: Number(o.id),
+                tenOption: o.tenoption,
+                tenInNgan: o.teninngan || o.tenoption,
+                laMacDinh: Boolean(o.lamacdinh),
+                giaThem: Number(o.giacongthem || 0),
+                toiDaSoLuong: Math.max(1, Number(o.toidasoluong || 1)),
+                tamHet: bMod !== undefined ? Boolean(bMod.isSoldOut) : Boolean(o.tamhet),
+            });
+            optsByGroup.set(Number(o.groupid), list);
+        }
+        const groupById = new Map();
+        for (const g of modData.groups || []) {
+            groupById.set(Number(g.id), {
+                id: Number(g.id),
+                tenGroup: g.tengroup,
+                loai: g.loai || 'SINGLE',
+                batBuoc: Boolean(g.batbuoc),
+                chonToiThieu: Number(g.chontoithieu || 0),
+                chonToiDa: Math.max(1, Number(g.chontoida || 1)),
+                soLuongMienPhi: Number(g.soluongmienphi || 0),
+                options: optsByGroup.get(Number(g.id)) || [],
+            });
+        }
+        const groupsByMaMon = new Map();
+        for (const lk of modData.links || []) {
+            const grp = groupById.get(Number(lk.groupid));
+            if (!grp) continue;
+            const list = groupsByMaMon.get(String(lk.mamon)) || [];
+            list.push(grp);
+            groupsByMaMon.set(String(lk.mamon), list);
+        }
 
         const zonePriceMap = new Map(zoneRes.rows.map((r) => [`${r.mamon}|${r.kichthuoc}`, Number(r.giaban)]));
         const menuMap = new Map();
@@ -579,6 +650,7 @@ function registerEcosystemPhase8Routes(
                               giaSauGiam: md.giaHienTai,
                           }
                         : null,
+                    modifierGroups: groupsByMaMon.get(String(row.mamon)) || [],
                     sizes: [],
                 };
                 menuMap.set(row.mamon, item);
@@ -762,7 +834,33 @@ function registerEcosystemPhase8Routes(
                         });
                     }
 
-                    const thanhTien = (sz.giaBan + tpPerCup) * soLuong;
+                    // Tính phụ thu Modifiers (Wave 4A — P2-03)
+                    const cleanModifiers = [];
+                    let giaModifiers = 0;
+                    const optLookup = new Map();
+                    for (const grp of item.modifierGroups || []) {
+                        for (const opt of grp.options || []) {
+                            optLookup.set(Number(opt.id), { ...opt, groupId: grp.id, tenGroup: grp.tenGroup });
+                        }
+                    }
+                    for (const m of Array.isArray(raw.modifiers) ? raw.modifiers : []) {
+                        const optId = Number(m.optionId ?? m.id);
+                        const opt = optLookup.get(optId);
+                        if (!opt || opt.tamHet) continue;
+                        const qty = Math.min(opt.toiDaSoLuong || 1, Math.max(1, parseInt(m.qty ?? m.soLuong, 10) || 1));
+                        const lineFee = Number(opt.giaThem || 0) * qty;
+                        giaModifiers += lineFee;
+                        cleanModifiers.push({
+                            groupId: opt.groupId,
+                            tenGroup: opt.tenGroup,
+                            optionId: opt.id,
+                            tenOption: opt.tenOption,
+                            giaThem: Number(opt.giaThem || 0),
+                            qty,
+                        });
+                    }
+
+                    const thanhTien = (sz.giaBan + tpPerCup + giaModifiers) * soLuong;
                     tongTienTamTinh += thanhTien;
                     cleanItems.push({
                         maMon: item.maMon,
@@ -770,8 +868,10 @@ function registerEcosystemPhase8Routes(
                         kichThuoc: sz.kichThuoc,
                         soLuong,
                         donGia: sz.giaBan,
+                        giaModifiers,
                         ghiChu: raw.ghiChu ? String(raw.ghiChu).trim().slice(0, 150) : null,
                         toppings: cleanToppings,
+                        modifiers: cleanModifiers,
                         thanhTien,
                     });
                 }

@@ -118,6 +118,82 @@ export default function NhanSu() {
   const [weeklyShifts, setWeeklyShifts] = useState([])
   const [kioskQr, setKioskQr] = useState({ token: '', qrDataUrl: '', expiresInSec: 30, branchId: 'DEFAULT' })
 
+  // [Wave 4A — P3-01] Tip Pool & Tăng ca OT (150% / 200% / 300%)
+  const [tipPools, setTipPools] = useState([])
+  const [otLogs, setOtLogs] = useState([])
+  const [tipForm, setTipForm] = useState({
+    businessDate: getTodayISO(),
+    source: 'CASH_JAR',
+    totalAmount: '100000',
+    allocationMethod: 'BY_HOURS',
+  })
+  const [otForm, setOtForm] = useState({
+    maNV: '',
+    workDate: getTodayISO(),
+    dayType: 'WEEKDAY',
+    otHours: '2',
+    nightHours: '0',
+    baseHourlyRate: '30000',
+  })
+
+  const loadTipAndOt = useCallback(async () => {
+    const [tpRes, otRes] = await Promise.all([
+      axiosClient.get('/hr/tip-pools', { silent: true }).catch(() => ({ tipPools: [] })),
+      axiosClient.get('/hr/ot-logs', { silent: true }).catch(() => ({ logs: [] })),
+    ])
+    setTipPools(Array.isArray(tpRes?.tipPools) ? tpRes.tipPools : [])
+    setOtLogs(Array.isArray(otRes?.logs) ? otRes.logs : [])
+  }, [])
+
+  useEffect(() => {
+    void loadTipAndOt()
+  }, [loadTipAndOt])
+
+  const handleCreateTipPool = async (e) => {
+    e.preventDefault()
+    try {
+      const participants = danhSachNV.slice(0, 5).map((nv) => ({
+        maNV: nv.maNV,
+        hoursWorked: 8,
+        weight: 1,
+      }))
+      await axiosClient.post('/hr/tip-pools', {
+        businessDate: tipForm.businessDate,
+        source: tipForm.source,
+        totalAmount: Number(tipForm.totalAmount || 0),
+        allocationMethod: tipForm.allocationMethod,
+        participants,
+      })
+      toast.success('Đã tạo & phân bổ quỹ Tip Pool (lệch 0đ)!')
+      await loadTipAndOt()
+    } catch {
+      // Interceptor
+    }
+  }
+
+  const handleCreateOtLog = async (e) => {
+    e.preventDefault()
+    const targetNV = otForm.maNV || danhSachNV[0]?.maNV || ''
+    if (!targetNV) {
+      toast.error('Chưa có nhân viên để ghi nhận tăng ca OT!')
+      return
+    }
+    try {
+      await axiosClient.post('/hr/ot-logs', {
+        maNV: targetNV,
+        workDate: otForm.workDate,
+        dayType: otForm.dayType,
+        otHours: Number(otForm.otHours || 0),
+        nightHours: Number(otForm.nightHours || 0),
+        baseHourlyRate: Number(otForm.baseHourlyRate || 0),
+      })
+      toast.success('Đã ghi nhận tăng ca OT chuẩn BLLĐ VN!')
+      await loadTipAndOt()
+    } catch {
+      // Interceptor
+    }
+  }
+
   const weekDates = (() => {
     const today = new Date()
     const day = today.getDay()
@@ -691,6 +767,159 @@ export default function NhanSu() {
               ))}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      {/* [Wave 4A — P3-01] Tip Pool & Tăng ca OT 150% / 200% / 300% */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div className="bg-white p-5 rounded-2xl border border-stone-200 space-y-3">
+          <div>
+            <h3 className="font-extrabold text-sm text-stone-800">🪙 Quỹ Tip Pool &amp; Phân Bổ (Lệch 0đ)</h3>
+            <p className="text-xs text-stone-500">
+              Tự động chia tiền tip theo giờ công / trọng số vai trò / chia đều cho nhân viên trong ca.
+            </p>
+          </div>
+          <form onSubmit={handleCreateTipPool} className="grid grid-cols-2 gap-2 text-xs">
+            <input
+              type="date"
+              value={tipForm.businessDate}
+              onChange={(e) => setTipForm({ ...tipForm, businessDate: e.target.value })}
+              className="px-3 py-2 rounded-xl border border-stone-300"
+            />
+            <select
+              value={tipForm.source}
+              onChange={(e) => setTipForm({ ...tipForm, source: e.target.value })}
+              className="px-3 py-2 rounded-xl border border-stone-300"
+            >
+              <option value="CASH_JAR">Hũ tiền mặt (CASH_JAR)</option>
+              <option value="CARD_TIP">Tip quẹt thẻ (CARD_TIP)</option>
+              <option value="VIETQR_TIP">Tip VietQR (VIETQR_TIP)</option>
+            </select>
+            <input
+              type="number"
+              min="0"
+              value={tipForm.totalAmount}
+              onChange={(e) => setTipForm({ ...tipForm, totalAmount: e.target.value })}
+              placeholder="Tổng tiền tip (VNĐ)"
+              className="px-3 py-2 rounded-xl border border-stone-300"
+            />
+            <select
+              value={tipForm.allocationMethod}
+              onChange={(e) => setTipForm({ ...tipForm, allocationMethod: e.target.value })}
+              className="px-3 py-2 rounded-xl border border-stone-300"
+            >
+              <option value="BY_HOURS">Theo giờ công (BY_HOURS)</option>
+              <option value="BY_ROLE_WEIGHT">Theo trọng số vai trò</option>
+              <option value="EQUAL">Chia đều (EQUAL)</option>
+            </select>
+            <button
+              type="submit"
+              className="col-span-2 py-2 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold cursor-pointer"
+            >
+              + Tạo &amp; Phân Bổ Tip Pool
+            </button>
+          </form>
+          <div className="space-y-1.5 max-h-48 overflow-y-auto text-xs">
+            {tipPools.map((tp) => (
+              <div key={tp.id} className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 flex justify-between">
+                <div>
+                  <p className="font-bold text-amber-950">
+                    {String(tp.business_date || '').slice(0, 10)} • {tp.source} ({tp.status})
+                  </p>
+                  <p className="text-[10px] text-amber-700">
+                    {tp.allocation_method} • {(tp.distributions || []).length} nhân viên
+                  </p>
+                </div>
+                <span className="font-black text-amber-900">{formatVND(tp.total_amount)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="bg-white p-5 rounded-2xl border border-stone-200 space-y-3">
+          <div>
+            <h3 className="font-extrabold text-sm text-stone-800">⚡ Tăng Ca OT (150% / 200% / 300%) &amp; Ca Đêm</h3>
+            <p className="text-xs text-stone-500">
+              Tính tự động theo Bộ luật Lao động VN: Ngày thường 150%, Cuối tuần 200%, Lễ Tết 300% + phụ cấp đêm 30%.
+            </p>
+          </div>
+          <form onSubmit={handleCreateOtLog} className="grid grid-cols-2 gap-2 text-xs">
+            <select
+              value={otForm.maNV || danhSachNV[0]?.maNV || ''}
+              onChange={(e) => setOtForm({ ...otForm, maNV: e.target.value })}
+              className="px-3 py-2 rounded-xl border border-stone-300"
+            >
+              {danhSachNV.map((nv) => (
+                <option key={nv.maNV} value={nv.maNV}>
+                  {nv.tenNV} ({nv.maNV})
+                </option>
+              ))}
+            </select>
+            <select
+              value={otForm.dayType}
+              onChange={(e) => setOtForm({ ...otForm, dayType: e.target.value })}
+              className="px-3 py-2 rounded-xl border border-stone-300"
+            >
+              <option value="WEEKDAY">Ngày thường (150%)</option>
+              <option value="WEEKEND">Cuối tuần (200%)</option>
+              <option value="HOLIDAY">Ngày lễ / Tết (300%)</option>
+            </select>
+            <input
+              type="number"
+              step="0.5"
+              min="0"
+              value={otForm.otHours}
+              onChange={(e) => setOtForm({ ...otForm, otHours: e.target.value })}
+              placeholder="Số giờ OT"
+              className="px-3 py-2 rounded-xl border border-stone-300"
+            />
+            <input
+              type="number"
+              step="0.5"
+              min="0"
+              value={otForm.nightHours}
+              onChange={(e) => setOtForm({ ...otForm, nightHours: e.target.value })}
+              placeholder="Số giờ ca đêm"
+              className="px-3 py-2 rounded-xl border border-stone-300"
+            />
+            <input
+              type="date"
+              value={otForm.workDate}
+              onChange={(e) => setOtForm({ ...otForm, workDate: e.target.value })}
+              className="px-3 py-2 rounded-xl border border-stone-300"
+            />
+            <input
+              type="number"
+              min="0"
+              value={otForm.baseHourlyRate}
+              onChange={(e) => setOtForm({ ...otForm, baseHourlyRate: e.target.value })}
+              placeholder="Đơn giá giờ (VNĐ)"
+              className="px-3 py-2 rounded-xl border border-stone-300"
+            />
+            <button
+              type="submit"
+              className="col-span-2 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer"
+            >
+              + Ghi Nhận Tăng Ca OT
+            </button>
+          </form>
+          <div className="space-y-1.5 max-h-48 overflow-y-auto text-xs">
+            {otLogs.map((ot) => (
+              <div key={ot.id} className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 flex justify-between">
+                <div>
+                  <p className="font-bold text-emerald-950">
+                    {ot.ma_nv} • {ot.day_type} ({Number(ot.ot_multiplier) * 100}%)
+                  </p>
+                  <p className="text-[10px] text-emerald-700">
+                    OT: {ot.ot_hours}h • Ca đêm: {ot.night_hours}h • {String(ot.work_date || '').slice(0, 10)}
+                  </p>
+                </div>
+                <span className="font-black text-emerald-900">
+                  {formatVND(Number(ot.ot_pay || 0) + Number(ot.night_allowance || 0))}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 

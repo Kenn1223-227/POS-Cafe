@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { baoCaoService } from '../../services/baoCaoService'
 import { useAuthStore } from '../../store/authStore'
 import FeatureLockedCard from '../../components/FeatureLockedCard'
+import HourlySalesLaborChart from '../../components/HourlySalesLaborChart'
 import { hasFeatureFlag } from '../../utils/featureFlags'
 import { formatVND, formatDate, getTodayISO } from '../../utils/format'
 
@@ -379,6 +380,8 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+      {/* Biểu đồ Doanh thu theo giờ vs. Labor Cost % (Wave 4A — P3-01) */}
+      <HourlySalesLaborChart tuNgay={tuNgay} denNgay={denNgay} />
     </div>
   )
 }

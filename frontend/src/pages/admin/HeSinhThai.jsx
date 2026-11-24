@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import toast from 'react-hot-toast'
+import axiosClient from '../../api/axiosClient'
 import { ecosystemService } from '../../services/ecosystemService'
 import { banService } from '../../services/banService'
 import { sanPhamService } from '../../services/sanPhamService'
@@ -11,6 +12,7 @@ const TABS = [
   { id: 'omnichannel', label: '📱 QR Order & Sàn Giao Hàng' },
   { id: 'crm', label: '👑 CRM Phân hạng, Ví & Zalo ZNS' },
   { id: 'horizontal', label: '🎱 Tính giờ & Lô bánh Bakery 19h' },
+  { id: 'chain_ops', label: '💼 Bảng giá đa kênh, Đối soát & B2B' },
   { id: 'ai', label: '🤖 AI Dự báo Kho (60 ngày) & Upsell' },
 ]
 
@@ -57,8 +59,24 @@ export default function HeSinhThai() {
   // Tab 3: CRM & ZNS
   const [crmData, setCrmData] = useState({ tierSummary: [], tongSoDuVi: 0, customers: [] })
   const [znsOutbox, setZnsOutbox] = useState([])
+  const [znsProviderMode, setZnsProviderMode] = useState('mock')
   const [topupTarget, setTopupTarget] = useState(null)
   const [topupAmount, setTopupAmount] = useState('100000')
+
+  // Tab Wave 4A: Price Books, Aggregator Settlements & House Accounts B2B
+  const [priceBooks, setPriceBooks] = useState([])
+  const [settlements, setSettlements] = useState([])
+  const [houseAccounts, setHouseAccounts] = useState([])
+  const [pbForm, setPbForm] = useState({ code: '', name: '', channel: 'GRABFOOD', priority: '20' })
+  const [acctForm, setAcctForm] = useState({ accountCode: '', companyName: '', creditLimit: '5000000' })
+  const [settleForm, setSettleForm] = useState({
+    platform: 'GRABFOOD',
+    periodFrom: getTodayISO(),
+    periodTo: getTodayISO(),
+    grossSales: '1000000',
+    commissionRatePct: '25',
+    netReceived: '750000',
+  })
 
   // Tab 4: Horizontal F&B
   const [bakeryBatches, setBakeryBatches] = useState([])
@@ -105,12 +123,22 @@ export default function HeSinhThai() {
         const agg = await ecosystemService.getAggregatorOrders().catch(() => ({ summary: [], orders: [] }))
         setAggData({ summary: agg?.summary || [], orders: agg?.orders || [] })
       } else if (tabId === 'crm') {
-        const [crm, zns] = await Promise.all([
+        const [crm, znsRes] = await Promise.all([
           ecosystemService.getCrmCustomers().catch(() => ({ tierSummary: [], tongSoDuVi: 0, customers: [] })),
-          ecosystemService.getZnsOutbox().catch(() => []),
+          axiosClient.get('/zns/outbox', { silent: true }).catch(() => ({ providerMode: 'mock', items: [] })),
         ])
         setCrmData(crm || { tierSummary: [], tongSoDuVi: 0, customers: [] })
-        setZnsOutbox(Array.isArray(zns) ? zns : [])
+        setZnsProviderMode(znsRes?.providerMode || 'mock')
+        setZnsOutbox(Array.isArray(znsRes?.items) ? znsRes.items : [])
+      } else if (tabId === 'chain_ops') {
+        const [pbRes, stRes, haRes] = await Promise.all([
+          axiosClient.get('/price-books', { silent: true }).then((r) => r?.priceBooks || []).catch(() => []),
+          axiosClient.get('/finance/aggregator-settlements', { silent: true }).then((r) => r?.settlements || []).catch(() => []),
+          axiosClient.get('/finance/house-accounts', { silent: true }).then((r) => r?.accounts || []).catch(() => []),
+        ])
+        setPriceBooks(pbRes)
+        setSettlements(stRes)
+        setHouseAccounts(haRes)
       } else if (tabId === 'horizontal') {
         const [batches, timers] = await Promise.all([
           ecosystemService.getBakeryBatches().catch(() => []),
@@ -229,6 +257,67 @@ export default function HeSinhThai() {
       const res = await ecosystemService.triggerBirthdayZns(30000)
       toast.success(res.message)
       await loadTabData('crm')
+    } catch {
+      // Interceptor
+    }
+  }
+
+  const handleRunZnsWorker = async () => {
+    try {
+      const d = (await axiosClient.post('/zns/outbox/process', { limit: 30 })) || {}
+      toast.success(`ZNS Worker (${d.mode || znsProviderMode}): gửi ${d.sent || 0}, bỏ qua chưa opt-in ${d.skippedNoConsent || 0}`)
+      await loadTabData('crm')
+    } catch {
+      // Interceptor
+    }
+  }
+
+  const handleCreatePriceBook = async (e) => {
+    e.preventDefault()
+    try {
+      await axiosClient.post('/price-books', {
+        code: pbForm.code,
+        name: pbForm.name,
+        channel: pbForm.channel,
+        priority: Number(pbForm.priority || 10),
+      })
+      toast.success('Đã tạo bảng giá đa kênh!')
+      setPbForm({ code: '', name: '', channel: 'GRABFOOD', priority: '20' })
+      await loadTabData('chain_ops')
+    } catch {
+      // Interceptor
+    }
+  }
+
+  const handleCreateHouseAccount = async (e) => {
+    e.preventDefault()
+    try {
+      await axiosClient.post('/finance/house-accounts', {
+        accountCode: acctForm.accountCode,
+        companyName: acctForm.companyName,
+        creditLimit: Number(acctForm.creditLimit || 0),
+      })
+      toast.success('Đã tạo tài khoản công nợ B2B!')
+      setAcctForm({ accountCode: '', companyName: '', creditLimit: '5000000' })
+      await loadTabData('chain_ops')
+    } catch {
+      // Interceptor
+    }
+  }
+
+  const handleCreateSettlement = async (e) => {
+    e.preventDefault()
+    try {
+      await axiosClient.post('/finance/aggregator-settlements', {
+        platform: settleForm.platform,
+        periodFrom: settleForm.periodFrom,
+        periodTo: settleForm.periodTo,
+        grossSales: Number(settleForm.grossSales || 0),
+        commissionRatePct: Number(settleForm.commissionRatePct || 0),
+        netReceived: Number(settleForm.netReceived || 0),
+      })
+      toast.success('Đã lưu kỳ đối soát sàn!')
+      await loadTabData('chain_ops')
     } catch {
       // Interceptor
     }
@@ -748,23 +837,32 @@ export default function HeSinhThai() {
             </div>
 
             <div className="lg:col-span-5 bg-white p-5 rounded-2xl border space-y-3">
-              <h3 className="font-extrabold text-sm text-gray-800">
-                💬 Hàng đợi Tin nhắn Tự động Zalo ZNS{' '}
-                <span className="ml-1.5 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-extrabold uppercase">
-                  Beta / Demo Outbox
-                </span>
-              </h3>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <h3 className="font-extrabold text-sm text-gray-800">
+                  💬 Hàng đợi Zalo ZNS Worker{' '}
+                  <span className="ml-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold uppercase">
+                    Outbox Worker ({znsProviderMode}) • NĐ 13/2023
+                  </span>
+                </h3>
+                <button
+                  type="button"
+                  onClick={handleRunZnsWorker}
+                  className="px-2.5 py-1 rounded-lg bg-sky-700 hover:bg-sky-800 text-white text-[11px] font-bold cursor-pointer"
+                >
+                  ▶ Chạy Worker
+                </button>
+              </div>
               <div className="space-y-2 max-h-80 overflow-y-auto text-xs">
                 {znsOutbox.length === 0 ? (
                   <p className="text-gray-400 text-center py-6">
-                    Tin nhắn cảm ơn sau mua hàng, thăng hạng & sinh nhật sẽ tự động xuất hiện tại đây!
+                    Tin nhắn cảm ơn sau mua hàng, thăng hạng &amp; sinh nhật (tuân thủ đồng thuận NĐ 13/2023) sẽ xuất hiện tại đây!
                   </p>
                 ) : (
                   znsOutbox.map((z) => (
                     <div key={z.id} className="p-3 rounded-xl bg-sky-50 border border-sky-200 space-y-1">
                       <div className="flex justify-between font-bold text-sky-950">
-                        <span>[{z.loaiTin}] {z.soDienThoai}</span>
-                        <span className="text-[10px] text-sky-700">{z.trangThai}</span>
+                        <span>[{z.purpose || z.loaiTin}] {z.phone || z.soDienThoai}</span>
+                        <span className="text-[10px] text-sky-700">{z.status || z.trangThai}</span>
                       </div>
                       <p className="text-[11px] text-gray-700">{z.noiDung?.tinNhan}</p>
                       <p className="text-[10px] text-gray-400">{formatDateTime(z.thoiGianTao)}</p>
@@ -902,6 +1000,176 @@ export default function HeSinhThai() {
                   </div>
                 ))
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================= TAB WAVE 4A: PRICE BOOKS, ĐỐI SOÁT SÀN & CÔNG NỢ B2B ================= */}
+      {activeTab === 'chain_ops' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+          {/* Price Books */}
+          <div className="bg-white p-5 rounded-2xl border space-y-3">
+            <h3 className="font-extrabold text-sm text-gray-800">🏷️ Bảng Giá Đa Kênh (Price Books)</h3>
+            <form onSubmit={handleCreatePriceBook} className="space-y-2 text-xs">
+              <input
+                required
+                value={pbForm.code}
+                onChange={(e) => setPbForm({ ...pbForm, code: e.target.value })}
+                placeholder="Mã bảng giá (VD: GRAB_Q1)"
+                className="w-full px-3 py-2 rounded-xl border border-gray-300"
+              />
+              <input
+                required
+                value={pbForm.name}
+                onChange={(e) => setPbForm({ ...pbForm, name: e.target.value })}
+                placeholder="Tên bảng giá"
+                className="w-full px-3 py-2 rounded-xl border border-gray-300"
+              />
+              <div className="flex gap-2">
+                <select
+                  value={pbForm.channel}
+                  onChange={(e) => setPbForm({ ...pbForm, channel: e.target.value })}
+                  className="flex-1 px-3 py-2 rounded-xl border border-gray-300"
+                >
+                  <option value="GRABFOOD">GRABFOOD</option>
+                  <option value="SHOPEEFOOD">SHOPEEFOOD</option>
+                  <option value="BEFOOD">BEFOOD</option>
+                  <option value="DINE_IN">DINE_IN</option>
+                  <option value="TAKEAWAY">TAKEAWAY</option>
+                  <option value="VIP">VIP</option>
+                </select>
+                <input
+                  type="number"
+                  value={pbForm.priority}
+                  onChange={(e) => setPbForm({ ...pbForm, priority: e.target.value })}
+                  placeholder="Ưu tiên"
+                  className="w-24 px-3 py-2 rounded-xl border border-gray-300"
+                />
+              </div>
+              <button
+                type="submit"
+                className="w-full py-2 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold cursor-pointer"
+              >
+                + Tạo Price Book
+              </button>
+            </form>
+            <div className="space-y-1.5 max-h-60 overflow-y-auto text-xs">
+              {priceBooks.map((pb) => (
+                <div key={pb.id} className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 flex justify-between">
+                  <div>
+                    <p className="font-bold text-amber-950">{pb.code} • {pb.name}</p>
+                    <p className="text-[10px] text-amber-700">{pb.channel} • Ưu tiên {pb.priority}</p>
+                  </div>
+                  <span className="text-[10px] font-bold text-amber-900">{(pb.items || []).length} món</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Aggregator Settlements */}
+          <div className="bg-white p-5 rounded-2xl border space-y-3">
+            <h3 className="font-extrabold text-sm text-gray-800">🛵 Đối Soát Sàn Giao Đồ Ăn</h3>
+            <form onSubmit={handleCreateSettlement} className="space-y-2 text-xs">
+              <select
+                value={settleForm.platform}
+                onChange={(e) => setSettleForm({ ...settleForm, platform: e.target.value })}
+                className="w-full px-3 py-2 rounded-xl border border-gray-300"
+              >
+                <option value="GRABFOOD">GRABFOOD</option>
+                <option value="SHOPEEFOOD">SHOPEEFOOD</option>
+                <option value="BEFOOD">BEFOOD</option>
+                <option value="XANHSM">XANHSM</option>
+              </select>
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="number"
+                  value={settleForm.grossSales}
+                  onChange={(e) => setSettleForm({ ...settleForm, grossSales: e.target.value })}
+                  placeholder="Doanh thu gộp"
+                  className="px-3 py-2 rounded-xl border border-gray-300"
+                />
+                <input
+                  type="number"
+                  value={settleForm.commissionRatePct}
+                  onChange={(e) => setSettleForm({ ...settleForm, commissionRatePct: e.target.value })}
+                  placeholder="% Chiết khấu"
+                  className="px-3 py-2 rounded-xl border border-gray-300"
+                />
+              </div>
+              <input
+                type="number"
+                value={settleForm.netReceived}
+                onChange={(e) => setSettleForm({ ...settleForm, netReceived: e.target.value })}
+                placeholder="Thực nhận từ sàn (VNĐ)"
+                className="w-full px-3 py-2 rounded-xl border border-gray-300"
+              />
+              <button
+                type="submit"
+                className="w-full py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer"
+              >
+                + Lưu kỳ đối soát
+              </button>
+            </form>
+            <div className="space-y-1.5 max-h-60 overflow-y-auto text-xs">
+              {settlements.map((s) => (
+                <div key={s.id} className="p-2.5 rounded-xl bg-stone-50 border flex justify-between">
+                  <div>
+                    <p className="font-bold text-gray-900">{s.platform} ({s.status})</p>
+                    <p className="text-[10px] text-gray-500">
+                      Kỳ vọng: {formatVND(s.net_expected)} • Thực nhận: {formatVND(s.net_received)}
+                    </p>
+                  </div>
+                  <span className={`font-bold ${Number(s.variance_amount) === 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                    {formatVND(s.variance_amount)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* House Accounts B2B */}
+          <div className="bg-white p-5 rounded-2xl border space-y-3">
+            <h3 className="font-extrabold text-sm text-gray-800">🏢 Công Nợ Doanh Nghiệp (B2B)</h3>
+            <form onSubmit={handleCreateHouseAccount} className="space-y-2 text-xs">
+              <input
+                required
+                value={acctForm.accountCode}
+                onChange={(e) => setAcctForm({ ...acctForm, accountCode: e.target.value })}
+                placeholder="Mã KH B2B (VD: CORP01)"
+                className="w-full px-3 py-2 rounded-xl border border-gray-300"
+              />
+              <input
+                required
+                value={acctForm.companyName}
+                onChange={(e) => setAcctForm({ ...acctForm, companyName: e.target.value })}
+                placeholder="Tên công ty / đối tác"
+                className="w-full px-3 py-2 rounded-xl border border-gray-300"
+              />
+              <input
+                type="number"
+                value={acctForm.creditLimit}
+                onChange={(e) => setAcctForm({ ...acctForm, creditLimit: e.target.value })}
+                placeholder="Hạn mức công nợ (VNĐ)"
+                className="w-full px-3 py-2 rounded-xl border border-gray-300"
+              />
+              <button
+                type="submit"
+                className="w-full py-2 rounded-xl bg-sky-700 hover:bg-sky-800 text-white font-bold cursor-pointer"
+              >
+                + Tạo tài khoản B2B
+              </button>
+            </form>
+            <div className="space-y-1.5 max-h-60 overflow-y-auto text-xs">
+              {houseAccounts.map((a) => (
+                <div key={a.id} className="p-2.5 rounded-xl bg-sky-50 border border-sky-200 flex justify-between">
+                  <div>
+                    <p className="font-bold text-sky-950">{a.account_code} • {a.company_name}</p>
+                    <p className="text-[10px] text-sky-700">Hạn mức: {formatVND(a.credit_limit)}</p>
+                  </div>
+                  <span className="font-black text-sky-900">Nợ: {formatVND(a.current_balance)}</span>
+                </div>
+              ))}
             </div>
           </div>
         </div>

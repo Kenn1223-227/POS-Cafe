@@ -123,6 +123,9 @@ const {
     maskPhoneForRole,
 } = require('./modules/vnTaxAndEInvoiceService');
 const { registerEInvoiceRoutes } = require('./modules/einvoiceRoutes');
+const { registerChainFinanceOpsRoutes } = require('./modules/chainFinanceOpsRoutes');
+const { registerPriceBookAndZnsRoutes } = require('./modules/priceBookAndZnsRoutes');
+const { registerHrPayrollTipsRoutes } = require('./modules/hrPayrollTipsRoutes');
 const {
     kiemTraToken,
     kiemTraNhanVienConHoatDong,
@@ -13098,6 +13101,20 @@ registerEInvoiceRoutes(app, {
     layTenantId,
     layChiNhanhHienTai: (req) => String(req.headers['x-branch-id'] || req.query?.branchId || req.body?.branchId || 'CN01').trim(),
 });
+
+// [Wave 4A — P2-02, P2-03, P3-01] Đăng ký 3 cụm Router tách module (không phình monolith server.js)
+const wave4aRouteDeps = {
+    pool,
+    chayGiaoDich,
+    kiemTraToken,
+    choPhepVaiTro,
+    layTenantId,
+    layChiNhanhHienTai: (req) => String(req.headers['x-branch-id'] || req.query?.branchId || req.body?.branchId || 'CN01').trim(),
+    ghiAuditLog,
+};
+registerChainFinanceOpsRoutes(app, wave4aRouteDeps);
+registerPriceBookAndZnsRoutes(app, wave4aRouteDeps);
+registerHrPayrollTipsRoutes(app, wave4aRouteDeps);
 
 app.get('/', (req, res) => {
     res.json({ 

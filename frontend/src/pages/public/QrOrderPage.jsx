@@ -14,6 +14,7 @@ export default function QrOrderPage() {
   const [picking, setPicking] = useState(null)
   const [pickSize, setPickSize] = useState('M')
   const [pickToppings, setPickToppings] = useState([])
+  const [pickModifiers, setPickModifiers] = useState({})
   const [pickNote, setPickNote] = useState('')
   const [cart, setCart] = useState([])
   const [showCheckout, setShowCheckout] = useState(false)
@@ -68,7 +69,8 @@ export default function QrOrderPage() {
     () =>
       cart.reduce((sum, item) => {
         const tpSum = (item.toppings || []).reduce((t, x) => t + x.giaTopping * x.soLuong, 0)
-        return sum + (item.donGia + tpSum) * item.soLuong
+        const modSum = Number(item.giaModifiers || 0)
+        return sum + (item.donGia + tpSum + modSum) * item.soLuong
       }, 0),
     [cart]
   )
@@ -79,7 +81,58 @@ export default function QrOrderPage() {
     setPicking(product)
     setPickSize(product.sizes.find((s) => s.kichThuoc === 'M')?.kichThuoc || product.sizes[0]?.kichThuoc || 'M')
     setPickToppings([])
+    const defaultMods = {}
+    for (const grp of product.modifierGroups || []) {
+      for (const opt of grp.options || []) {
+        if (opt.laMacDinh && !opt.tamHet) {
+          defaultMods[opt.id] = { ...opt, groupId: grp.id, tenGroup: grp.tenGroup, qty: 1 }
+        }
+      }
+    }
+    setPickModifiers(defaultMods)
     setPickNote('')
+  }
+
+  const toggleModifierOption = (grp, opt) => {
+    if (opt.tamHet) return
+    setPickModifiers((prev) => {
+      const next = { ...prev }
+      const isSingle = grp.loai === 'SINGLE' || grp.chonToiDa === 1
+      if (isSingle) {
+        for (const o of grp.options || []) {
+          delete next[o.id]
+        }
+        next[opt.id] = { ...opt, groupId: grp.id, tenGroup: grp.tenGroup, qty: 1 }
+        return next
+      }
+      if (next[opt.id]) {
+        delete next[opt.id]
+        return next
+      }
+      const selectedInGroup = Object.values(next).filter((x) => x.groupId === grp.id).length
+      if (selectedInGroup >= (grp.chonToiDa || 1)) {
+        toast.error(`Nhóm "${grp.tenGroup}" chỉ được chọn tối đa ${grp.chonToiDa} tùy chọn!`)
+        return prev
+      }
+      next[opt.id] = { ...opt, groupId: grp.id, tenGroup: grp.tenGroup, qty: 1 }
+      return next
+    })
+  }
+
+  const adjustModifierQty = (opt, delta) => {
+    setPickModifiers((prev) => {
+      const cur = prev[opt.id]
+      if (!cur) return prev
+      const nextQty = (cur.qty || 1) + delta
+      const maxQty = Math.max(1, Number(opt.toiDaSoLuong || 1))
+      const next = { ...prev }
+      if (nextQty <= 0) {
+        delete next[opt.id]
+      } else {
+        next[opt.id] = { ...cur, qty: Math.min(maxQty, nextQty) }
+      }
+      return next
+    })
   }
 
   const quickAddUpsell = (u) => {
@@ -104,6 +157,18 @@ export default function QrOrderPage() {
 
   const confirmAddPick = () => {
     if (!picking) return
+    const selectedMods = Object.values(pickModifiers)
+    for (const grp of picking.modifierGroups || []) {
+      const minRequired = grp.batBuoc ? Math.max(1, Number(grp.chonToiThieu || 1)) : Number(grp.chonToiThieu || 0)
+      if (minRequired > 0) {
+        const count = selectedMods.filter((m) => m.groupId === grp.id).length
+        if (count < minRequired) {
+          toast.error(`Vui lòng chọn ít nhất ${minRequired} tùy chọn cho "${grp.tenGroup}"!`)
+          return
+        }
+      }
+    }
+    const giaModifiers = selectedMods.reduce((s, m) => s + Number(m.giaThem || 0) * Number(m.qty || 1), 0)
     const sz = picking.sizes.find((s) => s.kichThuoc === pickSize) || picking.sizes[0]
     setCart((prev) => [
       ...prev,
@@ -113,8 +178,15 @@ export default function QrOrderPage() {
         tenMon: picking.tenMon,
         kichThuoc: sz.kichThuoc,
         donGia: sz.giaBan,
+        giaModifiers,
         soLuong: 1,
         toppings: pickToppings.map((t) => ({ ...t, soLuong: 1 })),
+        modifiers: selectedMods.map((m) => ({
+          optionId: m.id,
+          tenOption: m.tenOption,
+          giaThem: Number(m.giaThem || 0),
+          qty: Number(m.qty || 1),
+        })),
         ghiChu: pickNote.trim(),
       },
     ])
@@ -145,6 +217,7 @@ export default function QrOrderPage() {
           soLuong: c.soLuong,
           ghiChu: c.ghiChu,
           toppings: c.toppings.map((t) => ({ maTopping: t.maTopping, soLuong: t.soLuong })),
+          modifiers: (c.modifiers || []).map((m) => ({ optionId: m.optionId, qty: m.qty })),
         })),
       })
       setSubmittedOrder(res.order)
@@ -393,6 +466,71 @@ export default function QrOrderPage() {
                 ))}
               </div>
             </div>
+
+            {(picking.modifierGroups || []).length > 0 && (
+              <div className="space-y-3">
+                {picking.modifierGroups.map((grp) => (
+                  <div key={grp.id} className="space-y-1.5">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-bold text-stone-700">
+                        {grp.tenGroup}{' '}
+                        {grp.batBuoc && (
+                          <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-extrabold">
+                            Bắt buộc
+                          </span>
+                        )}
+                      </span>
+                      <span className="text-[10px] text-stone-400">
+                        Tối đa {grp.chonToiDa || 1}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {(grp.options || []).map((opt) => {
+                        const sel = pickModifiers[opt.id]
+                        return (
+                          <div key={opt.id} className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              disabled={opt.tamHet}
+                              onClick={() => toggleModifierOption(grp, opt)}
+                              className={`px-3 py-1.5 rounded-xl border text-xs font-bold transition ${
+                                opt.tamHet
+                                  ? 'opacity-40 bg-stone-100 border-stone-200 text-stone-400 line-through'
+                                  : sel
+                                  ? 'bg-amber-700 text-white border-amber-700 cursor-pointer'
+                                  : 'bg-stone-50 text-stone-700 border-stone-200 cursor-pointer'
+                              }`}
+                            >
+                              {opt.tenOption}
+                              {Number(opt.giaThem || 0) > 0 ? ` (+${Math.round(opt.giaThem / 1000)}k)` : ''}
+                            </button>
+                            {sel && Number(opt.toiDaSoLuong || 1) > 1 && (
+                              <div className="inline-flex items-center border border-amber-300 rounded-lg bg-amber-50 text-xs font-extrabold">
+                                <button
+                                  type="button"
+                                  onClick={() => adjustModifierQty(opt, -1)}
+                                  className="px-2 py-1 text-amber-900 cursor-pointer"
+                                >
+                                  -
+                                </button>
+                                <span className="px-1.5 text-amber-950">{sel.qty}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => adjustModifierQty(opt, 1)}
+                                  className="px-2 py-1 text-amber-900 cursor-pointer"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {toppings.length > 0 && (
               <div className="space-y-1.5">
