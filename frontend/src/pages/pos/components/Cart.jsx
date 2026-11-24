@@ -155,14 +155,20 @@ const Cart = memo(function Cart({
 
   const bankConfig = getVietQrConfig()
   const transferMemo = activeInvoice ? `POSHD${activeInvoice.maHoaDon}` : ''
-  const emvcoPayload = bankConfig?.accountNo
-    ? buildVietQrEmvcoPayload({
+  let emvcoPayload = ''
+  let vietQrBankError = ''
+  if (bankConfig?.accountNo) {
+    try {
+      emvcoPayload = buildVietQrEmvcoPayload({
         bankId: bankConfig.bankId,
         accountNo: bankConfig.accountNo,
         amount: conLaiCanThu,
         memo: transferMemo,
       })
-    : ''
+    } catch (err) {
+      vietQrBankError = err?.message || 'Mã ngân hàng VietQR chưa hợp lệ!'
+    }
+  }
 
   const handleLoadUnmatchedQr = async () => {
     setLoadingUnmatched(true)

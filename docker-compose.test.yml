@@ -1,0 +1,32 @@
+# Test Stack độc lập (không đụng cổng dev 5432/6379): PostgreSQL 16 + Redis 7
+# Khởi chạy: docker compose -f docker-compose.test.yml up -d
+# Dừng & xóa sạch: docker compose -f docker-compose.test.yml down -v
+services:
+  postgres_test:
+    image: postgres:16-alpine
+    container_name: cafe_pos_postgres_test
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test_owner_password
+      POSTGRES_DB: cafe_pos_test
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./db/init-test-db.sql:/docker-entrypoint-initdb.d/01-init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cafe_pos_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  redis_test:
+    image: redis:7-alpine
+    container_name: cafe_pos_redis_test
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "volatile-lru"]
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10

@@ -1,12 +1,43 @@
-require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
+const dotenv = require('dotenv');
 const { Pool } = require('pg');
+
+const args = process.argv.slice(2);
+const useEnvTest = args.includes('--env-test') || process.env.NODE_ENV === 'test';
+const includeBase = args.includes('--base');
+const forceRun = args.includes('--force');
+const positionalArgs = args.filter((a) => !a.startsWith('--'));
+
+// Nạp .env.test nếu chạy test, fallback sang .env
+const envPath = useEnvTest
+    ? path.join(__dirname, '..', '.env.test')
+    : path.join(__dirname, '..', '.env');
+if (fs.existsSync(envPath)) {
+    dotenv.config({ path: envPath, quiet: true });
+} else {
+    dotenv.config({ quiet: true });
+}
+
+function extractVersion(filename) {
+    const m = String(filename).match(/^(\d{3})_/);
+    return m ? m[1] : filename;
+}
+
+async function ensureSchemaMigrationsTable(pool) {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.schema_migrations (
+            version    VARCHAR(32) PRIMARY KEY,
+            filename   TEXT NOT NULL,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+}
 
 async function main() {
     const connStr = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
     if (!connStr) {
-        console.error('❌ Thiếu biến môi trường DATABASE_URL hoặc MIGRATION_DATABASE_URL trong .env');
+        console.error('❌ Thiếu biến môi trường MIGRATION_DATABASE_URL hoặc DATABASE_URL');
         process.exit(1);
     }
 
@@ -16,30 +47,61 @@ async function main() {
         .filter((f) => f.endsWith('.sql'))
         .sort();
 
-    const filterArg = process.argv[2] ? String(process.argv[2]).trim() : '026';
+    const filterArg = positionalArgs[0] ? String(positionalArgs[0]).trim() : 'all';
     const targetFiles =
         filterArg.toLowerCase() === 'all'
             ? allFiles
-            : allFiles.filter((f) => f.includes(filterArg));
+            : allFiles.filter((f) => f.startsWith(filterArg) || f.includes(filterArg));
 
     if (targetFiles.length === 0) {
         console.error(`❌ Không tìm thấy file migration khớp với "${filterArg}" trong db/migrations/`);
         process.exit(1);
     }
 
+    const isLocal = connStr.includes('localhost') || connStr.includes('127.0.0.1');
     const pool = new Pool({
         connectionString: connStr,
-        ssl: connStr.includes('localhost') || connStr.includes('127.0.0.1') ? false : { rejectUnauthorized: false },
+        ssl: isLocal ? false : { rejectUnauthorized: false },
     });
 
     try {
+        if (includeBase) {
+            const baseSchemaPath = path.join(__dirname, '..', 'db', 'schema_base.sql');
+            if (fs.existsSync(baseSchemaPath)) {
+                console.log('⏳ Đang áp dụng schema nền (db/schema_base.sql)...');
+                await pool.query(fs.readFileSync(baseSchemaPath, 'utf8'));
+                console.log('✅ Hoàn tất schema nền.');
+            }
+        }
+
+        await ensureSchemaMigrationsTable(pool);
+
+        const appliedRes = await pool.query('SELECT version FROM public.schema_migrations');
+        const appliedSet = new Set(appliedRes.rows.map((r) => r.version));
+
+        let executed = 0;
+        let skipped = 0;
         for (const file of targetFiles) {
+            const version = extractVersion(file);
+            if (!forceRun && appliedSet.has(version)) {
+                skipped += 1;
+                continue;
+            }
             const fullPath = path.join(migrationsDir, file);
             const sql = fs.readFileSync(fullPath, 'utf8');
-            console.log(`⏳ Đang chạy migration: ${file}...`);
+            console.log(`⏳ Đang chạy migration [${version}]: ${file}...`);
             await pool.query(sql);
-            console.log(`✅ Hoàn tất migration: ${file}`);
+            await pool.query(
+                `INSERT INTO public.schema_migrations (version, filename)
+                 VALUES ($1, $2)
+                 ON CONFLICT (version) DO UPDATE SET filename = EXCLUDED.filename, applied_at = now()`,
+                [version, file]
+            );
+            executed += 1;
+            console.log(`✅ Hoàn tất migration [${version}]: ${file}`);
         }
+
+        console.log(`🎯 Kết quả migrate: đã chạy ${executed}, bỏ qua (đã áp dụng) ${skipped}.`);
     } finally {
         await pool.end();
     }

@@ -149,17 +149,27 @@ const allowedOrigins = (process.env.FRONTEND_URL || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+const isProdEnv = process.env.NODE_ENV === 'production';
+if (isProdEnv && allowedOrigins.length === 0) {
+    console.warn('⚠️ [SECURITY] NODE_ENV=production nhưng chưa cấu hình FRONTEND_URL — CORS sẽ từ chối mọi cross-origin request!');
+}
 const isLocalDevOrigin = (origin) => /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin || '');
-const corsOrigin = allowedOrigins.length
+const corsOrigin = isProdEnv
     ? (origin, callback) => {
-          // Cho phép cùng origin/server-to-server (!origin), FRONTEND_URL cấu hình,
-          // và localhost khi chạy kiểm thử cục bộ (trừ khi bật STRICT_CORS=true)
+          // Production: bắt buộc khớp FRONTEND_URL, TẮT hoàn toàn isLocalDevOrigin!
+          if (!origin || allowedOrigins.includes(origin)) {
+              return callback(null, true);
+          }
+          return callback(new Error(`Origin ${origin} không được phép bởi CORS Production`));
+      }
+    : allowedOrigins.length
+    ? (origin, callback) => {
           if (!origin || allowedOrigins.includes(origin) || (process.env.STRICT_CORS !== 'true' && isLocalDevOrigin(origin))) {
               return callback(null, true);
           }
           return callback(new Error(`Origin ${origin} không được phép bởi CORS`));
       }
-    : true; // Phản hồi đúng Origin yêu cầu để hỗ trợ HttpOnly Cookie (credentials: true)
+    : true; // Dev mode: phản hồi đúng Origin yêu cầu để hỗ trợ HttpOnly Cookie (credentials: true)
 
 const io = new Server(server, {
     cors: { origin: corsOrigin, credentials: true },
@@ -173,14 +183,26 @@ const yeuCauTinhNang = taoMiddlewareTinhNang(pool);
 const kiemTraHanMucDonThang = taoMiddlewareHanMucDonThang(pool);
 
 app.use(requestContextMiddleware);
+// [Wave 1 — P0-04] Security Headers bắt buộc
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    if (isProdEnv || req.secure || req.headers['x-forwarded-proto'] === 'https') {
+        res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    next();
+});
 app.use(cors({
     origin: corsOrigin,
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Token', 'Idempotency-Key', 'X-Offline-Sync', 'X-Request-Id', 'X-Device-Id'],
     exposedHeaders: ['X-Request-Id'],
 }));
-app.use(express.json({ limit: '10mb' }));
+// Chỉ mở body limit 8mb riêng cho /api/ai/parse-menu; toàn cục siết còn 512kb chống Memory DoS
+app.use('/api/ai/parse-menu', express.json({ limit: '8mb' }));
+app.use(express.json({ limit: '512kb' }));
 
 // ==========================================
 // [v2] TIỆN ÍCH DÙNG CHUNG & MA TRẬN PHÂN QUYỀN CHI TIẾT (GRANULAR RBAC)
@@ -1501,6 +1523,72 @@ io.on('connection', (socket) => {
         4: ['POS', 'QR', 'EXPO'],
     };
     const DEFAULT_SOCKET_ROLE = { 1: 'KDS', 2: 'KDS', 3: 'WAITER', 4: 'POS' };
+
+    // [Wave 1 — P0-01] Soft-Lock bàn đang mở modal thanh toán qua Socket (TTL 45s)
+    if (!io._tableCheckoutLocks) io._tableCheckoutLocks = new Map();
+    const broadcastTableLocks = () => {
+        const now = Date.now();
+        const active = [];
+        for (const [key, entry] of io._tableCheckoutLocks.entries()) {
+            if (entry.expiresAt <= now) {
+                io._tableCheckoutLocks.delete(key);
+                continue;
+            }
+            if (entry.tenantId === tenantId) active.push(entry);
+        }
+        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('table:checkout_locks', active);
+    };
+
+    socket.on('table:checkout_lock', (payload = {}, ack) => {
+        const maBan = String(payload?.maBan || '').trim();
+        if (!maBan) return typeof ack === 'function' ? ack({ ok: false, message: 'Thiếu maBan' }) : undefined;
+        const lockKey = `${tenantId}:${maBan}`;
+        const now = Date.now();
+        const existing = io._tableCheckoutLocks.get(lockKey);
+        if (existing && existing.expiresAt > now && existing.socketId !== socket.id && existing.maNV !== socket.user.maNV) {
+            const reply = {
+                ok: false,
+                code: 'TABLE_CHECKOUT_LOCKED',
+                lockedBy: existing.tenNV || existing.maNV,
+                expiresAt: existing.expiresAt,
+            };
+            if (typeof ack === 'function') ack(reply);
+            return;
+        }
+        const entry = {
+            tenantId,
+            maBan,
+            maNV: socket.user.maNV,
+            tenNV: socket.user.tenNV || socket.user.maNV,
+            socketId: socket.id,
+            expiresAt: now + 45 * 1000,
+        };
+        io._tableCheckoutLocks.set(lockKey, entry);
+        broadcastTableLocks();
+        if (typeof ack === 'function') ack({ ok: true, lock: entry });
+    });
+
+    socket.on('table:checkout_unlock', (payload = {}) => {
+        const maBan = String(payload?.maBan || '').trim();
+        if (!maBan) return;
+        const lockKey = `${tenantId}:${maBan}`;
+        const existing = io._tableCheckoutLocks.get(lockKey);
+        if (existing && (existing.socketId === socket.id || existing.maNV === socket.user.maNV)) {
+            io._tableCheckoutLocks.delete(lockKey);
+            broadcastTableLocks();
+        }
+    });
+
+    socket.on('disconnect', () => {
+        let changed = false;
+        for (const [k, entry] of io._tableCheckoutLocks.entries()) {
+            if (entry.socketId === socket.id) {
+                io._tableCheckoutLocks.delete(k);
+                changed = true;
+            }
+        }
+        if (changed) broadcastTableLocks();
+    });
 
     socket.on('room:subscribe', (opts = {}, ack) => {
         const allowedRoles = ALLOWED_SOCKET_ROLES[vaiTro] || [];
@@ -3079,7 +3167,7 @@ async function taoOrderTrongGiaoDich(
         }
     } else {
         // Hóa đơn mới: cấp SoThuTuNgay nguyên tử KHÔNG quay vòng 99 + giữ SoTheRung tách biệt hoàn toàn!
-        const { seq: soThuTuNgay, soThuTuHienThi } = await capSoThuTuNgayKhongTrung(client, tenantId);
+        const { seq: soThuTuNgay, soThuTuHienThi } = await capSoThuTuNgayKhongTrung(client, tenantId, normalizeBranchId(branchId || 'MAIN'));
         const soTheRungClean =
             soTheRung !== null && soTheRung !== undefined && String(soTheRung).trim() !== ''
                 ? String(soTheRung).trim().slice(0, 16)
@@ -3837,138 +3925,35 @@ app.post('/api/order/quick-checkout', kiemTraToken, choPhepVaiTro(1, 4), kiemTra
                 }
             }
 
-            const chiTiet = await layHoaDonChiTiet(client, maHoaDon);
-            const khFinal = maKH || chiTiet.khachHang?.maKH || null;
-            const uuDai = await tinhUuDaiVaDiemTrongGiaoDich(client, {
-                tenantId: layTenantId(req),
-                tongTamTinh: chiTiet.tongTamTinh,
+            // [Wave 1 — P0-03] Dùng chung ghiNhanThanhToanTrongGiaoDich để khóa FOR UPDATE & kiểm tra/trừ KhachHang.SoDuVi (chặn thanh toán 0đ qua Ví)
+            const ttQc = await ghiNhanThanhToanTrongGiaoDich(client, {
+                maHoaDon,
+                expectedTenantId: tId,
+                mandatoryVersion: false,
+                ca,
+                maNV,
+                vaiTro: req.user.vaiTro,
+                maKH: maKH || null,
                 maKhuyenMai,
-                maKH: khFinal,
                 diemSuDung,
                 tuDongHappyHour: Boolean(tuDongHappyHour),
-                khoaCapNhat: true,
-                LoiNghiepVu,
+                autoFillSingleMethod: {
+                    phuongThucTT,
+                    tienKhachDua: tienKhachDua !== undefined && tienKhachDua !== null ? Number(tienKhachDua) : null,
+                    nguonXacNhan: laOfflineSync ? 'POS_OFFLINE_SYNC' : 'POS_QUICK_CHECKOUT',
+                },
+                choPhepThuMotPhan: false,
+                khoaIdem: dungIdem ? khoaIdem : null,
+                laOfflineLechCa: Boolean(caInfo.lechCaDongBo),
+                maCaThuNganGoc: caInfo.maCaGoc ? String(caInfo.maCaGoc) : null,
+                branchId: normalizeBranchForShift(tId, branchId || ca.branchid),
+                terminalId: normalizeTerminalId(req.body?.terminalId || ca.terminalid),
+                ip: req.ip,
             });
-
-            const keToanQc = tinhTongKeToanHoaDon({
-                danhSachMon: chiTiet.danhSachMon,
-                tienGiamKM: uuDai.tienGiamKM,
-                tienGiamDiem: uuDai.tienGiamDiem,
-                loaiDonHang: chiTiet.loaiDonHang,
-                phiPhucVuPhanTram: chiTiet.phiPhucVuPhanTram,
-                phiDongGoi: chiTiet.phiDongGoi,
-                cachTinhThue: chiTiet.cachTinhThue,
-                thueVATPhanTram: chiTiet.thueVATPhanTram,
-            });
-            const tongTien = keToanQc.tongPhaiTra;
-
-            let tienThua = null;
-            if (phuongThucTT === 'TIEN_MAT' && tienKhachDua !== undefined && tienKhachDua !== null) {
-                const khachDua = Number(tienKhachDua);
-                if (!(khachDua >= tongTien)) {
-                    throw new LoiNghiepVu(400, 'Số tiền khách đưa chưa đủ!', { tongTien });
-                }
-                tienThua = khachDua - tongTien;
-            }
-
-            const legacyPttt = PHUONG_THUC_LEGACY.includes(phuongThucTT) ? phuongThucTT : 'TIEN_MAT';
-
-            if (paymentsSanSang && tongTien > 0) {
-                await client.query('SAVEPOINT sp_qc_pay_p3');
-                try {
-                    await client.query(
-                        `INSERT INTO Order_Payments
-                            (MaHoaDon, MaCaThuNgan, PhuongThucTT, SoTien, TienKhachDua, TienThua, TrangThai,
-                             NguonXacNhan, MaNV, TenantId, BranchId, TerminalId, LaOfflineLechCa, MaCaThuNganGoc)
-                         VALUES ($1, $2, $3, $4, $5, $6, 'PAID', $7, $8, $9, $10, $11, $12, $13)`,
-                        [
-                            String(maHoaDon),
-                            String(ca.macathungan),
-                            phuongThucTT,
-                            tongTien,
-                            tienKhachDua !== undefined && tienKhachDua !== null ? Number(tienKhachDua) : tongTien,
-                            tienThua || 0,
-                            laOfflineSync ? 'POS_OFFLINE_SYNC' : 'POS_QUICK_CHECKOUT',
-                            String(maNV),
-                            tId,
-                            normalizeBranchForShift(tId, branchId || ca.branchid),
-                            normalizeTerminalId(req.body?.terminalId || ca.terminalid),
-                            Boolean(caInfo.lechCaDongBo),
-                            caInfo.maCaGoc ? String(caInfo.maCaGoc) : null,
-                        ]
-                    );
-                    await client.query('RELEASE SAVEPOINT sp_qc_pay_p3');
-                } catch {
-                    await client.query('ROLLBACK TO SAVEPOINT sp_qc_pay_p3').catch(() => {});
-                    await client.query(
-                        `INSERT INTO Order_Payments
-                            (MaHoaDon, MaCaThuNgan, PhuongThucTT, SoTien, TienKhachDua, TienThua, TrangThai, NguonXacNhan, MaNV, TenantId)
-                         VALUES ($1, $2, $3, $4, $5, $6, 'PAID', 'POS_QUICK_CHECKOUT', $7, $8)`,
-                        [
-                            String(maHoaDon),
-                            String(ca.macathungan),
-                            phuongThucTT,
-                            tongTien,
-                            tienKhachDua !== undefined && tienKhachDua !== null ? Number(tienKhachDua) : tongTien,
-                            tienThua || 0,
-                            String(maNV),
-                            tId,
-                        ]
-                    );
-                }
-            }
-
-            await client.query('SAVEPOINT sp_qc_promo');
-            try {
-                await client.query(
-                    `UPDATE HoaDon
-                        SET TrangThaiTT = 1, TongTienThanhToan = $2, ThoiGianThanhToan = CURRENT_TIMESTAMP,
-                            PhuongThucTT = $3, MaCaThuNgan = $4, MaKH = COALESCE($5, MaKH),
-                            MaKhuyenMai = $6, TenKhuyenMai = $7, TienGiamKM = $8, DiemSuDung = $9, TienGiamDiem = $10,
-                            TienPhiPhucVu = $11, TienThueVAT = $12, TienLamTron = $13
-                      WHERE MaHoaDon = $1`,
-                    [
-                        maHoaDon,
-                        tongTien,
-                        legacyPttt,
-                        ca.macathungan,
-                        maKH || null,
-                        uuDai.maKhuyenMai,
-                        uuDai.tenKhuyenMai,
-                        uuDai.tienGiamKM,
-                        uuDai.diemSuDung,
-                        uuDai.tienGiamDiem,
-                        keToanQc.tienPhiPhucVu,
-                        keToanQc.tienThueVAT,
-                        keToanQc.tienLamTron,
-                    ]
-                );
-                await client.query('RELEASE SAVEPOINT sp_qc_promo');
-            } catch {
-                await client.query('ROLLBACK TO SAVEPOINT sp_qc_promo').catch(() => {});
-                await client.query(
-                    `UPDATE HoaDon
-                        SET TrangThaiTT = 1, TongTienThanhToan = $2, ThoiGianThanhToan = CURRENT_TIMESTAMP,
-                            PhuongThucTT = $3, MaCaThuNgan = $4, MaKH = COALESCE($5, MaKH)
-                      WHERE MaHoaDon = $1`,
-                    [maHoaDon, tongTien, legacyPttt, ca.macathungan, maKH || null]
-                );
-            }
-
-            // Cộng điểm tích lũy khách hàng trên phần tiền thực trả sau giảm giá (10.000đ = 1 điểm)
-            let diemCong = 0;
-            if (khFinal && tongTien >= DIEM_MOI_VND) {
-                diemCong = Math.floor(tongTien / DIEM_MOI_VND);
-                await client.query(
-                    'UPDATE KhachHang SET DiemTichLuy = COALESCE(DiemTichLuy, 0) + $1 WHERE MaKH = $2',
-                    [diemCong, khFinal]
-                );
-            }
-
-            if (maBan) {
-                await client.query('UPDATE Ban SET TrangThai = 3 WHERE MaBan = $1', [maBan]);
-                await xoayQrTokenChoCacBan(client, [maBan]);
-            }
+            const tongTien = ttQc.tongTien;
+            const tienThua = ttQc.tienThua;
+            const diemCong = ttQc.diemCong || 0;
+            const uuDai = ttQc.uuDai || {};
 
             if (laOfflineSync) {
                 await ghiAuditLog(client, {
@@ -4129,40 +4114,60 @@ app.get('/api/hoadon/dangmo', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, 
 // [P0] Lịch sử hóa đơn đã thanh toán / hoàn tiền trong ngày (phục vụ Đổi món / Hoàn tiền sau thanh toán)
 app.get('/api/hoadon/lichsu', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {
     const tenantId = layTenantId(req);
+    const isManager = Number(req.user?.vaiTro) === 1;
     const ngay = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query?.ngay || '')) ? req.query.ngay : ngayHomNayVN();
     try {
-        const r = await qTenant(req, `
-            SELECT hd.MaHoaDon, hd.SoThuTuNgay, hd.TrangThaiTT, hd.PhuongThucTT, hd.TongTienThanhToan,
-                   hd.ThoiGianTao, hd.ThoiGianThanhToan, hd.MaCaThuNgan,
-                   kh.TenKH,
-                   (SELECT string_agg(b.TenBan, ', ' ORDER BY b.TenBan)
-                      FROM HoaDon_Ban hb JOIN Ban b ON b.MaBan = hb.MaBan
-                     WHERE hb.MaHoaDon = hd.MaHoaDon) AS TenBan,
-                   COALESCE((SELECT SUM(c.SoLuong) FROM ChiTietHoaDon c WHERE c.MaHoaDon = hd.MaHoaDon), 0) AS TongLy
-              FROM HoaDon hd
-              LEFT JOIN KhachHang kh ON kh.MaKH = hd.MaKH
-             WHERE COALESCE(hd.TenantId, 'DEFAULT') = $1
-               AND hd.TrangThaiTT IN (1, 2)
-               AND COALESCE(hd.ThoiGianThanhToan, hd.ThoiGianTao) >= ($2::timestamp AT TIME ZONE '${VN_TZ}')
-               AND COALESCE(hd.ThoiGianThanhToan, hd.ThoiGianTao) < (($2::date + 1)::timestamp AT TIME ZONE '${VN_TZ}')
-             ORDER BY COALESCE(hd.ThoiGianThanhToan, hd.ThoiGianTao) DESC
-             LIMIT 50
-        `, [tenantId, ngay]);
-        res.json(r.rows.map((row) => ({
-            maHoaDon: row.mahoadon,
-            soThuTuNgay: row.sothutungay ? Number(row.sothutungay) : null,
-            trangThaiTT: row.trangthaitt,
-            daHoanTien: row.trangthaitt === 2,
-            phuongThucTT: row.phuongthuctt,
-            tongTienThanhToan: Number(row.tongtienthanhtoan || 0),
-            thoiGianTao: row.thoigiantao,
-            thoiGianThanhToan: row.thoigianthanhtoan,
-            maCaThuNgan: row.macathungan || null,
-            tenBan: row.tenban || null,
-            mangDi: !row.tenban,
-            tenKH: row.tenkh || null,
-            tongLy: Number(row.tongly || 0),
-        })));
+        const [r, openShiftRes] = await Promise.all([
+            qTenant(req, `
+                SELECT hd.MaHoaDon, hd.SoThuTuNgay, hd.TrangThaiTT, hd.PhuongThucTT, hd.TongTienThanhToan,
+                       hd.ThoiGianTao, hd.ThoiGianThanhToan, hd.MaCaThuNgan,
+                       kh.TenKH,
+                       (SELECT string_agg(b.TenBan, ', ' ORDER BY b.TenBan)
+                          FROM HoaDon_Ban hb JOIN Ban b ON b.MaBan = hb.MaBan
+                         WHERE hb.MaHoaDon = hd.MaHoaDon) AS TenBan,
+                       COALESCE((SELECT SUM(c.SoLuong) FROM ChiTietHoaDon c WHERE c.MaHoaDon = hd.MaHoaDon), 0) AS TongLy
+                  FROM HoaDon hd
+                  LEFT JOIN KhachHang kh ON kh.MaKH = hd.MaKH
+                 WHERE COALESCE(hd.TenantId, 'DEFAULT') = $1
+                   AND hd.TrangThaiTT IN (1, 2)
+                   AND COALESCE(hd.ThoiGianThanhToan, hd.ThoiGianTao) >= ($2::timestamp AT TIME ZONE '${VN_TZ}')
+                   AND COALESCE(hd.ThoiGianThanhToan, hd.ThoiGianTao) < (($2::date + 1)::timestamp AT TIME ZONE '${VN_TZ}')
+                 ORDER BY COALESCE(hd.ThoiGianThanhToan, hd.ThoiGianTao) DESC
+                 LIMIT 50
+            `, [tenantId, ngay]),
+            isManager
+                ? Promise.resolve({ rows: [] })
+                : qTenant(
+                      req,
+                      `SELECT MaCaThuNgan FROM CaThuNgan WHERE COALESCE(TenantId, 'DEFAULT') = $1 AND TrangThaiCa = 1`,
+                      [tenantId]
+                  ),
+        ]);
+        const openShiftIds = new Set(openShiftRes.rows.map((s) => String(s.macathungan)));
+        res.json(r.rows.map((row) => {
+            // [Wave 1 — P0-07] Bịt rò rỉ Blind Drop: ẩn số tiền đơn TIỀN MẶT thuộc ca đang mở đối với vai trò Thu ngân
+            const isMaskedCash =
+                !isManager &&
+                row.macathungan !== null &&
+                openShiftIds.has(String(row.macathungan)) &&
+                String(row.phuongthuctt || '').toUpperCase() === 'TIEN_MAT';
+            return {
+                maHoaDon: row.mahoadon,
+                soThuTuNgay: row.sothutungay ? Number(row.sothutungay) : null,
+                trangThaiTT: row.trangthaitt,
+                daHoanTien: row.trangthaitt === 2,
+                phuongThucTT: row.phuongthuctt,
+                tongTienThanhToan: isMaskedCash ? null : Number(row.tongtienthanhtoan || 0),
+                blindDropMasked: isMaskedCash,
+                thoiGianTao: row.thoigiantao,
+                thoiGianThanhToan: row.thoigianthanhtoan,
+                maCaThuNgan: row.macathungan || null,
+                tenBan: row.tenban || null,
+                mangDi: !row.tenban,
+                tenKH: row.tenkh || null,
+                tongLy: Number(row.tongly || 0),
+            };
+        }));
     } catch (error) {
         guiLoi(res, error, 'Lỗi API Lịch sử hóa đơn:');
     }
@@ -4478,7 +4483,10 @@ app.post('/api/order/huy-mon', kiemTraToken, choPhepVaiTro(1, 4), async (req, re
                 tieuHaoMon
             );
 
-            const thucHienHoanKho = (!daPhaChe || Boolean(item.lahangdonggoi)) && Boolean(hoanKho);
+            const daPhucVu = item.trangthaiphache === 'DaPhucVu';
+            // Cấm tuyệt đối hoàn kho món đã phục vụ (DaPhucVu) kể cả là hàng đóng gói (laHangDongGoi = true)
+            const thucHienHoanKho = !daPhucVu && (!daPhaChe || Boolean(item.lahangdonggoi)) && Boolean(hoanKho);
+            const trangThaiHuy = thucHienHoanKho ? 'CANCELLED_BEFORE_PREP' : 'WASTED_AFTER_PREP';
             const hdBrRes = await client.query(
                 `SELECT COALESCE(NULLIF(NULLIF(to_jsonb(hd)->>'branchid', ''), 'DEFAULT'), $2::text || '_MAIN') AS branchid
                    FROM HoaDon hd WHERE hd.MaHoaDon = $1`,
@@ -4558,8 +4566,12 @@ app.post('/api/order/huy-mon', kiemTraToken, choPhepVaiTro(1, 4), async (req, re
             }
 
             await client.query(
-                `UPDATE ChiTietHoaDon SET TrangThaiPhaChe = 'DaHuy', LyDoHuy = $2 WHERE MaCTHD = $1`,
-                [maCTHD, String(lyDo).trim().slice(0, 255)]
+                `UPDATE ChiTietHoaDon
+                    SET TrangThaiPhaChe = 'DaHuy',
+                        trang_thai_huy = $3,
+                        LyDoHuy = $2
+                  WHERE MaCTHD = $1`,
+                [maCTHD, String(lyDo).trim().slice(0, 255), trangThaiHuy]
             );
 
             // Luật 2 Combo: Nếu hủy 1 món con trong Combo -> Phá vỡ Combo, chuyển các món còn lại về giá bán lẻ niêm yết + Audit Log!
@@ -4587,6 +4599,52 @@ app.post('/api/order/huy-mon', kiemTraToken, choPhepVaiTro(1, 4), async (req, re
                 ghiAuditLog,
                 kiemTraHopLeKhuyenMai,
             });
+
+            // Kiểm tra: tổng tiền mới không được tụt thấp hơn số tiền khách đã thanh toán trước (Partial Payment)
+            const hdPostVoid = await layHoaDonChiTiet(client, item.mahoadon);
+            const daThanhToanMoi = Number(hdPostVoid?.daThanhToan || 0);
+            const tongPhaiTraMoi = Number(recalc?.totals?.tongTienThanhToan ?? hdPostVoid?.tongTienThanhToan ?? 0);
+            if (tongPhaiTraMoi < daThanhToanMoi) {
+                throw new LoiNghiepVu(
+                    409,
+                    `Không thể hủy món vì tổng tiền còn lại (${tongPhaiTraMoi.toLocaleString('vi-VN')}đ) thấp hơn số tiền khách đã thanh toán (${daThanhToanMoi.toLocaleString('vi-VN')}đ)!`,
+                    {
+                        maLoi: 'VOID_EXCEEDS_UNPAID_BALANCE',
+                        code: 'VOID_EXCEEDS_UNPAID_BALANCE',
+                        tongPhaiTraMoi,
+                        daThanhToan: daThanhToanMoi,
+                    }
+                );
+            }
+
+            // Chống Table Brick Deadlock: nếu số món hiệu lực về 0 và daThanhToan == 0 -> chuyển VOIDED + trả bàn trống + xoay QrToken!
+            const activeCountRes = await client.query(
+                `SELECT COUNT(*)::int AS cnt FROM ChiTietHoaDon WHERE MaHoaDon = $1 AND TrangThaiPhaChe <> 'DaHuy'`,
+                [item.mahoadon]
+            );
+            const soMonHieuLuc = Number(activeCountRes.rows[0]?.cnt || 0);
+            let autoVoidedOrder = false;
+            let freedTables = [];
+            if (soMonHieuLuc === 0 && daThanhToanMoi <= 0) {
+                await client.query(
+                    `UPDATE HoaDon SET lifecycle_status = 'VOIDED', TrangThaiTT = 0 WHERE MaHoaDon = $1`,
+                    [item.mahoadon]
+                );
+                const banLinkRes = await client.query(
+                    `SELECT MaBan FROM HoaDon_Ban WHERE MaHoaDon = $1`,
+                    [item.mahoadon]
+                );
+                freedTables = banLinkRes.rows.map((r) => r.maban);
+                await client.query(`DELETE FROM HoaDon_Ban WHERE MaHoaDon = $1`, [item.mahoadon]);
+                if (freedTables.length > 0) {
+                    await client.query(
+                        `UPDATE Ban SET TrangThai = 1 WHERE MaBan = ANY($1::varchar[]) AND COALESCE(TenantId, 'DEFAULT') = $2`,
+                        [freedTables, tenantId]
+                    );
+                    await xoayQrTokenChoCacBan(client, freedTables);
+                }
+                autoVoidedOrder = true;
+            }
 
             await ghiAuditLog(client, {
                 tenantId,
@@ -4632,6 +4690,9 @@ app.post('/api/order/huy-mon', kiemTraToken, choPhepVaiTro(1, 4), async (req, re
             return {
                 maHoaDon: item.mahoadon,
                 hoanKho: thucHienHoanKho,
+                trangThaiHuy,
+                autoVoidedOrder,
+                freedTables,
                 comboBroken: comboBreakInfo.comboBroken,
                 promoAdjusted: recalc.promoAdjusted,
                 promoAdjustReasons: recalc.promoAdjustReasons,
@@ -4659,6 +4720,13 @@ app.post('/api/order/huy-mon', kiemTraToken, choPhepVaiTro(1, 4), async (req, re
             legacyPosEvent: 'MON_BI_HUY',
         });
         io.to(roomTen(tenantId, 'barista')).emit('MON_BI_HUY', ketQua.voidPayload);
+        if (ketQua.autoVoidedOrder) {
+            io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', {
+                loai: 'ORDER_AUTO_VOIDED',
+                maHoaDon: ketQua.maHoaDon,
+                freedTables: ketQua.freedTables || [],
+            });
+        }
 
         res.json({
             message: ketQua.hoanKho ? 'Đã hủy món và hoàn trả nguyên liệu vào kho!' : 'Đã hủy món và ghi nhận phiếu hao hụt pha chế!',
@@ -5255,10 +5323,15 @@ app.post('/api/ban/gop', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) 
 
             // TRƯỜNG HỢP B: Cả 2 bàn đều có hóa đơn chưa thanh toán -> Khóa theo ORDER BY MaHoaDon ASC FOR UPDATE chống Deadlock!
             const orderedIds = [String(hdNguon), String(hdDich)].sort();
-            await client.query(
-                `SELECT MaHoaDon FROM HoaDon WHERE MaHoaDon::text = ANY($1::text[]) ORDER BY MaHoaDon ASC FOR UPDATE`,
+            const lockedMergeRes = await client.query(
+                `SELECT MaHoaDon, COALESCE(DaInTamTinh, FALSE) AS daintamtinh
+                   FROM HoaDon
+                  WHERE MaHoaDon::text = ANY($1::text[])
+                  ORDER BY MaHoaDon ASC
+                  FOR UPDATE`,
                 [orderedIds]
             );
+            const preservedDaInTamTinh = lockedMergeRes.rows.some((r) => Boolean(r.daintamtinh));
 
             await kiemTraVaTangVersionHoaDon(client, {
                 maHoaDon: hdDich,
@@ -5303,16 +5376,17 @@ app.post('/api/ban/gop', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) 
             }
             await client.query('DELETE FROM HoaDon_Ban WHERE MaHoaDon = $1', [hdNguon]);
 
-            // CẤM XÓA CỨNG hdNguon: Chuyển TrangThaiTT = 3 (MERGED) + ghi vết MergedIntoMaHoaDon!
+            // CẤM XÓA CỨNG hdNguon: Chuyển TrangThaiTT = 3 & lifecycle_status = 'MERGED' + ghi vết MergedIntoMaHoaDon!
             await client.query(
                 `UPDATE HoaDon
                     SET TrangThaiTT = 3,
+                        lifecycle_status = 'MERGED',
                         MergedIntoMaHoaDon = $2
                   WHERE MaHoaDon = $1 AND TrangThaiTT = 0`,
                 [hdNguon, String(hdDich)]
             );
-            // Hủy trạng thái DaInTamTinh trên hóa đơn đích vì nội dung bill đã thay đổi sau gộp
-            await client.query(`UPDATE HoaDon SET DaInTamTinh = FALSE WHERE MaHoaDon = $1`, [hdDich]);
+            // Bịt lỗ hổng Pre-bill Scam: BẮT BUỘC bảo toàn DaInTamTinh = (h1.DaInTamTinh OR h2.DaInTamTinh)
+            await client.query(`UPDATE HoaDon SET DaInTamTinh = $2 WHERE MaHoaDon = $1`, [hdDich, preservedDaInTamTinh]);
 
             if (!keepTable) {
                 await client.query('UPDATE Ban SET TrangThai = 1 WHERE MaBan = $1', [fromMaBan]);
@@ -5681,6 +5755,7 @@ async function handleSplitOrder(req, res) {
                         COALESCE((to_jsonb(ChiTietHoaDon)->>'courseno')::int, 1) AS CourseNo,
                         COALESCE(to_jsonb(ChiTietHoaDon)->>'firestatus', 'FIRED') AS FireStatus,
                         to_jsonb(ChiTietHoaDon)->>'firedat' AS FiredAt,
+                        to_jsonb(ChiTietHoaDon)->>'combogroupuid' AS ComboGroupUid,
                         GhiChu, TrangThaiPhaChe, ThoiGianGoi
                    FROM ChiTietHoaDon
                   WHERE MaHoaDon = $1 AND TrangThaiPhaChe <> 'DaHuy'
@@ -5711,6 +5786,24 @@ async function handleSplitOrder(req, res) {
             }
 
             if (plan.length === 0) throw new LoiNghiepVu(400, 'Không có món hợp lệ nào để tách!');
+
+            // Chặn lách luật phá Combo qua tách đơn: nếu tách bất kỳ món con nào trong Combo, phải tách trọn bộ tất cả món cùng combogroupuid và không tách lẻ số lượng
+            const touchedComboGroups = new Set(
+                plan.map((p) => p.row.combogroupuid).filter((uid) => uid && String(uid).trim() !== '')
+            );
+            for (const comboUid of touchedComboGroups) {
+                const allComboRows = itemsRes.rows.filter((r) => r.combogroupuid === comboUid);
+                const planComboRows = plan.filter((p) => p.row.combogroupuid === comboUid);
+                const hasPartialQty = planComboRows.some((p) => p.isPartial);
+                if (hasPartialQty || planComboRows.length !== allComboRows.length) {
+                    throw new LoiNghiepVu(
+                        409,
+                        'Không thể tách lẻ từng món trong cùng một Combo! Vui lòng tách trọn bộ tất cả món thuộc Combo đó.',
+                        { maLoi: 'CANNOT_SPLIT_COMBO_PARTIAL', code: 'CANNOT_SPLIT_COMBO_PARTIAL', comboGroupUid: comboUid }
+                    );
+                }
+            }
+
             if (tongLyTach >= tongLyGoc) {
                 throw new LoiNghiepVu(
                     400,
@@ -6345,6 +6438,7 @@ async function ghiNhanThanhToanTrongGiaoDich(
         maHoaDon,
         expectedTenantId = null,
         expectedVersion = null,
+        mandatoryVersion = true,
         chiaTienId = null,
         ca,
         maNV,
@@ -6371,7 +6465,9 @@ async function ghiNhanThanhToanTrongGiaoDich(
         [maHoaDon]
     );
     const hdRes = await client.query(
-        `SELECT TrangThaiTT, MaKH, COALESCE(TenantId, 'DEFAULT') AS TenantId FROM HoaDon WHERE MaHoaDon = $1 FOR UPDATE`,
+        `SELECT TrangThaiTT, COALESCE(to_jsonb(HoaDon)->>'lifecycle_status', 'OPEN') AS lifecycle_status,
+                MaKH, COALESCE(TenantId, 'DEFAULT') AS TenantId
+           FROM HoaDon WHERE MaHoaDon = $1 FOR UPDATE`,
         [maHoaDon]
     );
     if (hdRes.rows.length === 0) throw new LoiNghiepVu(404, 'Không tìm thấy hóa đơn!');
@@ -6379,8 +6475,16 @@ async function ghiNhanThanhToanTrongGiaoDich(
     if (expectedTenantId && hdTenantId !== expectedTenantId) {
         throw new LoiNghiepVu(404, 'Không tìm thấy hóa đơn!');
     }
+    if (hdRes.rows[0].lifecycle_status === 'VOIDED') {
+        throw new LoiNghiepVu(409, 'Hóa đơn này đã bị hủy (VOIDED), không thể thanh toán!', {
+            code: 'ORDER_VOIDED',
+            maLoi: 'ORDER_VOIDED',
+        });
+    }
     if (hdRes.rows[0].trangthaitt === 2) throw new LoiNghiepVu(409, 'Hóa đơn này đã được hoàn tiền!');
-    if (hdRes.rows[0].trangthaitt === 3) throw new LoiNghiepVu(409, 'Hóa đơn này đã được gộp sang hóa đơn khác!');
+    if (hdRes.rows[0].trangthaitt === 3 || hdRes.rows[0].lifecycle_status === 'MERGED') {
+        throw new LoiNghiepVu(409, 'Hóa đơn này đã được gộp sang hóa đơn khác!');
+    }
     if (hdRes.rows[0].trangthaitt !== 0) {
         throw new LoiNghiepVu(409, 'Hóa đơn này đã được thanh toán hoàn tất trước đó!', {
             code: 'ALREADY_PAID',
@@ -6393,6 +6497,7 @@ async function ghiNhanThanhToanTrongGiaoDich(
         maHoaDon,
         tenantId: hdTenantId,
         expectedVersion,
+        mandatory: mandatoryVersion,
         layHoaDonChiTiet,
         LoiNghiepVu,
     });
@@ -6940,11 +7045,12 @@ app.post('/api/order/thanhtoan', kiemTraToken, choPhepVaiTro(1, 4), kiemTraHanSu
                         tinhDoiSoatCa(cCheck, ketQua.maCaThuNgan),
                     ]);
                     if (pol.hanMucKetTienMat > 0 && dsNow.tienMatLyThuyet >= pol.hanMucKetTienMat) {
+                        // [Wave 1 — P0-07] Bịt rò rỉ Blind Drop: TUYỆT ĐỐI không gửi tienMatLyThuyet/tienMatHienTai trong payload & message!
                         io.to(roomTen(tId, 'thungan')).emit('shift:drawer_limit_warning', {
                             maCaThuNgan: ketQua.maCaThuNgan,
-                            tienMatHienTai: dsNow.tienMatLyThuyet,
                             hanMucKetTienMat: pol.hanMucKetTienMat,
-                            message: `🏦 Két tiền mặt đang có ~${dsNow.tienMatLyThuyet.toLocaleString('vi-VN')}đ (vượt ngưỡng ${pol.hanMucKetTienMat.toLocaleString('vi-VN')}đ) — nên rút két an toàn (Safe Drop) ngay!`,
+                            thresholdExceeded: true,
+                            message: `🏦 Két tiền mặt đã vượt ngưỡng an toàn (${pol.hanMucKetTienMat.toLocaleString('vi-VN')}đ) — vui lòng thực hiện Rút két (Safe Drop) ngay!`,
                         });
                     }
                 }).catch(() => {});
@@ -7302,18 +7408,36 @@ async function xuLyBienDongSoDuVietQR({
         }
 
         const maHoaDon = found.maHoaDon;
-        const hdTenantRes = await client.query(
-            `SELECT COALESCE(hd.TenantId, 'DEFAULT') AS TenantId,
-                    hd.TrangThaiTT,
-                    t.ThongTinNganHang->>'accountNo' AS BankAccountNo
-               FROM HoaDon hd
-               LEFT JOIN Tenants t ON t.TenantId = COALESCE(hd.TenantId, 'DEFAULT')
-              WHERE hd.MaHoaDon = $1`,
-            [maHoaDon]
-        );
-        const hdTenantId = hdTenantRes.rows[0]?.tenantid || found.tenantId || 'DEFAULT';
+        // [Wave 1 — P0-03] Dùng SECURITY DEFINER fn_resolve_invoice_for_webhook để đọc đúng tenantId & bankAccountNo dưới FORCE RLS
+        let resolvedInv = null;
+        await client.query('SAVEPOINT sp_resolve_wh_inv');
+        try {
+            const fnRes = await client.query(
+                `SELECT tenant_id, ma_hoa_don, lifecycle_status, trang_thai_tt, tong_tien, da_thanh_toan, bank_account_no, bank_bin
+                   FROM public.fn_resolve_invoice_for_webhook($1::varchar)`,
+                [String(maHoaDon)]
+            );
+            await client.query('RELEASE SAVEPOINT sp_resolve_wh_inv');
+            resolvedInv = fnRes.rows[0] || null;
+        } catch {
+            await client.query('ROLLBACK TO SAVEPOINT sp_resolve_wh_inv').catch(() => {});
+            const fallbackRes = await client.query(
+                `SELECT COALESCE(hd.TenantId, 'DEFAULT') AS tenant_id,
+                        hd.MaHoaDon AS ma_hoa_don,
+                        COALESCE(to_jsonb(hd)->>'lifecycle_status', 'OPEN') AS lifecycle_status,
+                        hd.TrangThaiTT AS trang_thai_tt,
+                        COALESCE(t.ThongTinNganHang->>'soTaiKhoan', t.ThongTinNganHang->>'accountNo', '') AS bank_account_no
+                   FROM HoaDon hd
+                   LEFT JOIN Tenants t ON t.TenantId = COALESCE(hd.TenantId, 'DEFAULT')
+                  WHERE hd.MaHoaDon = $1`,
+                [maHoaDon]
+            );
+            resolvedInv = fallbackRes.rows[0] || null;
+        }
+
+        const hdTenantId = resolvedInv?.tenant_id || found.tenantId || 'DEFAULT';
         await client.query(`SELECT set_config('app.current_tenant_id', $1, true)`, [hdTenantId]);
-        const expectedAcc = String(hdTenantRes.rows[0]?.bankaccountno || '').replace(/[^0-9A-Za-z]/g, '');
+        const expectedAcc = String(resolvedInv?.bank_account_no || '').replace(/[^0-9A-Za-z]/g, '');
         const incomingAcc = String(soTaiKhoanNhan || '').replace(/[^0-9A-Za-z]/g, '');
         if (expectedAcc && incomingAcc && expectedAcc !== incomingAcc) {
             await capNhatWebhookLog(client, webhookEventId, 'ACCOUNT_MISMATCH', maHoaDon, hdTenantId);
@@ -7326,51 +7450,111 @@ async function xuLyBienDongSoDuVietQR({
             };
         }
 
-        const handleDoublePaid = async () => {
-            await capNhatWebhookLog(client, webhookEventId, 'ALREADY_PAID', maHoaDon, hdTenantId, {
+        const handlePendingAction = async (trangThaiLog = 'PENDING_ACTION', lyDoCanhBao = null) => {
+            await capNhatWebhookLog(client, webhookEventId, trangThaiLog, maHoaDon, hdTenantId, {
                 soTienConLai: amount,
                 trangThaiXuLyDu: 'PENDING_ACTION',
             });
             await ghiAuditLog(client, {
                 tenantId: hdTenantId,
                 maNV,
-                hanhDong: 'VIETQR_DOUBLE_PAID_PENDING',
+                hanhDong: trangThaiLog === 'ALREADY_PAID' ? 'VIETQR_DOUBLE_PAID_PENDING' : 'VIETQR_SETTLE_PENDING_ACTION',
                 doiTuong: 'HOADON',
                 maDoiTuong: maHoaDon,
-                giaTriMoi: { webhookEventId, nhaCungCap, maGiaoDichNgoai: extId, soTienNhan: amount },
-                lyDo: `Khách chuyển khoản trùng sau khi HĐ #${maHoaDon} đã thu tiền — chờ xử lý hoàn/thối/nạp ví`,
+                giaTriMoi: { webhookEventId, nhaCungCap, maGiaoDichNgoai: extId, soTienNhan: amount, trangThaiLog },
+                lyDo: lyDoCanhBao || `Webhook VietQR cho HĐ #${maHoaDon} cần Thu ngân kiểm tra & xử lý (PENDING_ACTION)`,
                 ip,
                 batBuoc: true,
             });
             return {
                 duplicate: false,
                 matched: true,
-                doublePaid: true,
+                doublePaid: trangThaiLog === 'ALREADY_PAID',
+                pendingAction: true,
                 webhookEventId,
                 tenantId: hdTenantId,
-                trangThaiXuLy: 'ALREADY_PAID',
+                trangThaiXuLy: trangThaiLog,
                 trangThaiXuLyDu: 'PENDING_ACTION',
                 nhaCungCap,
                 maHoaDon,
                 soTienNhan: amount,
                 soTienConLai: amount,
-                daHoanTat: true,
+                daHoanTat: trangThaiLog === 'ALREADY_PAID',
+                lyDoCanhBao,
             };
         };
 
-        // Nếu hóa đơn đã chốt thanh toán trước đó -> KHÔNG nuốt tiền, KHÔNG cộng đúp doanh thu, đẩy vào PENDING_ACTION!
-        if (Number(hdTenantRes.rows[0]?.trangthaitt) === 1) {
-            return handleDoublePaid();
+        // [Wave 1 — P0-03] Nếu hóa đơn đã chốt trước bằng POS_MANUAL_PROVISIONAL và khớp số tiền -> NÂNG CẤP thành WEBHOOK_VERIFIED!
+        if (Number(resolvedInv?.trang_thai_tt) === 1 && paymentsSanSang) {
+            const provRes = await client.query(
+                `SELECT Id, SoTien
+                   FROM Order_Payments
+                  WHERE MaHoaDon = $1
+                    AND COALESCE(TenantId, 'DEFAULT') = $2
+                    AND NguonXacNhan = 'POS_MANUAL_PROVISIONAL'
+                    AND ABS(COALESCE(SoTien, 0) - $3) <= 1000
+                  ORDER BY Id ASC
+                  LIMIT 1
+                  FOR UPDATE`,
+                [String(maHoaDon), hdTenantId, amount]
+            );
+            if (provRes.rows.length > 0) {
+                const provRow = provRes.rows[0];
+                await client.query(
+                    `UPDATE Order_Payments
+                        SET NguonXacNhan = 'WEBHOOK_VERIFIED',
+                            MaGiaoDichNgoai = $2
+                      WHERE Id = $1`,
+                    [provRow.id, extId]
+                );
+                await capNhatWebhookLog(client, webhookEventId, 'MATCHED_PAID', maHoaDon, hdTenantId, {
+                    soTienConLai: 0,
+                    trangThaiXuLyDu: 'NONE',
+                });
+                await ghiAuditLog(client, {
+                    tenantId: hdTenantId,
+                    maNV,
+                    hanhDong: 'VIETQR_PROVISIONAL_VERIFIED',
+                    doiTuong: 'HOADON',
+                    maDoiTuong: maHoaDon,
+                    giaTriMoi: { paymentId: provRow.id, webhookEventId, maGiaoDichNgoai: extId, soTienNhan: amount },
+                    lyDo: `Webhook ${nhaCungCap} về trễ đã đối soát nâng cấp dòng POS_MANUAL_PROVISIONAL -> WEBHOOK_VERIFIED`,
+                    ip,
+                });
+                return {
+                    duplicate: false,
+                    matched: true,
+                    upgradedProvisional: true,
+                    webhookEventId,
+                    tenantId: hdTenantId,
+                    trangThaiXuLy: 'MATCHED_PAID',
+                    trangThaiXuLyDu: 'NONE',
+                    nhaCungCap,
+                    maHoaDon,
+                    soTienNhan: amount,
+                    daHoanTat: true,
+                };
+            }
+            return handlePendingAction('ALREADY_PAID', `Khách chuyển khoản trùng sau khi HĐ #${maHoaDon} đã thu tiền — chờ xử lý hoàn/thối/nạp ví`);
+        }
+
+        // Nếu hóa đơn đã VOIDED / MERGED / REFUNDED -> vẫn COMMIT dòng webhook với PENDING_ACTION (tuyệt đối không rollback mất log tiền vào!)
+        if (['VOIDED', 'MERGED', 'REFUNDED'].includes(String(resolvedInv?.lifecycle_status || '').toUpperCase())) {
+            return handlePendingAction(
+                'PENDING_ACTION',
+                `Tiền chuyển khoản ${amount.toLocaleString('vi-VN')}đ đổ vào HĐ #${maHoaDon} đang ở trạng thái ${resolvedInv.lifecycle_status}`
+            );
         }
 
         const ca = await layCaDangMo(client, 'SHARE', hdTenantId);
 
         let ttRes;
-        await client.query('SAVEPOINT sp_wh_settle');
+        await client.query('SAVEPOINT sp_vietqr_settle');
         try {
             ttRes = await ghiNhanThanhToanTrongGiaoDich(client, {
                 maHoaDon,
                 expectedTenantId: hdTenantId,
+                mandatoryVersion: false,
                 ca,
                 maNV,
                 cacKhoanTT: [
@@ -7385,14 +7569,15 @@ async function xuLyBienDongSoDuVietQR({
                 choPhepThuMotPhan: true,
                 ip,
             });
-            await client.query('RELEASE SAVEPOINT sp_wh_settle');
+            await client.query('RELEASE SAVEPOINT sp_vietqr_settle');
         } catch (settleErr) {
-            await client.query('ROLLBACK TO SAVEPOINT sp_wh_settle').catch(() => {});
-            // Race Condition: Thu ngân vừa bấm chốt Tiền mặt trước Webhook 10ms -> chuyển ngay sang ALREADY_PAID + PENDING_ACTION!
-            if (settleErr instanceof LoiNghiepVu && settleErr.status === 409) {
-                return handleDoublePaid();
-            }
-            throw settleErr;
+            await client.query('ROLLBACK TO SAVEPOINT sp_vietqr_settle').catch(() => {});
+            // Bắt mọi lỗi nghiệp vụ (400/404/409) & DB để COMMIT dòng vietqr_webhook_events với PENDING_ACTION + cảnh báo đỏ POS!
+            const isAlreadyPaid = settleErr instanceof LoiNghiepVu && settleErr.details?.code === 'ALREADY_PAID';
+            return handlePendingAction(
+                isAlreadyPaid ? 'ALREADY_PAID' : 'PENDING_ACTION',
+                settleErr?.message || `Lỗi đối soát tự động HĐ #${maHoaDon}`
+            );
         }
 
         const overpay = Number(ttRes.tienChuyenThua || 0);
@@ -7439,13 +7624,16 @@ async function xuLyBienDongSoDuVietQR({
 
     if (!ketQua.duplicate && !ketQua.isSubscription) {
         const tId = ketQua.tenantId || ketQua.hoaDon?.tenantId || expectedTenantId || 'DEFAULT';
-        if (ketQua.doublePaid) {
+        if (ketQua.doublePaid || ketQua.pendingAction) {
             io.to(roomTen(tId, 'thungan')).emit('payment:vietqr_double_paid', {
                 webhookEventId: ketQua.webhookEventId,
                 maHoaDon: ketQua.maHoaDon,
                 soTienNhan: ketQua.soTienNhan,
+                trangThaiXuLy: ketQua.trangThaiXuLy,
                 trangThaiXuLyDu: 'PENDING_ACTION',
-                message: `⚠️ Khách vừa chuyển khoản trùng ${ketQua.soTienNhan.toLocaleString('vi-VN')}đ cho HĐ #${ketQua.maHoaDon} (đã thu tiền)!`,
+                message:
+                    ketQua.lyDoCanhBao ||
+                    `⚠️ Tiền chuyển khoản ${ketQua.soTienNhan.toLocaleString('vi-VN')}đ cho HĐ #${ketQua.maHoaDon} cần Thu ngân xử lý ngay!`,
             });
         } else if (ketQua.trangThaiXuLy === 'UNMATCHED' && tId && tId !== 'SYSTEM_UNMATCHED') {
             io.to(roomTen(tId, 'thungan')).emit('payment:vietqr_unmatched', {
@@ -8634,6 +8822,8 @@ async function doiTrangThaiMon(maCTHD, tuTrangThai, denTrangThai, tenantId = 'DE
                   WHERE c.MaCTHD = $1
                     AND hd.MaHoaDon = c.MaHoaDon
                     AND COALESCE(hd.TenantId, 'DEFAULT') = $4
+                    AND hd.TrangThaiTT IN (0, 1)
+                    AND COALESCE(to_jsonb(c)->>'firestatus', 'FIRED') = 'FIRED'
                     AND c.TrangThaiPhaChe = ANY($3::varchar[])
                   RETURNING c.MaCTHD`,
                 params
@@ -8647,6 +8837,8 @@ async function doiTrangThaiMon(maCTHD, tuTrangThai, denTrangThai, tenantId = 'DE
                   WHERE c.MaCTHD = $1
                     AND hd.MaHoaDon = c.MaHoaDon
                     AND COALESCE(hd.TenantId, 'DEFAULT') = $4
+                    AND hd.TrangThaiTT IN (0, 1)
+                    AND COALESCE(to_jsonb(c)->>'firestatus', 'FIRED') = 'FIRED'
                     AND c.TrangThaiPhaChe = ANY($3::varchar[])
                   RETURNING c.MaCTHD`,
                 [maCTHD, denTrangThai, tuTrangThai, tenantId]
@@ -9562,6 +9754,33 @@ app.post('/api/nhansu/phanca', kiemTraToken, choPhepVaiTro(1), async (req, res) 
     }
 });
 
+// [Wave 1 — P0-07] Phát hiện và gắn cờ MISSED_CLOCK_OUT cho ca đã qua giờ kết thúc > 2 giờ nhưng chưa Check-out
+async function ganCoMissedClockOutChoTenant(client, tenantId) {
+    await client.query('SAVEPOINT sp_missed_clockout');
+    try {
+        const res = await client.query(
+            `UPDATE ChamCong cc
+                SET trangthai_chamcong = 'MISSED_CLOCK_OUT',
+                    auto_flagged_at = now(),
+                    GhiChu = COALESCE(cc.GhiChu, '') || ' [MISSED_CLOCK_OUT]'
+               FROM PhanCa pc
+               JOIN CaLamViec clv ON pc.MaCa = clv.MaCa
+              WHERE cc.MaPhanCa = pc.MaPhanCa
+                AND COALESCE(pc.TenantId, 'DEFAULT') = $1
+                AND cc.ThoiGianCheckOut IS NULL
+                AND COALESCE(cc.trangthai_chamcong, 'NORMAL') = 'NORMAL'
+                AND ((pc.NgayLam + clv.GioKetThuc)::timestamp AT TIME ZONE '${VN_TZ}') + interval '2 hours' < now()
+              RETURNING cc.MaChamCong, cc.MaPhanCa`,
+            [tenantId]
+        );
+        await client.query('RELEASE SAVEPOINT sp_missed_clockout');
+        return res.rows;
+    } catch {
+        await client.query('ROLLBACK TO SAVEPOINT sp_missed_clockout').catch(() => {});
+        return [];
+    }
+}
+
 app.post('/api/nhansu/chamcong', kiemTraToken, async (req, res) => {
     if (!req.body) return res.status(400).json({ message: 'Dữ liệu gửi lên không được để trống!' });
     const { maPhanCa } = req.body;
@@ -9570,14 +9789,20 @@ app.post('/api/nhansu/chamcong', kiemTraToken, async (req, res) => {
     if (!maPhanCa) return res.status(400).json({ message: 'Thiếu mã phân ca (maPhanCa)!' });
 
     try {
+        const todayVN = todayDateVN();
         const chamCong = await pool.withTenant(tenantId, async (client) => {
+            await ganCoMissedClockOutChoTenant(client, tenantId);
+            // [Wave 1 — P0-07] Bắt buộc phân ca phải thuộc đúng ngày hôm nay (pc.NgayLam = todayDateVN())
             const caResult = await client.query(`
-                SELECT pc.MaPhanCa, clv.GioBatDau,
+                SELECT pc.MaPhanCa, pc.NgayLam, clv.GioBatDau,
                        CASE WHEN (CURRENT_TIMESTAMP AT TIME ZONE '${VN_TZ}')::time > clv.GioBatDau THEN 'Đi trễ' ELSE 'Đúng giờ' END AS TinhTrang
                 FROM PhanCa pc
                 JOIN CaLamViec clv ON pc.MaCa = clv.MaCa
-                WHERE pc.MaPhanCa = $1 AND pc.MaNV = $2 AND COALESCE(pc.TenantId, 'DEFAULT') = $3
-            `, [maPhanCa, maNV, tenantId]);
+                WHERE pc.MaPhanCa = $1
+                  AND pc.MaNV = $2
+                  AND COALESCE(pc.TenantId, 'DEFAULT') = $3
+                  AND pc.NgayLam = $4::date
+            `, [maPhanCa, maNV, tenantId, todayVN]);
 
             if (caResult.rows.length === 0) return null;
 
@@ -9588,9 +9813,16 @@ app.post('/api/nhansu/chamcong', kiemTraToken, async (req, res) => {
             );
             return checkInResult.rows[0];
         });
-        if (!chamCong) return res.status(404).json({ message: 'Không tìm thấy lịch phân ca hợp lệ của bạn!' });
+        if (!chamCong) return res.status(404).json({ message: 'Không tìm thấy lịch phân ca hợp lệ của bạn trong ngày hôm nay!' });
         res.json({ message: 'Check-in vào ca thành công!', chamCong });
     } catch (error) {
+        if (error && error.code === '23505') {
+            return res.status(409).json({
+                message: 'Bạn đã chấm công vào ca này rồi (không thể check-in trùng)!',
+                maLoi: 'ALREADY_CLOCKED_IN',
+                code: 'ALREADY_CLOCKED_IN',
+            });
+        }
         console.error('Lỗi API Check-in:', error);
         res.status(500).json({ message: 'Lỗi máy chủ khi Check-in' });
     }
@@ -9666,8 +9898,16 @@ app.get('/api/nhansu/tinhluong', kiemTraToken, choPhepVaiTro(1), async (req, res
                  AND COALESCE(pc.TenantId, 'DEFAULT') = $4
             LEFT JOIN ChamCong cc ON pc.MaPhanCa = cc.MaPhanCa
                  AND cc.ThoiGianCheckIn IS NOT NULL AND cc.ThoiGianCheckOut IS NOT NULL
-            WHERE nv.TrangThaiLamViec = TRUE
-              AND COALESCE(nv.TenantId, 'DEFAULT') = $4
+            WHERE COALESCE(nv.TenantId, 'DEFAULT') = $4
+              AND (
+                  nv.TrangThaiLamViec = TRUE
+                  OR EXISTS (
+                      SELECT 1 FROM PhanCa pc2
+                       WHERE pc2.MaNV = nv.MaNV
+                         AND pc2.NgayLam BETWEEN $1 AND $2
+                         AND COALESCE(pc2.TenantId, 'DEFAULT') = $4
+                  )
+              )
             GROUP BY nv.MaNV, nv.TenNV, nv.VaiTro, nv.MucLuongTheoGio
             ORDER BY nv.MaNV ASC
         `, [tuNgay, denNgay, donGiaMacDinh, tenantId]);

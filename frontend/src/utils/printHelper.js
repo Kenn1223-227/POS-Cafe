@@ -9,6 +9,7 @@ import {
   enqueueFailedPrintJob,
   updatePersistentPrintJob,
 } from '../offline/offlineDb'
+import { buildVietQrSvgDataUrl } from './vietqrEmvco'
 
 function readCurrentUserMeta() {
   try {
@@ -44,66 +45,46 @@ const OFFLINE_QR_CACHE_KEY = 'pos_vietqr_offline_dataurl'
 export function getVietQrConfig() {
   try {
     const raw = localStorage.getItem(BANK_STORAGE_KEY)
-    return raw ? JSON.parse(raw) : { bankId: 'MB', accountNo: '', accountName: 'QUAN CAFE POS' }
+    return raw ? JSON.parse(raw) : { bankId: '', accountNo: '', accountName: 'QUAN CAFE POS' }
   } catch {
-    return { bankId: 'MB', accountNo: '', accountName: 'QUAN CAFE POS' }
+    return { bankId: '', accountNo: '', accountName: 'QUAN CAFE POS' }
   }
-}
-
-// Cache sẵn ảnh VietQR tĩnh của quán dưới dạng DataURL để vẫn hiển thị mã QR khi mất mạng Internet
-function precacheStaticQrOffline(cfg) {
-  if (!cfg?.bankId || !cfg?.accountNo || typeof fetch === 'undefined') return
-  const staticUrl = `https://img.vietqr.io/image/${encodeURIComponent(cfg.bankId)}-${encodeURIComponent(cfg.accountNo)}-compact2.png?accountName=${encodeURIComponent(cfg.accountName || '')}`
-  fetch(staticUrl)
-    .then((r) => (r.ok ? r.blob() : null))
-    .then((blob) => {
-      if (!blob) return
-      const reader = new FileReader()
-      reader.onloadend = () => {
-        if (typeof reader.result === 'string') {
-          try {
-            localStorage.setItem(OFFLINE_QR_CACHE_KEY, JSON.stringify({
-              key: `${cfg.bankId}|${cfg.accountNo}`,
-              dataUrl: reader.result,
-            }))
-          } catch {
-            // Bỏ qua nếu localStorage đầy
-          }
-        }
-      }
-      reader.readAsDataURL(blob)
-    })
-    .catch(() => {})
 }
 
 export function saveVietQrConfig(cfg) {
   localStorage.setItem(BANK_STORAGE_KEY, JSON.stringify(cfg))
-  if (typeof navigator !== 'undefined' && navigator.onLine) {
-    precacheStaticQrOffline(cfg)
+  try {
+    const dataUrl = buildVietQrSvgDataUrl({
+      bankId: cfg?.bankId,
+      accountNo: cfg?.accountNo,
+      amount: 0,
+      memo: '',
+    })
+    if (dataUrl) {
+      localStorage.setItem(
+        OFFLINE_QR_CACHE_KEY,
+        JSON.stringify({ key: `${cfg.bankId}|${cfg.accountNo}`, dataUrl })
+      )
+    }
+  } catch {
+    // Bank BIN chưa hợp lệ — không cache QR lỗi
   }
 }
 
 export function buildVietQrUrl({ amount, addInfo }) {
   const cfg = getVietQrConfig()
   if (!cfg.bankId || !cfg.accountNo) return null
-
-  // Khi mất mạng: dùng bản ảnh VietQR đã cache cục bộ trong thiết bị
-  if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    try {
-      const cached = JSON.parse(localStorage.getItem(OFFLINE_QR_CACHE_KEY) || 'null')
-      if (cached && cached.key === `${cfg.bankId}|${cfg.accountNo}` && cached.dataUrl) {
-        return cached.dataUrl
-      }
-    } catch {
-      // ignore
-    }
+  // [Wave 1 — P0-03] Vẽ QR SVG 100% cục bộ từ EMVCo payload (không phụ thuộc img.vietqr.io)
+  try {
+    return buildVietQrSvgDataUrl({
+      bankId: cfg.bankId,
+      accountNo: cfg.accountNo,
+      amount: Math.max(0, Math.round(Number(amount) || 0)),
+      memo: addInfo || '',
+    })
+  } catch {
+    return null
   }
-
-  const params = new URLSearchParams()
-  if (amount > 0) params.set('amount', String(Math.round(amount)))
-  if (addInfo) params.set('addInfo', addInfo)
-  if (cfg.accountName) params.set('accountName', cfg.accountName)
-  return `https://img.vietqr.io/image/${encodeURIComponent(cfg.bankId)}-${encodeURIComponent(cfg.accountNo)}-compact2.png?${params.toString()}`
 }
 
 // In bằng hidden iframe (tránh bị trình duyệt chặn popup sau async await)

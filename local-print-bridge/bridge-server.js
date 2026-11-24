@@ -121,10 +121,10 @@ function loadConfig() {
         console.warn('⚠️ Không đọc được bridge-config.json, dùng mặc định:', e.message);
     }
 
-    // Bắt buộc luôn có apiToken xác thực (không bao giờ chạy mở không auth)
+    // [Wave 1 — P0-04] Bắt buộc luôn có apiToken xác thực 32-byte random (tự sinh khi khởi chạy lần đầu, không hardcode trong repo)
     if (!merged.security.apiToken) {
-        merged.security.apiToken = String(merged.lanHub?.token || '').trim() || crypto.randomBytes(24).toString('hex');
-        if (!existed || !process.env.PRINT_BRIDGE_TOKEN) {
+        merged.security.apiToken = String(merged.lanHub?.token || '').trim() || crypto.randomBytes(32).toString('hex');
+        if (!process.env.PRINT_BRIDGE_TOKEN) {
             try {
                 fs.writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2), 'utf8');
             } catch {
@@ -140,7 +140,8 @@ function saveConfig(cfg) {
 }
 
 let bridgeConfig = loadConfig();
-const HOST = process.env.PRINT_BRIDGE_HOST || (bridgeConfig.lanHub?.enabled ? '0.0.0.0' : '127.0.0.1');
+// [Wave 1 — P0-04] Mặc định chỉ bind 127.0.0.1; chỉ mở 0.0.0.0 khi admin chủ động cấu hình PRINT_BRIDGE_HOST=0.0.0.0 hoặc bindAllInterfaces=true
+const HOST = process.env.PRINT_BRIDGE_HOST || (bridgeConfig.lanHub?.bindAllInterfaces === true ? '0.0.0.0' : '127.0.0.1');
 
 // =============================================================================
 // PERSISTENT DISK SPOOLER (Chống mất lệnh khi kẹt giấy / tắt nguồn)

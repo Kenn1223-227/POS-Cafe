@@ -1135,6 +1135,7 @@ export default function PosPage() {
         hoanKho: !daPha,
         managerPin: canPin ? voidPin.trim() : null,
         maNVDuyet: canPin && voidApproverId ? voidApproverId : null,
+        expectedVersion: activeInvoice?.version || 1,
       })
       toast.success(res.message)
       setActiveInvoice(res.hoaDon)
@@ -1173,6 +1174,7 @@ export default function PosPage() {
         splitItems,
         toMaBan: splitDestTable || null,
         mode,
+        expectedVersion: activeInvoice?.version || 1,
       })
       toast.success(res.message)
       setShowSplitModal(false)

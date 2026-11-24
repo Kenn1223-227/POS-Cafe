@@ -399,7 +399,19 @@ function registerSaasRoutes(
             }
 
             const tenantId = `TN_${crypto.randomBytes(6).toString('hex').toUpperCase()}`;
-            const maTienTo = `Q${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+            // [Wave 1 — P0-04] Sinh MaTienTo bằng 4 bytes ngẫu nhiên (Q + 8 hex = 9 ký tự <= VARCHAR(12)) kèm vòng lặp kiểm tra UNIQUE
+            let maTienTo = '';
+            for (let attempt = 0; attempt < 8; attempt += 1) {
+                const candidate = `Q${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+                const dupCheck = await pool.query('SELECT 1 FROM Tenants WHERE MaTienTo = $1 LIMIT 1', [candidate]);
+                if (dupCheck.rows.length === 0) {
+                    maTienTo = candidate;
+                    break;
+                }
+            }
+            if (!maTienTo) {
+                throw new Error('Không thể sinh MaTienTo duy nhất sau nhiều lần thử!');
+            }
             const slug = taoSlug(cleanQuan);
             const hashedPass = await hashPassword(cleanPass);
             const initialStatus = isFreePlan ? 'ACTIVE' : 'TRIAL';

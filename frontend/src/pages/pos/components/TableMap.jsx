@@ -97,9 +97,15 @@ const TableMap = memo(function TableMap({
     if (!selectedTable || !mergeTargetMaBan) return
     setLoading(true)
     try {
+      const destTableObj = tables.find((t) => t.maBan === mergeTargetMaBan)
+      const destVersion =
+        destTableObj?.hoaDonHienTai?.version ||
+        destTableObj?.version ||
+        1
       const res = await banService.gopBan({
         fromMaBan: selectedTable.maBan,
         toMaBan: mergeTargetMaBan,
+        expectedVersion: destVersion,
       })
       toast.success(res.message || 'Gộp bàn thành công!')
       setShowMergeModal(false)
