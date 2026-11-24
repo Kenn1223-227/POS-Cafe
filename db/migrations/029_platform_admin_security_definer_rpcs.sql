@@ -134,7 +134,12 @@ AS $$
                AND h.ThoiGianTao < now() - interval '7 days') AS so_don_7_14_ngay,
            (SELECT COUNT(*) FROM public.HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1
                AND h.ThoiGianTao >= now() - interval '14 days') AS so_don_14_ngay,
-           (SELECT COALESCE(SUM(COALESCE(h.TongTienThanhToan, h.ThanhTien, h.TongTien, 0)), 0)
+           (SELECT COALESCE(SUM(COALESCE(
+               NULLIF(to_jsonb(h)->>'tongtienthanhtoan', '')::numeric,
+               NULLIF(to_jsonb(h)->>'thanhtien', '')::numeric,
+               NULLIF(to_jsonb(h)->>'tongtien', '')::numeric,
+               0
+           )), 0)
               FROM public.HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1) AS tong_doanh_thu,
            (SELECT MAX(h.ThoiGianTao) FROM public.HoaDon h WHERE h.TenantId = t.TenantId) AS lan_ban_cuoi,
            (SELECT COUNT(*) FROM public.SanPham s WHERE s.TenantId = t.TenantId AND s.DangKinhDoanh = TRUE) AS so_mon,

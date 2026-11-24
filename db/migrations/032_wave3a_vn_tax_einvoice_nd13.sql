@@ -182,10 +182,30 @@ BEGIN
         NULL::VARCHAR AS buyer_company_name,
         NULL::TEXT AS buyer_address,
         NULL::VARCHAR AS buyer_email,
-        COALESCE(h.tax_breakdown_json, '[]'::jsonb) AS tax_breakdown_json,
-        GREATEST(0, COALESCE(h.tongtienthanhtoan, h.thanhtien, h.tongtien, 0) - COALESCE(h.thuevat, 0))::NUMERIC AS total_before_tax,
-        COALESCE(h.thuevat, 0)::NUMERIC AS total_tax,
-        COALESCE(h.tongtienthanhtoan, h.thanhtien, h.tongtien, 0)::NUMERIC AS total_amount,
+        COALESCE(NULLIF(to_jsonb(h)->'tax_breakdown_json', 'null'::jsonb), '[]'::jsonb) AS tax_breakdown_json,
+        GREATEST(0,
+            COALESCE(
+                NULLIF(to_jsonb(h)->>'tongtienthanhtoan', '')::numeric,
+                NULLIF(to_jsonb(h)->>'thanhtien', '')::numeric,
+                NULLIF(to_jsonb(h)->>'tongtien', '')::numeric,
+                0
+            ) - COALESCE(
+                NULLIF(to_jsonb(h)->>'tienthuevat', '')::numeric,
+                NULLIF(to_jsonb(h)->>'thuevat', '')::numeric,
+                0
+            )
+        )::NUMERIC AS total_before_tax,
+        COALESCE(
+            NULLIF(to_jsonb(h)->>'tienthuevat', '')::numeric,
+            NULLIF(to_jsonb(h)->>'thuevat', '')::numeric,
+            0
+        )::NUMERIC AS total_tax,
+        COALESCE(
+            NULLIF(to_jsonb(h)->>'tongtienthanhtoan', '')::numeric,
+            NULLIF(to_jsonb(h)->>'thanhtien', '')::numeric,
+            NULLIF(to_jsonb(h)->>'tongtien', '')::numeric,
+            0
+        )::NUMERIC AS total_amount,
         NULL::VARCHAR AS invoice_series,
         NULL::VARCHAR AS invoice_number,
         NULL::VARCHAR AS tax_authority_code,
@@ -279,11 +299,25 @@ BEGIN
     END IF;
 
     SELECT h.tenantid,
-           COALESCE(h.machinhanh, 'CN01') AS branch_id,
+           COALESCE(
+               NULLIF(to_jsonb(h)->>'branchid', ''),
+               NULLIF(to_jsonb(h)->>'machinhanh', ''),
+               NULLIF(to_jsonb(h)->>'branch_id', ''),
+               'CN01'
+           ) AS branch_id,
            h.mahoadon,
-           COALESCE(h.tax_breakdown_json, '[]'::jsonb) AS tax_breakdown_json,
-           COALESCE(h.thuevat, 0) AS thuevat,
-           COALESCE(h.tongtienthanhtoan, h.thanhtien, h.tongtien, 0) AS tong_tien
+           COALESCE(NULLIF(to_jsonb(h)->'tax_breakdown_json', 'null'::jsonb), '[]'::jsonb) AS tax_breakdown_json,
+           COALESCE(
+               NULLIF(to_jsonb(h)->>'tienthuevat', '')::numeric,
+               NULLIF(to_jsonb(h)->>'thuevat', '')::numeric,
+               0
+           ) AS thuevat,
+           COALESCE(
+               NULLIF(to_jsonb(h)->>'tongtienthanhtoan', '')::numeric,
+               NULLIF(to_jsonb(h)->>'thanhtien', '')::numeric,
+               NULLIF(to_jsonb(h)->>'tongtien', '')::numeric,
+               0
+           ) AS tong_tien
       INTO v_order
       FROM public.hoadon h
      WHERE h.einvoice_lookup_code = v_code

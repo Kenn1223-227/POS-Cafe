@@ -18,17 +18,17 @@ ALTER TABLE public.hoadon
     ADD COLUMN IF NOT EXISTS buoc_lam_tron    INT NOT NULL DEFAULT 1000;
 
 -- Backfill lifecycle_status cho dữ liệu hiện có (chỉ cập nhật khi còn mặc định 'OPEN' nhưng TrangThaiTT khác 0 hoặc đã thanh toán một phần)
-UPDATE public.hoadon
+UPDATE public.hoadon AS h
    SET lifecycle_status = CASE
-       WHEN TrangThaiTT = -1 THEN 'PARKED'
-       WHEN TrangThaiTT = 1  THEN 'PAID'
-       WHEN TrangThaiTT = 2  THEN 'REFUNDED'
-       WHEN TrangThaiTT = 3  THEN 'MERGED'
-       WHEN TrangThaiTT = 0 AND COALESCE(DaThanhToan, 0) > 0 THEN 'PARTIALLY_PAID'
+       WHEN h.TrangThaiTT = -1 THEN 'PARKED'
+       WHEN h.TrangThaiTT = 1  THEN 'PAID'
+       WHEN h.TrangThaiTT = 2  THEN 'REFUNDED'
+       WHEN h.TrangThaiTT = 3  THEN 'MERGED'
+       WHEN h.TrangThaiTT = 0 AND COALESCE((SELECT SUM(op.sotien) FROM public.order_payments op WHERE op.mahoadon = h.mahoadon AND op.trangthai = 'PAID'), 0) > 0 THEN 'PARTIALLY_PAID'
        ELSE 'OPEN'
    END
- WHERE lifecycle_status = 'OPEN'
-   AND (TrangThaiTT <> 0 OR COALESCE(DaThanhToan, 0) > 0);
+ WHERE h.lifecycle_status = 'OPEN'
+   AND (h.TrangThaiTT <> 0 OR COALESCE((SELECT SUM(op.sotien) FROM public.order_payments op WHERE op.mahoadon = h.mahoadon AND op.trangthai = 'PAID'), 0) > 0);
 
 DO $$
 BEGIN
@@ -74,7 +74,7 @@ BEGIN
             WHEN NEW.trangthaitt = 1  THEN 'PAID'
             WHEN NEW.trangthaitt = 2  THEN 'REFUNDED'
             WHEN NEW.trangthaitt = 3  THEN 'MERGED'
-            WHEN NEW.trangthaitt = 0 AND COALESCE(NEW.dathanhtoan, 0) > 0 THEN 'PARTIALLY_PAID'
+            WHEN NEW.trangthaitt = 0 AND COALESCE(NULLIF(to_jsonb(NEW)->>'dathanhtoan', '')::numeric, (SELECT COALESCE(SUM(op.sotien), 0) FROM public.order_payments op WHERE op.mahoadon = NEW.mahoadon AND op.trangthai = 'PAID'), 0) > 0 THEN 'PARTIALLY_PAID'
             ELSE 'OPEN'
         END;
         NEW.lifecycle_status := v_new_lc;
@@ -219,24 +219,50 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
     SELECT
-        COALESCE(h.TenantId, 'DEFAULT')::VARCHAR AS tenant_id,
+        COALESCE(NULLIF(to_jsonb(h)->>'tenantid', ''), 'DEFAULT')::VARCHAR AS tenant_id,
         h.MaHoaDon::VARCHAR AS ma_hoa_don,
-        COALESCE(h.lifecycle_status, 'OPEN')::VARCHAR AS lifecycle_status,
-        h.TrangThaiTT::INT AS trang_thai_tt,
-        COALESCE(h.TongTienThanhToan, h.ThanhTien, h.TongTien, 0)::NUMERIC AS tong_tien,
-        COALESCE(h.DaThanhToan, 0)::NUMERIC AS da_thanh_toan,
+        COALESCE(NULLIF(to_jsonb(h)->>'lifecycle_status', ''), 'OPEN')::VARCHAR AS lifecycle_status,
+        COALESCE(NULLIF(to_jsonb(h)->>'trangthaitt', '')::INT, 0) AS trang_thai_tt,
         COALESCE(
-            t.ThongTinNganHang->>'soTaiKhoan',
-            t.ThongTinNganHang->>'accountNo',
+            NULLIF(to_jsonb(h)->>'tongtienthanhtoan', '')::numeric,
+            NULLIF(to_jsonb(h)->>'thanhtien', '')::numeric,
+            NULLIF(to_jsonb(h)->>'tongtien', '')::numeric,
+            0
+        )::NUMERIC AS tong_tien,
+        COALESCE(
+            (SELECT SUM(op.sotien) FROM public.order_payments op WHERE op.mahoadon = h.mahoadon AND op.trangthai = 'PAID'),
+            NULLIF(to_jsonb(h)->>'dathanhtoan', '')::numeric,
+            0
+        )::NUMERIC AS da_thanh_toan,
+        COALESCE(
+            NULLIF(to_jsonb(t)->'thongtinnganhang'->>'soTaiKhoan', ''),
+            NULLIF(to_jsonb(t)->'thongtinnganhang'->>'accountNo', ''),
+            NULLIF(to_jsonb(t)->'thongtinnganhang'->>'accountno', ''),
+            NULLIF(to_jsonb(t)->'thongtinnganhang'->>'sotaikhoan', ''),
+            NULLIF(to_jsonb(t)->>'bankaccountno', ''),
+            NULLIF(to_jsonb(t)->>'bank_account_no', ''),
+            NULLIF(to_jsonb(t)->'cauhinhhethong'->'thongtinnganhang'->>'soTaiKhoan', ''),
+            NULLIF(to_jsonb(t)->'cauhinhhethong'->'thongtinnganhang'->>'accountNo', ''),
+            NULLIF(to_jsonb(t)->'cauhinh'->'thongtinnganhang'->>'soTaiKhoan', ''),
+            NULLIF(to_jsonb(t)->'cauhinh'->'thongtinnganhang'->>'accountNo', ''),
             ''
         )::TEXT AS bank_account_no,
         COALESCE(
-            t.ThongTinNganHang->>'maNganHang',
-            t.ThongTinNganHang->>'bankId',
+            NULLIF(to_jsonb(t)->'thongtinnganhang'->>'maNganHang', ''),
+            NULLIF(to_jsonb(t)->'thongtinnganhang'->>'bankId', ''),
+            NULLIF(to_jsonb(t)->'thongtinnganhang'->>'bankid', ''),
+            NULLIF(to_jsonb(t)->'thongtinnganhang'->>'manganhang', ''),
+            NULLIF(to_jsonb(t)->'thongtinnganhang'->>'bin', ''),
+            NULLIF(to_jsonb(t)->>'bankbin', ''),
+            NULLIF(to_jsonb(t)->>'bank_bin', ''),
+            NULLIF(to_jsonb(t)->'cauhinhhethong'->'thongtinnganhang'->>'maNganHang', ''),
+            NULLIF(to_jsonb(t)->'cauhinhhethong'->'thongtinnganhang'->>'bankId', ''),
+            NULLIF(to_jsonb(t)->'cauhinh'->'thongtinnganhang'->>'maNganHang', ''),
+            NULLIF(to_jsonb(t)->'cauhinh'->'thongtinnganhang'->>'bankId', ''),
             ''
         )::TEXT AS bank_bin
       FROM public.HoaDon h
-      LEFT JOIN public.Tenants t ON t.TenantId = COALESCE(h.TenantId, 'DEFAULT')
+      LEFT JOIN public.Tenants t ON t.TenantId = COALESCE(NULLIF(to_jsonb(h)->>'tenantid', ''), 'DEFAULT')
      WHERE h.MaHoaDon = p_mahoadon
      LIMIT 1;
 $$;
