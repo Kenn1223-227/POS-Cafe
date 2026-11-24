@@ -186,11 +186,15 @@ export async function printReceiptK80(
   const tienGiamKM = Number(hoaDon.tienGiamKM || 0)
   const tienGiamDiem = Number(hoaDon.tienGiamDiem || 0)
   const diemSuDung = Number(hoaDon.diemSuDung || 0)
-  const discountRowsHtml = tienGiamKM > 0 || tienGiamDiem > 0
+  const phiPhucVu = Number(hoaDon.phiPhucVu ?? hoaDon.tienPhiPhucVu ?? 0)
+  const thueVAT = Number(hoaDon.thueVAT ?? hoaDon.tienThueVAT ?? hoaDon.tienVat ?? 0)
+  const discountRowsHtml = tienGiamKM > 0 || tienGiamDiem > 0 || phiPhucVu > 0 || thueVAT > 0
     ? `<div style="font-size:11px;margin-bottom:4px">
         <div style="display:flex;justify-content:space-between"><span>Tạm tính:</span><span>${escapeHtml(formatVND(hoaDon.tongTamTinh || 0))}</span></div>
         ${tienGiamKM > 0 ? `<div style="display:flex;justify-content:space-between"><span>Giảm KM${hoaDon.maKhuyenMai ? ` (${escapeHtml(hoaDon.maKhuyenMai)})` : ''}:</span><span>-${escapeHtml(formatVND(tienGiamKM))}</span></div>` : ''}
         ${tienGiamDiem > 0 ? `<div style="display:flex;justify-content:space-between"><span>Đổi điểm (${diemSuDung} điểm):</span><span>-${escapeHtml(formatVND(tienGiamDiem))}</span></div>` : ''}
+        ${phiPhucVu > 0 ? `<div style="display:flex;justify-content:space-between"><span>Phí phục vụ${Number(hoaDon.tyLePhiPhucVu || 0) > 0 ? ` (${Number(hoaDon.tyLePhiPhucVu)}%)` : ''}:</span><span>+${escapeHtml(formatVND(phiPhucVu))}</span></div>` : ''}
+        ${thueVAT > 0 ? `<div style="display:flex;justify-content:space-between"><span>Thuế VAT${Number(hoaDon.tyLeThueVAT || 0) > 0 ? ` (${Number(hoaDon.tyLeThueVAT)}%)` : ''}:</span><span>+${escapeHtml(formatVND(thueVAT))}</span></div>` : ''}
        </div>`
     : ''
   const tongCong = escapeHtml(formatVND(hoaDon.tongTienThanhToan ?? hoaDon.tongSauGiam ?? hoaDon.tongTamTinh))

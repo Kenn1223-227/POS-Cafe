@@ -152,6 +152,60 @@ const Cart = memo(function Cart({
   const [unmatchedQrList, setUnmatchedQrList] = useState([])
   const [loadingUnmatched, setLoadingUnmatched] = useState(false)
   const [showUnmatchedQueue, setShowUnmatchedQueue] = useState(false)
+  const [resolvingOverpayId, setResolvingOverpayId] = useState(null)
+  const [voucherManagerPin, setVoucherManagerPin] = useState('')
+  const [manualQrProof, setManualQrProof] = useState({ key: '', idChungTu: '', preview: '' })
+  const [uploadingManualQr, setUploadingManualQr] = useState(false)
+
+  const manualQrIdChungTu = manualQrProof.key === cashKey ? manualQrProof.idChungTu : ''
+  const manualQrPreview = manualQrProof.key === cashKey ? manualQrProof.preview : ''
+
+  const handleUploadManualQrProof = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploadingManualQr(true)
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onerror = () => reject(new Error('Không đọc được ảnh'))
+        reader.onload = () => resolve(String(reader.result || ''))
+        reader.readAsDataURL(file)
+      })
+      const uploaded = await caService.uploadReceiptPhoto({
+        dataUrl,
+        mimeType: file.type || 'image/jpeg',
+      })
+      const idChungTu = uploaded?.idChungTu || uploaded?.id || ''
+      setManualQrProof({ key: cashKey, idChungTu, preview: dataUrl })
+      toast.success('📷 Đã đính kèm ảnh chụp chuyển khoản!')
+    } catch {
+      toast.error('Không thể tải ảnh chụp chuyển khoản!')
+    } finally {
+      setUploadingManualQr(false)
+    }
+  }
+
+  const handleResolveOverpayment = async (ev, action) => {
+    if (!ev?.id) return
+    if (action === 'WALLET_CREDITED' && !khachHangHienTai?.maKH) {
+      toast.error('Vui lòng chọn Khách hàng thành viên trước khi bảo lưu tiền dư vào ví!')
+      return
+    }
+    setResolvingOverpayId(ev.id)
+    try {
+      const res = await caService.resolveVietQrOverpayment({
+        webhookEventId: ev.id,
+        action,
+        maKH: action === 'WALLET_CREDITED' ? khachHangHienTai?.maKH : null,
+      })
+      toast.success(res?.message || 'Đã xử lý khoản chuyển khoản dư thành công!')
+      setUnmatchedQrList((prev) => prev.filter((item) => item.id !== ev.id))
+    } catch {
+      // Interceptor xử lý lỗi
+    } finally {
+      setResolvingOverpayId(null)
+    }
+  }
 
   const bankConfig = getVietQrConfig()
   const transferMemo = activeInvoice ? `POSHD${activeInvoice.maHoaDon}` : ''
@@ -673,25 +727,31 @@ const Cart = memo(function Cart({
                       ))}
                     </div>
                   )}
-                  <div className="flex items-center justify-between gap-2.5">
+                  <div className="space-y-2">
                     <input
                       type="number"
                       min="0"
                       value={tienKhachDua}
                       onChange={(e) => setTienKhachDua(e.target.value)}
                       placeholder="Tiền khách đưa (VND)..."
-                      className="flex-1 min-h-[52px] px-3 py-2 bg-white border rounded-xl text-xs font-bold"
+                      className="w-full min-h-[52px] px-3 py-2 bg-white border rounded-xl text-sm font-bold"
                     />
                     {tienThuaDuKien !== null && (
-                      <span
-                        className={`font-extrabold text-xs ${
-                          tienThuaDuKien >= 0 ? 'text-emerald-700' : 'text-red-600'
+                      <div
+                        data-testid="cash-change-due"
+                        className={`flex items-center justify-between px-3.5 py-2.5 rounded-xl border-2 ${
+                          tienThuaDuKien >= 0
+                            ? 'bg-emerald-50 border-emerald-400 text-emerald-900'
+                            : 'bg-rose-50 border-rose-400 text-rose-800'
                         }`}
                       >
-                        {tienThuaDuKien >= 0
-                          ? `Thối: ${formatVND(tienThuaDuKien)}`
-                          : `Thiếu: ${formatVND(Math.abs(tienThuaDuKien))}`}
-                      </span>
+                        <span className="text-xs font-extrabold uppercase tracking-wide">
+                          {tienThuaDuKien >= 0 ? '💵 Tiền thối lại khách' : '⚠️ Tiền khách đưa còn thiếu'}
+                        </span>
+                        <span className="text-xl font-black">
+                          {formatVND(Math.abs(tienThuaDuKien))}
+                        </span>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -758,25 +818,97 @@ const Cart = memo(function Cart({
                           unmatchedQrList.map((ev) => (
                             <div
                               key={ev.id}
-                              className="p-2 rounded-lg bg-stone-50 border border-stone-200 flex items-center justify-between gap-2 text-[10px]"
+                              className="p-2 rounded-lg bg-stone-50 border border-stone-200 space-y-1.5 text-[10px]"
                             >
-                              <div className="min-w-0">
-                                <p className="font-extrabold text-emerald-700">+{formatVND(ev.soTien)}</p>
-                                <p className="text-gray-600 truncate">{ev.noiDungCK || ev.maGiaoDichNgoai}</p>
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                  <p className="font-extrabold text-emerald-700">
+                                    +{formatVND(ev.soTien)}
+                                    {Number(ev.soTienConLai || 0) > 0 && (
+                                      <span className="ml-1 text-amber-700">
+                                        (Dư: {formatVND(ev.soTienConLai)})
+                                      </span>
+                                    )}
+                                  </p>
+                                  <p className="text-gray-600 truncate">{ev.noiDungCK || ev.maGiaoDichNgoai}</p>
+                                </div>
+                                {ev.trangThaiXuLy === 'UNMATCHED' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleMatchUnmatchedToCurrent(ev)}
+                                    className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold shrink-0 cursor-pointer"
+                                  >
+                                    ✓ Khớp HĐ
+                                  </button>
+                                )}
                               </div>
-                              {ev.trangThaiXuLy === 'UNMATCHED' && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleMatchUnmatchedToCurrent(ev)}
-                                  className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold shrink-0 cursor-pointer"
-                                >
-                                  ✓ Khớp HĐ
-                                </button>
+                              {(ev.trangThaiXuLyDu === 'PENDING_ACTION' || Number(ev.soTienConLai || 0) > 0) && (
+                                <div className="flex flex-wrap gap-1 pt-1 border-t border-stone-200">
+                                  <button
+                                    type="button"
+                                    disabled={resolvingOverpayId === ev.id}
+                                    onClick={() => handleResolveOverpayment(ev, 'CASH_RETURNED')}
+                                    className="px-2 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer disabled:opacity-50"
+                                  >
+                                    💵 Thối tiền mặt (THOI_CK_DU)
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={resolvingOverpayId === ev.id}
+                                    onClick={() => handleResolveOverpayment(ev, 'TIP')}
+                                    className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer disabled:opacity-50"
+                                  >
+                                    🎉 Ghi nhận Tip
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={resolvingOverpayId === ev.id}
+                                    onClick={() => handleResolveOverpayment(ev, 'WALLET_CREDITED')}
+                                    className="px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer disabled:opacity-50"
+                                  >
+                                    👛 Bảo lưu ví khách
+                                  </button>
+                                </div>
                               )}
                             </div>
                           ))
                         )}
                       </div>
+                    )}
+                  </div>
+
+                  {/* [Wave 2 — P0-02] Bắt buộc đính kèm ảnh chụp chứng từ khi xác nhận chuyển khoản thủ công (POS_MANUAL_PROVISIONAL) */}
+                  <div className="pt-1.5 border-t border-emerald-100 text-left space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-900 font-bold text-[11px] cursor-pointer">
+                        <span>
+                          {uploadingManualQr
+                            ? '⏳ Đang tải ảnh CK...'
+                            : manualQrIdChungTu
+                            ? '📷 Đổi ảnh chứng từ CK'
+                            : '📷 Ảnh chụp CK từ khách (Bắt buộc xác nhận tay)'}
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          data-testid="manual-qr-proof-file"
+                          onChange={handleUploadManualQrProof}
+                          className="hidden"
+                        />
+                      </label>
+                      {manualQrPreview && (
+                        <img
+                          src={manualQrPreview}
+                          alt="Chứng từ CK"
+                          className="w-9 h-9 rounded-lg object-cover border border-emerald-300"
+                        />
+                      )}
+                    </div>
+                    {manualQrIdChungTu && (
+                      <p className="text-[10px] text-emerald-700 font-semibold">
+                        ✅ Đã lưu chứng từ xác nhận tạm: {manualQrIdChungTu}
+                      </p>
                     )}
                   </div>
 
@@ -903,10 +1035,42 @@ const Cart = memo(function Cart({
                     </div>
                   ))}
 
+                  {!isManager && splitRows.some((r) => r.phuongThucTT === 'VOUCHER') && (
+                    <div className="p-2 rounded-lg bg-rose-50 border border-rose-200 space-y-1">
+                      <label className="block text-[11px] font-bold text-rose-800">
+                        🔐 Mã PIN Quản lý duyệt Voucher (bắt buộc cho Thu ngân) *
+                      </label>
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        autoComplete="off"
+                        value={voucherManagerPin}
+                        onChange={(e) => setVoucherManagerPin(e.target.value)}
+                        data-testid="split-voucher-manager-pin"
+                        placeholder="Nhập PIN Quản lý..."
+                        className="w-full px-2.5 py-1.5 bg-white border border-rose-300 rounded-lg text-xs font-bold"
+                      />
+                    </div>
+                  )}
+
+                  {splitEnteredTotal > conLaiCanThu && splitRows.some((r) => r.phuongThucTT === 'TIEN_MAT') && (
+                    <div
+                      data-testid="split-cash-change-due"
+                      className="flex items-center justify-between px-3 py-2 rounded-xl bg-emerald-50 border-2 border-emerald-400 text-emerald-900"
+                    >
+                      <span className="text-xs font-extrabold uppercase tracking-wide">
+                        💵 Tiền thối lại khách (Hỗn hợp)
+                      </span>
+                      <span className="text-xl font-black">
+                        {formatVND(splitEnteredTotal - conLaiCanThu)}
+                      </span>
+                    </div>
+                  )}
+
                   <div className="flex justify-between text-[11px] pt-1 border-t">
                     <span>Đã nhập: <b>{formatVND(splitEnteredTotal)}</b></span>
-                    <span className={splitRemaining === 0 ? 'text-emerald-700 font-bold' : 'text-red-600 font-bold'}>
-                      {splitRemaining === 0 ? '✓ Đủ chốt đơn' : `Còn thiếu: ${formatVND(splitRemaining)}`}
+                    <span className={splitRemaining <= 0 ? 'text-emerald-700 font-bold' : 'text-red-600 font-bold'}>
+                      {splitRemaining <= 0 ? '✓ Đủ chốt đơn' : `Còn thiếu: ${formatVND(splitRemaining)}`}
                     </span>
                   </div>
                 </div>
@@ -935,18 +1099,38 @@ const Cart = memo(function Cart({
                   <button
                     type="button"
                     disabled={paying || (conLaiCanThu > 0 && validSplitRows.length === 0)}
-                    onClick={() =>
+                    onClick={() => {
+                      const hasVoucher = validSplitRows.some((r) => r.phuongThucTT === 'VOUCHER')
+                      if (hasVoucher && !isManager && !voucherManagerPin.trim()) {
+                        toast.error('Vui lòng nhập mã PIN Quản lý để duyệt thanh toán bằng VOUCHER!')
+                        return
+                      }
+                      const overCash = Math.max(0, splitEnteredTotal - conLaiCanThu)
+                      let cashOverApplied = false
+                      const payloadRows = validSplitRows.map((r) => {
+                        if (r.phuongThucTT === 'TIEN_MAT' && overCash > 0 && !cashOverApplied) {
+                          cashOverApplied = true
+                          const netCash = Math.max(0, r.soTienNum - overCash)
+                          return {
+                            phuongThucTT: r.phuongThucTT,
+                            soTien: netCash > 0 ? netCash : r.soTienNum,
+                            tienKhachDua: r.soTienNum,
+                          }
+                        }
+                        return {
+                          phuongThucTT: r.phuongThucTT,
+                          soTien: r.soTienNum,
+                        }
+                      })
                       onPayInvoice({
                         maHoaDon: activeInvoice.maHoaDon,
                         maKhuyenMai: promoCodeSach || null,
                         diemSuDung: diemMuonDoiNum,
-                        thanhToan: validSplitRows.map((r) => ({
-                          phuongThucTT: r.phuongThucTT,
-                          soTien: r.soTienNum,
-                        })),
+                        thanhToan: payloadRows,
                         choPhepThuMotPhan: !splitEnough && conLaiCanThu > 0,
+                        ...(voucherManagerPin.trim() ? { managerPin: voucherManagerPin.trim() } : {}),
                       })
-                    }
+                    }}
                     className={`flex-1 min-h-14 rounded-xl font-extrabold text-sm text-white shadow cursor-pointer disabled:bg-gray-300 ${
                       splitEnough || conLaiCanThu === 0
                         ? 'bg-emerald-600 hover:bg-emerald-700'
@@ -965,7 +1149,11 @@ const Cart = memo(function Cart({
                   <button
                     type="button"
                     disabled={paying || cashInsufficient}
-                    onClick={() =>
+                    onClick={() => {
+                      if (phuongThucTT === 'CHUYEN_KHOAN' && conLaiCanThu > 0 && !manualQrIdChungTu) {
+                        toast.error('Xác nhận chuyển khoản thủ công bắt buộc đính kèm ảnh chụp chứng từ từ khách!')
+                        return
+                      }
                       onPayInvoice({
                         maHoaDon: activeInvoice.maHoaDon,
                         phuongThucTT,
@@ -975,8 +1163,11 @@ const Cart = memo(function Cart({
                           phuongThucTT === 'TIEN_MAT' && tienKhachDua !== ''
                             ? Number(tienKhachDua)
                             : undefined,
+                        ...(phuongThucTT === 'CHUYEN_KHOAN' && manualQrIdChungTu
+                          ? { nguonXacNhan: 'POS_MANUAL_PROVISIONAL', idChungTu: manualQrIdChungTu }
+                          : {}),
                       })
-                    }
+                    }}
                     className="flex-1 min-h-14 bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 text-white rounded-xl font-extrabold text-sm shadow cursor-pointer"
                   >
                     {paying

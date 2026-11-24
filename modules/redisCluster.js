@@ -9,8 +9,23 @@ const { logger } = require('./observability');
 const REDIS_URL = String(process.env.REDIS_URL || '').trim();
 
 let redisClient = null;
+let redisSubClient = null;
 let redisReady = false;
 let socketAdapterMode = 'memory';
+
+// Lua script nguyên tử cho INCR + PEXPIRE (chống race condition mất TTL trên Redis)
+const ATOMIC_INCR_PEXPIRE_LUA = `
+local c = redis.call('INCR', KEYS[1])
+if c == 1 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+end
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl < 0 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+  ttl = tonumber(ARGV[1])
+end
+return {c, ttl}
+`;
 
 function tryCreateRedisClient(url) {
     if (!url) return null;
@@ -65,6 +80,7 @@ async function attachSocketIoRedisAdapter(io) {
         const { createAdapter } = require('@socket.io/redis-adapter');
         const pubClient = redisClient;
         const subClient = pubClient.duplicate();
+        redisSubClient = subClient;
         subClient.on('error', (err) => {
             logger.warn('Redis Socket.IO subClient error', { error: err?.message });
         });
@@ -125,11 +141,14 @@ function createRateLimitStore(prefix = 'rl') {
         const fullKey = `${prefix}:${key}`;
         if (redisClient && redisReady) {
             try {
-                const count = await redisClient.incr(fullKey);
-                if (count === 1) {
-                    await redisClient.pexpire(fullKey, windowMs);
-                }
-                const ttlMs = await redisClient.pttl(fullKey);
+                const res = await redisClient.eval(
+                    ATOMIC_INCR_PEXPIRE_LUA,
+                    1,
+                    fullKey,
+                    String(Math.max(1000, Number(windowMs) || 60000))
+                );
+                const count = Number(Array.isArray(res) ? res[0] : 1);
+                const ttlMs = Number(Array.isArray(res) ? res[1] : windowMs);
                 return { dem: count, hetHan: Date.now() + Math.max(1000, ttlMs) };
             } catch {
                 // fallback RAM
@@ -176,8 +195,30 @@ function getRedisStatus() {
     };
 }
 
+async function closeRedisClients() {
+    const targets = [redisSubClient, redisClient].filter(Boolean);
+    redisSubClient = null;
+    redisClient = null;
+    redisReady = false;
+    await Promise.allSettled(
+        targets.map(async (c) => {
+            try {
+                await c.quit();
+            } catch {
+                try {
+                    c.disconnect();
+                } catch {
+                    // ignore
+                }
+            }
+        })
+    );
+}
+
 module.exports = {
     attachSocketIoRedisAdapter,
     createRateLimitStore,
     getRedisStatus,
+    closeRedisClients,
+    ATOMIC_INCR_PEXPIRE_LUA,
 };

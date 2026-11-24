@@ -89,6 +89,7 @@ const {
     todayDateVN,
     ensureBranchRecord,
     computeSafeWacOnStockIn,
+    recordCogsAdjustment,
     allocateLandedCost,
     lockBranchStockOrdered,
     updateBranchStockRow,
@@ -134,6 +135,7 @@ const {
 const {
     attachSocketIoRedisAdapter,
     getRedisStatus,
+    closeRedisClients,
 } = require('./modules/redisCluster');
 
 kiemTraCauHinh(); // dừng ngay nếu thiếu/yếu JWT_SECRET hoặc thiếu DATABASE_URL
@@ -181,6 +183,29 @@ const io = new Server(server, {
 const kiemTraHanSuDung = taoMiddlewareKiemTraHanSuDung(pool);
 const yeuCauTinhNang = taoMiddlewareTinhNang(pool);
 const kiemTraHanMucDonThang = taoMiddlewareHanMucDonThang(pool);
+
+// [Wave 2 — P0-06] Trạng thái Graceful Shutdown & đếm in-flight request
+let isShuttingDown = false;
+let inFlightRequests = 0;
+
+app.use((req, res, next) => {
+    if (req.path === '/api/ready' || req.path === '/api/health') return next();
+    if (isShuttingDown) {
+        res.setHeader('Connection', 'close');
+        return res.status(503).json({ status: 'DRAINING', message: 'Hệ thống đang bảo trì/khởi động lại, vui lòng thử lại sau vài giây.' });
+    }
+    inFlightRequests += 1;
+    let decremented = false;
+    const done = () => {
+        if (!decremented) {
+            decremented = true;
+            inFlightRequests = Math.max(0, inFlightRequests - 1);
+        }
+    };
+    res.on('finish', done);
+    res.on('close', done);
+    next();
+});
 
 app.use(requestContextMiddleware);
 // [Wave 1 — P0-04] Security Headers bắt buộc
@@ -3002,6 +3027,12 @@ async function taoOrderTrongGiaoDich(
                 });
                 giaVonMotTp += info.khoiLuong * info.giaVonDonVi;
             }
+            const bomPerUnit =
+                Array.isArray(info.bom) && info.bom.length > 0
+                    ? info.bom.map((b) => ({ maNL: b.maNL, khoiLuong: b.khoiLuong, giaVonDonVi: b.giaVonDonVi }))
+                    : info.maNL && info.khoiLuong > 0
+                      ? [{ maNL: info.maNL, khoiLuong: info.khoiLuong, giaVonDonVi: info.giaVonDonVi }]
+                      : [];
             return {
                 maTopping,
                 tenToppingSnapshot: info.tenTopping,
@@ -3009,6 +3040,7 @@ async function taoOrderTrongGiaoDich(
                 soLuong: soLuongMoiLy * mon.soLuong,
                 donGia: tiered.donGiaBinhQuan,
                 giaVonToppingSnapshot: Math.round(giaVonMotTp * 100) / 100,
+                bomPerUnit,
             };
         });
 
@@ -3375,7 +3407,7 @@ async function taoOrderTrongGiaoDich(
             });
         }
 
-        // Cập nhật lại GiaVonSnapshot trên từng dòng món theo đúng WAC của chi nhánh (hoặc Historical WAC nếu Offline trễ)!
+        // [Wave 2 — P0-05] Cập nhật lại GiaVonSnapshot (bao gồm bao bì) & giaVonToppingSnapshot theo đúng branchWacUsedMap!
         for (const dong of dongMon) {
             if (dong.bomPerCupMap && dong.bomPerCupMap.size > 0) {
                 let cogsCup = 0;
@@ -3383,6 +3415,20 @@ async function taoOrderTrongGiaoDich(
                     cogsCup += Number(qCup || 0) * Number(branchWacUsedMap.get(mNl) ?? stockMap.get(mNl)?.giaVonDonVi ?? 0);
                 }
                 dong.giaVonSnapshot = Math.round(cogsCup * 100) / 100;
+            }
+            if (Array.isArray(dong.toppings) && dong.toppings.length > 0) {
+                for (const tp of dong.toppings) {
+                    if (Array.isArray(tp.bomPerUnit) && tp.bomPerUnit.length > 0) {
+                        let cogsTp = 0;
+                        for (const b of tp.bomPerUnit) {
+                            const wacNl = Number(
+                                branchWacUsedMap.get(b.maNL) ?? stockMap.get(b.maNL)?.giaVonDonVi ?? b.giaVonDonVi ?? 0
+                            );
+                            cogsTp += Number(b.khoiLuong || 0) * wacNl;
+                        }
+                        tp.giaVonToppingSnapshot = Math.round(cogsTp * 100) / 100;
+                    }
+                }
             }
         }
     }
@@ -6335,7 +6381,13 @@ function chonPhuongThucChinh(dsThanhToan) {
 }
 
 // [P0] Chuẩn hóa & chặn lệch sổ cái khi thu vượt (Split Tender Overpayment + VietQR Chuyển thừa)
-function chuanHoaKhoanThanhToanVaThuThua({ cacKhoanTT, conLaiTruoc, vaiTro = null, khoaIdem = null }) {
+function chuanHoaKhoanThanhToanVaThuThua({
+    cacKhoanTT,
+    conLaiTruoc,
+    vaiTro = null,
+    voucherApprovedByManager = false,
+    khoaIdem = null,
+}) {
     const dongGhi = [];
 
     for (let i = 0; i < cacKhoanTT.length; i++) {
@@ -6344,8 +6396,11 @@ function chuanHoaKhoanThanhToanVaThuThua({ cacKhoanTT, conLaiTruoc, vaiTro = nul
         if (!PHUONG_THUC_TT.includes(pt)) {
             throw new LoiNghiepVu(400, `Phương thức thanh toán "${pt}" không hợp lệ!`);
         }
-        if (pt === 'VOUCHER' && vaiTro !== 1) {
-            throw new LoiNghiepVu(403, 'Chỉ Quản lý mới có quyền xác nhận thanh toán bằng VOUCHER!');
+        if (pt === 'VOUCHER' && vaiTro !== 1 && !voucherApprovedByManager) {
+            throw new LoiNghiepVu(403, 'Chỉ Quản lý hoặc mã PIN Quản lý mới có quyền xác nhận thanh toán bằng VOUCHER!', {
+                code: 'VOUCHER_PIN_REQUIRED',
+                maLoi: 'CAN_PIN_QUAN_LY',
+            });
         }
         const soTien = Math.round(Number(k.soTien) * 100) / 100;
         if (!(soTien > 0)) {
@@ -6443,6 +6498,7 @@ async function ghiNhanThanhToanTrongGiaoDich(
         ca,
         maNV,
         vaiTro = null,
+        voucherApprovedByManager = false,
         maKH = null,
         maKhuyenMai = null,
         diemSuDung = 0,
@@ -6608,7 +6664,8 @@ async function ghiNhanThanhToanTrongGiaoDich(
                           phuongThucTT: autoFillSingleMethod.phuongThucTT,
                           soTien: mucThuMucTieu,
                           tienKhachDua: autoFillSingleMethod.tienKhachDua,
-                          nguonXacNhan: 'POS_MANUAL',
+                          noiDungCK: autoFillSingleMethod.noiDungCK || null,
+                          nguonXacNhan: autoFillSingleMethod.nguonXacNhan || 'POS_MANUAL',
                       },
                   ]
                 : cacKhoanTT;
@@ -6616,6 +6673,7 @@ async function ghiNhanThanhToanTrongGiaoDich(
             cacKhoanTT: khoanTTThucTe,
             conLaiTruoc: chiaTienRow ? mucThuMucTieu : conLaiTruoc,
             vaiTro,
+            voucherApprovedByManager,
             khoaIdem,
         });
         dongGhi = norm.dongGhi;
@@ -6936,22 +6994,51 @@ app.post('/api/order/thanhtoan', kiemTraToken, choPhepVaiTro(1, 4), kiemTraHanSu
             const ca = caInfo.ca;
 
             const splitArr = Array.isArray(payments) && payments.length > 0 ? payments : thanhToan;
+            const reqManagerPin = req.body?.managerPin || null;
+            const reqMaNVDuyet = req.body?.maNVDuyet || null;
+            const reqNguonXacNhan = req.body?.nguonXacNhan || null;
+            const reqIdChungTu = req.body?.idChungTu ? String(req.body.idChungTu).trim().slice(0, 64) : null;
             let cacKhoanTT = null;
             let autoFillSingleMethod = null;
+            let hasVoucherTender = false;
             if (Array.isArray(splitArr) && splitArr.length > 0) {
-                cacKhoanTT = splitArr.map((t) => ({
-                    phuongThucTT: t.phuongThucTT,
-                    soTien: t.soTien,
-                    tienKhachDua: t.tienKhachDua,
-                    maChuanChiEDC: t.maChuanChiEDC || null,
-                    bonSoCuoiThe: t.bonSoCuoiThe || null,
-                    nguonXacNhan: laOfflineSync ? 'POS_OFFLINE_SYNC' : 'POS_MANUAL',
-                }));
+                cacKhoanTT = splitArr.map((t) => {
+                    if (t.phuongThucTT === 'VOUCHER') hasVoucherTender = true;
+                    return {
+                        phuongThucTT: t.phuongThucTT,
+                        soTien: t.soTien,
+                        tienKhachDua: t.tienKhachDua,
+                        maChuanChiEDC: t.maChuanChiEDC || null,
+                        bonSoCuoiThe: t.bonSoCuoiThe || null,
+                        noiDungCK: t.noiDungCK || (t.idChungTu || reqIdChungTu ? `RECEIPT:${t.idChungTu || reqIdChungTu}` : null),
+                        nguonXacNhan: laOfflineSync
+                            ? 'POS_OFFLINE_SYNC'
+                            : t.nguonXacNhan || (t.phuongThucTT === 'CHUYEN_KHOAN' && (t.idChungTu || reqIdChungTu) ? 'POS_MANUAL_PROVISIONAL' : 'POS_MANUAL'),
+                    };
+                });
             } else {
                 if (!PHUONG_THUC_TT.includes(phuongThucTT)) {
                     throw new LoiNghiepVu(400, `phuongThucTT phải là một trong: ${PHUONG_THUC_TT.join(', ')}`);
                 }
-                autoFillSingleMethod = { phuongThucTT, tienKhachDua };
+                if (phuongThucTT === 'VOUCHER') hasVoucherTender = true;
+                autoFillSingleMethod = {
+                    phuongThucTT,
+                    tienKhachDua,
+                    ...(reqNguonXacNhan ? { nguonXacNhan: reqNguonXacNhan } : {}),
+                    ...(reqIdChungTu ? { noiDungCK: `RECEIPT:${reqIdChungTu}` } : {}),
+                };
+            }
+
+            let voucherApprovedByManager = Number(req.user.vaiTro) === 1;
+            if (hasVoucherTender && !voucherApprovedByManager && reqManagerPin) {
+                const mgr = await xacThucPinQuanLy(client, tenantId, reqManagerPin, req.ip, reqMaNVDuyet);
+                if (!mgr) {
+                    throw new LoiNghiepVu(403, 'Mã PIN Quản lý duyệt VOUCHER không đúng!', {
+                        code: 'VOUCHER_PIN_INVALID',
+                        maLoi: 'CAN_PIN_QUAN_LY',
+                    });
+                }
+                voucherApprovedByManager = true;
             }
 
             const resTT = await ghiNhanThanhToanTrongGiaoDich(client, {
@@ -6962,6 +7049,7 @@ app.post('/api/order/thanhtoan', kiemTraToken, choPhepVaiTro(1, 4), kiemTraHanSu
                 ca,
                 maNV: req.user.maNV,
                 vaiTro: req.user.vaiTro,
+                voucherApprovedByManager,
                 maKH,
                 maKhuyenMai,
                 diemSuDung,
@@ -9173,6 +9261,21 @@ app.post('/api/kho/nhap', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
                     chiPhiPhanBo,
                 });
                 totalCogsAdjustment = lam2(totalCogsAdjustment + wac.cogsAdjustment);
+                if (Math.abs(wac.cogsAdjustment) >= 0.01) {
+                    await recordCogsAdjustment(client, {
+                        tenantId,
+                        branchId,
+                        businessDate: ngayChungTu || todayDateVN(),
+                        maNL: item.maNL,
+                        sourceType: 'NEGATIVE_STOCK_CATCHUP',
+                        refMaGiaoDich: maGD,
+                        qtyAffected: Math.min(Math.abs(tonTruoc), soLuongBase),
+                        oldUnitCost: giaVonTruoc,
+                        newUnitCost: wac.donGiaNhapThucTe,
+                        adjustmentAmount: wac.cogsAdjustment,
+                        createdBy: req.user.maNV,
+                    });
+                }
                 const tonSau = lam3(tonTruoc + soLuongBase);
 
                 const moTaDonVi =
@@ -10230,18 +10333,31 @@ app.get('/api/baocao/dashboard', kiemTraToken, choPhepVaiTro(1), async (req, res
                 }
             }
         }
-        const [doanhThuNgayResult, chiPhiResult, ptttResult, topMonResult] = await Promise.all([
+        const [doanhThuNgayResult, chiPhiResult, ptttResult, topMonResult, refundNgayResult, cogsAdjNgayResult] = await Promise.all([
             pool.withTenant(tenantId, async (client) => {
                 await client.query('SAVEPOINT sp_dash_net_rev');
                 try {
-                    // [P0 FIX] Trừ TienGiamKM + TienGiamDiem theo từng hóa đơn để Doanh thu thuần khớp 100% Order_Payments & Z-Report
+                    // [Wave 2 — P0-05] Khớp 100% Z-Report: loại LaMonTang = TRUE khỏi doanh thu, cộng GiaModifiers, trừ ChietKhauMon + GiaGiam + KM/Điểm
                     const r = await client.query(`
                         WITH DoanhThuMon AS (
                             SELECT 
                                 hd.MaHoaDon,
                                 TO_CHAR(hd.ThoiGianThanhToan::timestamptz AT TIME ZONE '${VN_TZ}', 'YYYY-MM-DD') AS Ngay,
-                                SUM(cthd.SoLuong * cthd.DonGia - COALESCE(cthd.GiaGiam, 0)) AS TienMon,
-                                COALESCE(SUM(tp.TienTopping), 0) AS TienTopping,
+                                SUM(
+                                    CASE
+                                        WHEN COALESCE(cthd.LaMonTang, FALSE) = TRUE THEN 0
+                                        ELSE GREATEST(
+                                            0,
+                                            cthd.SoLuong * (cthd.DonGia + COALESCE(cthd.GiaModifiers, 0))
+                                            - COALESCE(cthd.GiaGiam, 0)
+                                            - COALESCE(cthd.ChietKhauMon, 0)
+                                        )
+                                    END
+                                ) AS TienMon,
+                                COALESCE(
+                                    SUM(CASE WHEN COALESCE(cthd.LaMonTang, FALSE) = TRUE THEN 0 ELSE COALESCE(tp.TienTopping, 0) END),
+                                    0
+                                ) AS TienTopping,
                                 COALESCE(MAX(hd.TienGiamKM), 0) + COALESCE(MAX(hd.TienGiamDiem), 0) AS TienGiamHD,
                                 COALESCE(SUM(cthd.SoLuong * COALESCE(cthd.GiaVonSnapshot, 0)), 0) AS GiaVon
                             FROM HoaDon hd
@@ -10303,6 +10419,7 @@ app.get('/api/baocao/dashboard', kiemTraToken, choPhepVaiTro(1), async (req, res
                 }
             }),
 
+            // [Wave 2 — P0-05] Loại trừ phiếu nhập kho đã bị đảo (LoaiGD = 9 tham chiếu MaGDThamChieu)
             qTenant(req, `
                 SELECT COALESCE(SUM(ct.SoLuong * ct.DonGiaNhap), 0) AS TongChiPhiNhap
                 FROM PhieuGiaoDichKho pgd
@@ -10311,6 +10428,13 @@ app.get('/api/baocao/dashboard', kiemTraToken, choPhepVaiTro(1), async (req, res
                   AND COALESCE(pgd.TenantId, 'DEFAULT') = $3
                   AND pgd.ThoiGianTao >= ($1::timestamp AT TIME ZONE '${VN_TZ}')
                   AND pgd.ThoiGianTao < (($2::date + 1)::timestamp AT TIME ZONE '${VN_TZ}')
+                  AND NOT EXISTS (
+                      SELECT 1
+                        FROM PhieuGiaoDichKho rev
+                       WHERE rev.LoaiGD = 9
+                         AND COALESCE(rev.TenantId, 'DEFAULT') = $3
+                         AND rev.MaGDThamChieu = pgd.MaGiaoDich::text
+                  )
             `, [tuNgay, denNgay, tenantId]),
 
             paymentsSanSang
@@ -10359,7 +10483,17 @@ app.get('/api/baocao/dashboard', kiemTraToken, choPhepVaiTro(1), async (req, res
                 SELECT cthd.MaMon,
                        COALESCE(MAX(cthd.TenMonSnapshot), MAX(sp.TenMon)) AS TenMon,
                        SUM(cthd.SoLuong) AS TongLy,
-                       SUM(cthd.SoLuong * cthd.DonGia - COALESCE(cthd.GiaGiam, 0) + COALESCE(tp.TienTopping, 0)) AS DoanhThu,
+                       SUM(
+                           CASE
+                               WHEN COALESCE(cthd.LaMonTang, FALSE) = TRUE THEN 0
+                               ELSE GREATEST(
+                                   0,
+                                   cthd.SoLuong * (cthd.DonGia + COALESCE(cthd.GiaModifiers, 0))
+                                   - COALESCE(cthd.GiaGiam, 0)
+                                   - COALESCE(cthd.ChietKhauMon, 0)
+                               ) + COALESCE(tp.TienTopping, 0)
+                           END
+                       ) AS DoanhThu,
                        SUM(cthd.SoLuong * COALESCE(cthd.GiaVonSnapshot, 0)) AS GiaVon
                   FROM HoaDon hd
                   JOIN ChiTietHoaDon cthd ON hd.MaHoaDon = cthd.MaHoaDon AND cthd.TrangThaiPhaChe <> 'DaHuy'
@@ -10377,28 +10511,87 @@ app.get('/api/baocao/dashboard', kiemTraToken, choPhepVaiTro(1), async (req, res
                  ORDER BY TongLy DESC, DoanhThu DESC
                  LIMIT 8
             `, [tuNgay, denNgay, tenantId]),
+
+            // [Wave 2 — P0-05] Tổng hoàn tiền (order_refunds) theo ngày để trừ khỏi Doanh thu thuần
+            pool.withTenant(tenantId, async (client) => {
+                await client.query('SAVEPOINT sp_dash_refunds');
+                try {
+                    const r = await client.query(`
+                        SELECT TO_CHAR(thoigiantao::timestamptz AT TIME ZONE '${VN_TZ}', 'YYYY-MM-DD') AS Ngay,
+                               COALESCE(SUM(sotienhoan), 0) AS TongHoan
+                          FROM public.order_refunds
+                         WHERE COALESCE(tenantid, 'DEFAULT') = $3
+                           AND thoigiantao >= ($1::timestamp AT TIME ZONE '${VN_TZ}')
+                           AND thoigiantao < (($2::date + 1)::timestamp AT TIME ZONE '${VN_TZ}')
+                         GROUP BY TO_CHAR(thoigiantao::timestamptz AT TIME ZONE '${VN_TZ}', 'YYYY-MM-DD')
+                    `, [tuNgay, denNgay, tenantId]);
+                    await client.query('RELEASE SAVEPOINT sp_dash_refunds');
+                    return r;
+                } catch {
+                    await client.query('ROLLBACK TO SAVEPOINT sp_dash_refunds').catch(() => {});
+                    return { rows: [] };
+                }
+            }),
+
+            // [Wave 2 — P0-05] Tổng điều chỉnh giá vốn (cogs_adjustment_journal) theo business_date
+            pool.withTenant(tenantId, async (client) => {
+                await client.query('SAVEPOINT sp_dash_cogs_adj');
+                try {
+                    const r = await client.query(`
+                        SELECT TO_CHAR(business_date, 'YYYY-MM-DD') AS Ngay,
+                               COALESCE(SUM(adjustment_amount), 0) AS TongDieuChinhGiaVon
+                          FROM public.cogs_adjustment_journal
+                         WHERE tenant_id = $3
+                           AND business_date >= $1::date
+                           AND business_date <= $2::date
+                         GROUP BY TO_CHAR(business_date, 'YYYY-MM-DD')
+                    `, [tuNgay, denNgay, tenantId]);
+                    await client.query('RELEASE SAVEPOINT sp_dash_cogs_adj');
+                    return r;
+                } catch {
+                    await client.query('ROLLBACK TO SAVEPOINT sp_dash_cogs_adj').catch(() => {});
+                    return { rows: [] };
+                }
+            }),
         ]);
+
+        const refundByDate = new Map(refundNgayResult.rows.map((r) => [r.ngay, parseFloat(r.tonghoan || 0)]));
+        const cogsAdjByDate = new Map(cogsAdjNgayResult.rows.map((r) => [r.ngay, parseFloat(r.tongdieuchinhgiavon || 0)]));
+        const allDates = new Set([
+            ...doanhThuNgayResult.rows.map((r) => r.ngay),
+            ...refundByDate.keys(),
+            ...cogsAdjByDate.keys(),
+        ]);
+        const revRowByDate = new Map(doanhThuNgayResult.rows.map((r) => [r.ngay, r]));
 
         let tongSoDon = 0;
         let tongDoanhThu = 0;
         let tongGiaVon = 0;
         let tongGiamGia = 0;
-        const bieuDoDoanhThu = doanhThuNgayResult.rows.map((row) => {
-            const soDon = parseInt(row.sodon, 10);
-            const doanhThu = parseFloat(row.doanhthu);
-            const giaVon = parseFloat(row.giavon || 0);
-            const giamGia = parseFloat(row.tonggiamgia || 0);
+        let tongHoanTien = 0;
+        let tongDieuChinhGiaVon = 0;
+        const bieuDoDoanhThu = [...allDates].sort().map((ngay) => {
+            const row = revRowByDate.get(ngay);
+            const soDon = row ? parseInt(row.sodon, 10) : 0;
+            const doanhThuTruocHoan = row ? parseFloat(row.doanhthu || 0) : 0;
+            const hoanTien = refundByDate.get(ngay) || 0;
+            const doanhThu = Math.max(0, Math.round((doanhThuTruocHoan - hoanTien) * 100) / 100);
+            const cogsAdj = cogsAdjByDate.get(ngay) || 0;
+            const giaVon = Math.round(((row ? parseFloat(row.giavon || 0) : 0) + cogsAdj) * 100) / 100;
+            const giamGia = row ? parseFloat(row.tonggiamgia || 0) : 0;
             tongSoDon += soDon;
-            tongDoanhThu += doanhThu;
-            tongGiaVon += giaVon;
-            tongGiamGia += giamGia;
-            return { ngay: row.ngay, soDon, doanhThu, giamGia, giaVon, loiNhuanGop: doanhThu - giaVon };
+            tongDoanhThu = Math.round((tongDoanhThu + doanhThu) * 100) / 100;
+            tongGiaVon = Math.round((tongGiaVon + giaVon) * 100) / 100;
+            tongGiamGia = Math.round((tongGiamGia + giamGia) * 100) / 100;
+            tongHoanTien = Math.round((tongHoanTien + hoanTien) * 100) / 100;
+            tongDieuChinhGiaVon = Math.round((tongDieuChinhGiaVon + cogsAdj) * 100) / 100;
+            return { ngay, soDon, doanhThu, hoanTien, giamGia, giaVon, dieuChinhGiaVon: cogsAdj, loiNhuanGop: doanhThu - giaVon };
         });
 
         const tongChiPhiNhapKho = parseFloat(chiPhiResult.rows[0].tongchiphinhap);
-        const loiNhuanGop = tongDoanhThu - tongGiaVon;
+        const loiNhuanGop = Math.round((tongDoanhThu - tongGiaVon) * 100) / 100;
         const tySuatLoiNhuan = tongDoanhThu > 0 ? Math.round((loiNhuanGop / tongDoanhThu) * 1000) / 10 : 0;
-        const loiNhuanTamTinh = tongDoanhThu - tongChiPhiNhapKho;
+        const loiNhuanTamTinh = Math.round((tongDoanhThu - tongChiPhiNhapKho) * 100) / 100;
 
         const doanhThuTheoPhuongThuc = ptttResult.rows.map((r) => ({
             phuongThucTT: r.phuongthuctt,
@@ -10427,8 +10620,10 @@ app.get('/api/baocao/dashboard', kiemTraToken, choPhepVaiTro(1), async (req, res
             tongQuan: {
                 tongSoDon,
                 tongDoanhThu,
+                tongHoanTien,
                 tongGiamGia,
                 tongGiaVon,
+                tongDieuChinhGiaVon,
                 loiNhuanGop,
                 tySuatLoiNhuan,
                 tongChiPhiNhapKho,
@@ -11492,6 +11687,21 @@ app.post('/api/kho/san-xuat-me', kiemTraToken, choPhepVaiTro(1, 2), async (req, 
             const giaVonMoi = wacMe.giaVonMoi;
             const tpBefore = tp.soLuongTon;
             const tpAfter = lam3(tpBefore + sanLuongMe);
+            if (Math.abs(wacMe.cogsAdjustment) >= 0.01) {
+                await recordCogsAdjustment(client, {
+                    tenantId,
+                    branchId,
+                    businessDate: todayDateVN(),
+                    maNL: maNLThanhPham,
+                    sourceType: 'NEGATIVE_STOCK_CATCHUP',
+                    refMaGiaoDich: null,
+                    qtyAffected: Math.min(Math.abs(tpBefore), sanLuongMe),
+                    oldUnitCost: tp.giaVonDonVi,
+                    newUnitCost: donGiaVonMe,
+                    adjustmentAmount: wacMe.cogsAdjustment,
+                    createdBy: req.user.maNV,
+                });
+            }
 
             const hanSuDungDen =
                 tp.hanSuDungGio && Number(tp.hanSuDungGio) > 0
@@ -12162,11 +12372,14 @@ app.get('/api/health', async (req, res) => {
 });
 
 app.get('/api/ready', async (req, res) => {
+    if (isShuttingDown) {
+        return res.status(503).json({ ready: false, status: 'DRAINING' });
+    }
     try {
         await pool.query('SELECT 1');
-        res.status(200).json({ ready: true });
+        res.status(200).json({ ready: true, status: 'READY' });
     } catch {
-        res.status(503).json({ ready: false });
+        res.status(503).json({ ready: false, status: 'DEGRADED' });
     }
 });
 
@@ -12215,3 +12428,48 @@ server.listen(PORT, () => {
     setInterval(donDepIdempotency, 6 * 60 * 60 * 1000).unref();
     setInterval(donDepRefreshTokens, 12 * 60 * 60 * 1000).unref();
 });
+
+// [Wave 2 — P0-06] Graceful Shutdown cho SIGTERM & SIGINT (Zero-downtime rolling deploy)
+let shutdownPromise = null;
+function gracefulShutdown(signal) {
+    if (shutdownPromise) return shutdownPromise;
+    isShuttingDown = true;
+    logger.info(`Nhận tín hiệu ${signal} — bắt đầu Graceful Shutdown (DRAINING)...`, {
+        event: 'SHUTDOWN_START',
+        signal,
+        inFlightRequests,
+    });
+
+    shutdownPromise = (async () => {
+        const deadline = Date.now() + 15000;
+        const serverClosePromise = new Promise((resolve) => {
+            server.close(() => resolve());
+        });
+
+        // Chờ các request/transaction đang xử lý hoàn tất (tối đa 15s)
+        while (inFlightRequests > 0 && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 100));
+        }
+
+        await Promise.race([
+            serverClosePromise,
+            new Promise((r) => setTimeout(r, Math.max(200, deadline - Date.now()))),
+        ]);
+
+        await new Promise((resolve) => {
+            try {
+                io.close(() => resolve());
+            } catch {
+                resolve();
+            }
+        });
+        await closeRedisClients().catch(() => {});
+        await pool.end().catch(() => {});
+        logger.info('Graceful Shutdown hoàn tất sạch sẽ.', { event: 'SHUTDOWN_COMPLETE', signal });
+        process.exit(0);
+    })();
+    return shutdownPromise;
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

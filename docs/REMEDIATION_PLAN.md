@@ -36,8 +36,8 @@
 | **Wave 1** | **027** | `027_dual_fsm_version_combo_pk_branch_counter.sql` | `HoaDon.lifecycle_status`, `buoc_lam_tron`, trigger `trg_guard_hoadon_fsm`, `ChiTietHoaDon.trang_thai_huy`, đổi PK `combo` sang `(tenantid, macombo)` + FK `combo_slots`, bảng `branch_daily_counter`, `fn_resolve_invoice_for_webhook` (`SECURITY DEFINER`). |
 | **Wave 1** | **028** | `028_hr_attendance_unique_and_missed_clockout.sql` | `UNIQUE INDEX uq_chamcong_single_per_phanca ON chamcong(maphanca)`, cột `trangthai_chamcong`, `auto_flagged_at`. |
 | **Wave 1** | **029** | `029_platform_admin_security_definer_rpcs.sql` | Bộ RPC `SECURITY DEFINER SET search_path = public` (`GRANT EXECUTE TO app_runtime`) cho Super Admin: `fn_platform_kpi_overview`, `fn_platform_list_tenants`, `fn_platform_manual_approve_billing`, `fn_platform_impersonate_tenant` có ghi `Audit_Logs`. |
-| **Wave 2** | **030** | `030_idempotency_composite_pk_and_lease.sql` | Đổi PK `donhang_idempotency` sang `(tenantid, khoaidem)`, thêm `lease_expires_at`, `request_fingerprint`. |
-| **Wave 2** | **031** | `031_cogs_adjustment_journal.sql` | Tạo `public.cogs_adjustment_journal` (`FORCE RLS`) cho Safe WAC & replay hồi tố. |
+| **Wave 2** | **030** | `030_wave2_idempotency_lease.sql` | Đổi PK `donhang_idempotency` sang `(tenantid, khoaidem)`, thêm `lease_expires_at`, `request_fingerprint`. |
+| **Wave 2** | **031** | `031_wave2_cogs_adjustment_journal.sql` | Tạo `public.cogs_adjustment_journal` (`FORCE RLS`) cho Safe WAC & replay hồi tố. |
 | **Wave 3** | **032** | `032_branch_availability_86.sql` | Tạo `public.branch_availability_86 (tenant_id, branch_id, entity_type, entity_id)` với `FORCE RLS`. |
 | **Wave 3** | **033** | `033_vn_tax_einvoice_and_nd13_privacy.sql` | `tax_categories` (`VAT_8_FB`, `VAT_10_STD`, `VAT_0`, `KCT`), tax snapshot trên `chitiethoadon`, `einvoices`, `customer_consent_logs`, `ZaloOptIn DEFAULT FALSE`, `anonymized_at`. |
 | **Wave 3** | **034** | `034_hr_3layer_kiosk_gps_and_shift_overlap.sql` | `kiosk_hmac_secret`, GPS/IP chi nhánh trên `ChiNhanh`, ràng buộc chống trùng khung giờ ca `PhanCa`. |

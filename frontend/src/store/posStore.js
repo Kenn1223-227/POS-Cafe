@@ -1,7 +1,31 @@
 import { create } from 'zustand'
 
-const CART_STORAGE_KEY = 'pos_active_cart_v3'
-const HELD_STORAGE_KEY = 'pos_held_orders_v1'
+const CART_STORAGE_PREFIX = 'pos_active_cart_v3'
+const HELD_STORAGE_PREFIX = 'pos_held_orders_v1'
+
+export function resolveActiveTenantId(overrideTenantId) {
+  if (overrideTenantId && String(overrideTenantId).trim()) {
+    return String(overrideTenantId).trim()
+  }
+  try {
+    const raw = localStorage.getItem('pos_user')
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed?.tenantId) return String(parsed.tenantId).trim()
+    }
+  } catch {
+    // ignore
+  }
+  return 'DEFAULT'
+}
+
+export function getCartStorageKey(tenantId) {
+  return `${CART_STORAGE_PREFIX}:${resolveActiveTenantId(tenantId)}`
+}
+
+export function getHeldStorageKey(tenantId) {
+  return `${HELD_STORAGE_PREFIX}:${resolveActiveTenantId(tenantId)}`
+}
 
 const loadJson = (key, fallback) => {
   try {
@@ -71,11 +95,25 @@ export const usePosStore = create((set, get) => ({
   tenKhachVangLai: '',
   diaChiGiao: '',
   soKhach: 1,
+  tenantScope: resolveActiveTenantId(),
   activeInvoice: null,
   customer: null,
-  cart: loadJson(CART_STORAGE_KEY, []),
-  heldOrders: loadJson(HELD_STORAGE_KEY, []),
+  cart: loadJson(getCartStorageKey(), []),
+  heldOrders: loadJson(getHeldStorageKey(), []),
   currentShift: null,
+
+  syncTenantStorage: (tenantId) => {
+    const nextTenant = resolveActiveTenantId(tenantId)
+    if (get().tenantScope === nextTenant) return
+    set({
+      tenantScope: nextTenant,
+      selectedTable: null,
+      activeInvoice: null,
+      customer: null,
+      cart: loadJson(getCartStorageKey(nextTenant), []),
+      heldOrders: loadJson(getHeldStorageKey(nextTenant), []),
+    })
+  },
 
   setCurrentShift: (shift) => set({ currentShift: shift }),
 
@@ -123,13 +161,13 @@ export const usePosStore = create((set, get) => ({
     } else {
       nextCart = [...current, item]
     }
-    saveJson(CART_STORAGE_KEY, nextCart)
+    saveJson(getCartStorageKey(get().tenantScope), nextCart)
     set({ cart: nextCart })
   },
 
   replaceCart: (items = []) => {
     const nextCart = (items || []).map(normalizeCartItem)
-    saveJson(CART_STORAGE_KEY, nextCart)
+    saveJson(getCartStorageKey(get().tenantScope), nextCart)
     set({ cart: nextCart })
   },
 
@@ -139,7 +177,7 @@ export const usePosStore = create((set, get) => ({
       return
     }
     const nextCart = get().cart.map((item, i) => (i === idx ? { ...item, soLuong: newQty } : item))
-    saveJson(CART_STORAGE_KEY, nextCart)
+    saveJson(getCartStorageKey(get().tenantScope), nextCart)
     set({ cart: nextCart })
   },
 
@@ -149,7 +187,7 @@ export const usePosStore = create((set, get) => ({
     const updated = normalizeCartItem({ ...current[idx], ...patch })
     const nextCart = [...current]
     nextCart[idx] = updated
-    saveJson(CART_STORAGE_KEY, nextCart)
+    saveJson(getCartStorageKey(get().tenantScope), nextCart)
     set({ cart: nextCart })
   },
 
@@ -160,7 +198,7 @@ export const usePosStore = create((set, get) => ({
       const updated = { ...item, ghiChu }
       return { ...updated, cartKey: buildCartLineSignature(updated) }
     })
-    saveJson(CART_STORAGE_KEY, nextCart)
+    saveJson(getCartStorageKey(get().tenantScope), nextCart)
     set({ cart: nextCart })
   },
 
@@ -172,7 +210,7 @@ export const usePosStore = create((set, get) => ({
     const updated = normalizeCartItem({ ...target, isTakeaway: !target.isTakeaway })
     const nextCart = [...current]
     nextCart[idx] = updated
-    saveJson(CART_STORAGE_KEY, nextCart)
+    saveJson(getCartStorageKey(get().tenantScope), nextCart)
     set({ cart: nextCart })
   },
 
@@ -189,7 +227,7 @@ export const usePosStore = create((set, get) => ({
     })
     const nextCart = [...current]
     nextCart[idx] = updated
-    saveJson(CART_STORAGE_KEY, nextCart)
+    saveJson(getCartStorageKey(get().tenantScope), nextCart)
     set({ cart: nextCart })
   },
 
@@ -208,7 +246,7 @@ export const usePosStore = create((set, get) => ({
     }
     splitCopy.cartKey = `${buildCartLineSignature(splitCopy)}#S${Date.now()}`
     nextCart.splice(idx + 1, 0, splitCopy)
-    saveJson(CART_STORAGE_KEY, nextCart)
+    saveJson(getCartStorageKey(get().tenantScope), nextCart)
     set({ cart: nextCart })
     return idx + 1
   },
@@ -227,19 +265,19 @@ export const usePosStore = create((set, get) => ({
     }
     cloned.cartKey = `${buildCartLineSignature(cloned)}#C${Date.now()}`
     nextCart.splice(idx + 1, 0, cloned)
-    saveJson(CART_STORAGE_KEY, nextCart)
+    saveJson(getCartStorageKey(get().tenantScope), nextCart)
     set({ cart: nextCart })
     return idx + 1
   },
 
   removeFromCart: (idx) => {
     const nextCart = get().cart.filter((_, i) => i !== idx)
-    saveJson(CART_STORAGE_KEY, nextCart)
+    saveJson(getCartStorageKey(get().tenantScope), nextCart)
     set({ cart: nextCart })
   },
 
   clearCart: () => {
-    saveJson(CART_STORAGE_KEY, [])
+    saveJson(getCartStorageKey(get().tenantScope), [])
     set({ cart: [] })
   },
 
@@ -256,8 +294,8 @@ export const usePosStore = create((set, get) => ({
       selectedTable,
     }
     const nextHeld = [entry, ...heldOrders].slice(0, 15)
-    saveJson(HELD_STORAGE_KEY, nextHeld)
-    saveJson(CART_STORAGE_KEY, [])
+    saveJson(getHeldStorageKey(get().tenantScope), nextHeld)
+    saveJson(getCartStorageKey(get().tenantScope), [])
     set({ heldOrders: nextHeld, cart: [], customer: null })
     return true
   },
@@ -267,8 +305,8 @@ export const usePosStore = create((set, get) => ({
     const target = heldOrders.find((h) => h.id === holdId)
     if (!target) return
     const nextHeld = heldOrders.filter((h) => h.id !== holdId)
-    saveJson(HELD_STORAGE_KEY, nextHeld)
-    saveJson(CART_STORAGE_KEY, target.cart)
+    saveJson(getHeldStorageKey(get().tenantScope), nextHeld)
+    saveJson(getCartStorageKey(get().tenantScope), target.cart)
     set({
       heldOrders: nextHeld,
       cart: target.cart,
@@ -279,7 +317,7 @@ export const usePosStore = create((set, get) => ({
 
   deleteHeldOrder: (holdId) => {
     const nextHeld = get().heldOrders.filter((h) => h.id !== holdId)
-    saveJson(HELD_STORAGE_KEY, nextHeld)
+    saveJson(getHeldStorageKey(get().tenantScope), nextHeld)
     set({ heldOrders: nextHeld })
   },
 }))

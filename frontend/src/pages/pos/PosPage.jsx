@@ -21,7 +21,12 @@ import ToppingModal from './components/ToppingModal'
 import CustomerBox from './components/CustomerBox'
 import Cart from './components/Cart'
 import ThuChiModal from './components/ThuChiModal'
-import DongCaModal from './components/DongCaModal'
+import DongCaModal, {
+  DenominationCounterGrid,
+  calcDenominationTotal,
+  buildDenominationMap,
+} from './components/DongCaModal'
+import PosErrorBoundary from './components/PosErrorBoundary'
 import OfflineQueueModal from './components/OfflineQueueModal'
 import PrintBridgeModal from './components/PrintBridgeModal'
 import PaidOrdersRefundModal from './components/PaidOrdersRefundModal'
@@ -109,6 +114,18 @@ export default function PosPage() {
 
   const [showThuChiModal, setShowThuChiModal] = useState(false)
   const [showDongCaModal, setShowDongCaModal] = useState(false)
+  const [preCloseWarning, setPreCloseWarning] = useState(null)
+  const [onlineHeldOrders, setOnlineHeldOrders] = useState([])
+  const [showOpenShiftModal, setShowOpenShiftModal] = useState(false)
+  const [openShiftCounts, setOpenShiftCounts] = useState({})
+  const payKeyRef = useRef({ fingerprint: '', key: '' })
+  const [autoPrintLabelsOnCheckout, setAutoPrintLabelsOnCheckout] = useState(() => {
+    try {
+      return localStorage.getItem('pos_auto_print_labels_checkout') === '1'
+    } catch {
+      return false
+    }
+  })
   const [showOpenOrdersModal, setShowOpenOrdersModal] = useState(false)
   const [showBankModal, setShowBankModal] = useState(false)
   const [bankForm, setBankForm] = useState(() => getVietQrConfig())
@@ -287,15 +304,22 @@ export default function PosPage() {
   const loadLiveOperations = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return
     try {
-      const [banList, shift, openList] = await Promise.all([
+      const [banList, shift, openList, luuTamRes] = await Promise.all([
         banService.getAll(),
         caService.getCaHienTai(),
         orderService.getDangMo().catch(() => []),
+        orderService.getLuuTam().catch(() => []),
       ])
       const openArr = Array.isArray(openList) ? openList : []
+      const onlineHeldArr = Array.isArray(luuTamRes)
+        ? luuTamRes
+        : Array.isArray(luuTamRes?.danhSach)
+        ? luuTamRes.danhSach
+        : []
       setTables(banList)
       setCurrentShift(shift)
       setOpenInvoices(openArr)
+      setOnlineHeldOrders(onlineHeldArr)
       void saveCatalogSnapshot({ tables: banList, shift, openInvoices: openArr }, currentTenantId)
     } catch (err) {
       if (isNetworkError(err)) setIsOnline(false)
@@ -564,14 +588,48 @@ export default function PosPage() {
     }
   }
 
-  const handleOpenShift = async (e) => {
-    e.preventDefault()
+  // [Wave 2 — P0-06] Cô lập giỏ hàng & đơn lưu tạm theo tenantId khi đổi tài khoản quán trên cùng thiết bị
+  useEffect(() => {
+    usePosStore.getState().syncTenantStorage(currentTenantId)
+  }, [currentTenantId])
+
+  const handleOpenDongCa = async () => {
+    setPreCloseWarning(null)
+    if (typeof navigator === 'undefined' || navigator.onLine) {
+      try {
+        const check = await caService.preCloseCheck()
+        if (check) {
+          setPreCloseWarning(check)
+          const openCount = Number(check.soHoaDonDangMo || 0)
+          const heldCount = Number(check.soDonLuuTam || 0)
+          if (openCount > 0 || heldCount > 0) {
+            toast(`⚠️ Còn ${openCount} bàn/đơn đang mở và ${heldCount} đơn lưu tạm chưa chốt!`, {
+              icon: '⚠️',
+              duration: 5000,
+            })
+          }
+        }
+      } catch {
+        // Không chặn mở modal nếu pre-close-check lỗi tạm thời
+      }
+    }
+    setShowDongCaModal(true)
+  }
+
+  const handleOpenShift = async (e, useDenomCounts = false) => {
+    if (e?.preventDefault) e.preventDefault()
     setOpeningShift(true)
     try {
-      const res = await caService.moCa(Number(tienDauCaInput || 0))
+      const denomMap = useDenomCounts ? buildDenominationMap(openShiftCounts) : null
+      const amount = useDenomCounts ? calcDenominationTotal(openShiftCounts) : Number(tienDauCaInput || 0)
+      const res = await caService.moCa(amount, {
+        ...(denomMap && Object.keys(denomMap).length > 0 ? { chiTietMenhGiaDauCa: denomMap } : {}),
+      })
       toast.success(res?.message || 'Đã mở ca thu ngân thành công!', {
         duration: res?.soGiaoDichTuDongGanCa > 0 ? 7000 : 3000,
       })
+      setShowOpenShiftModal(false)
+      setOpenShiftCounts({})
       await loadPosData()
     } catch {
       // Interceptor xử lý
@@ -973,6 +1031,9 @@ export default function PosPage() {
     thanhToan,
     choPhepThuMotPhan,
     chiaTienId = null,
+    managerPin = null,
+    idChungTu = null,
+    nguonXacNhan = null,
   }) => {
     if (payLockRef.current) return
     payLockRef.current = true
@@ -988,8 +1049,22 @@ export default function PosPage() {
       choPhepThuMotPhan,
       ...(chiaTienId ? { chiaTienId } : {}),
       ...(activeInvoice?.version ? { expectedVersion: activeInvoice.version } : {}),
+      ...(managerPin ? { managerPin } : {}),
+      ...(idChungTu ? { idChungTu } : {}),
+      ...(nguonXacNhan ? { nguonXacNhan } : {}),
     }
-    const payIdemKey = newIdempotencyKey()
+    // [Wave 2 — P0-02] Cố định Idempotency-Key theo fingerprint đơn hàng để retry sau 502/504 không trừ tiền 2 lần
+    const splitAmountSum = Array.isArray(thanhToan)
+      ? thanhToan.reduce((s, r) => s + Number(r.soTien || 0), 0)
+      : Number(activeInvoice?.conLaiCanThu ?? activeInvoice?.tongTamTinh ?? 0)
+    const methodSig = Array.isArray(thanhToan)
+      ? thanhToan.map((r) => `${r.phuongThucTT}:${r.soTien}`).join('+')
+      : String(phuongThucTT || 'TIEN_MAT')
+    const payFingerprint = `${maHoaDon}:${activeInvoice?.version ?? 0}:${splitAmountSum}:${methodSig}`
+    if (payKeyRef.current.fingerprint !== payFingerprint || !payKeyRef.current.key) {
+      payKeyRef.current = { fingerprint: payFingerprint, key: newIdempotencyKey() }
+    }
+    const payIdemKey = payKeyRef.current.key
 
     const enqueuePayLocally = async () => {
       const job = await saveOfflineOrder({
@@ -1029,6 +1104,7 @@ export default function PosPage() {
         return
       }
       const res = await orderService.thanhToan(payPayload, payIdemKey, { silent: true })
+      payKeyRef.current = { fingerprint: '', key: '' }
       playCashSuccessSound()
       if (res.daHoanTat) {
         toast.success(
@@ -1045,6 +1121,9 @@ export default function PosPage() {
           phuongThucTT === 'TIEN_MAT' ||
           (Array.isArray(thanhToan) && thanhToan.some((t) => t.phuongThucTT === 'TIEN_MAT' && Number(t.soTien) > 0))
         await handlePrintInvoice(res.hoaDon, { isCashPayment: hasCashPayment })
+        if (autoPrintLabelsOnCheckout && res.hoaDon) {
+          printCupLabels50x30(res.hoaDon)
+        }
         setActiveInvoice(null)
         setCustomer(null)
         handleClearPromo()
@@ -1479,16 +1558,36 @@ export default function PosPage() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setShowDongCaModal(true)}
+                    onClick={handleOpenDongCa}
+                    data-testid="pos-open-dongca-btn"
                     className="min-h-10 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold cursor-pointer transition shadow"
                   >
                     🔒 Đóng ca
                   </button>
+                  <label
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-stone-800 border border-stone-600 text-[11px] text-amber-200 cursor-pointer"
+                    title="Tự động bắn in tem cốc ngay sau khi chốt thanh toán"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={autoPrintLabelsOnCheckout}
+                      onChange={(e) => {
+                        const next = e.target.checked
+                        setAutoPrintLabelsOnCheckout(next)
+                        try {
+                          localStorage.setItem('pos_auto_print_labels_checkout', next ? '1' : '0')
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                    />
+                    <span>🏷️ Tự in tem</span>
+                  </label>
                 </>
               )}
             </div>
           ) : canManageCash ? (
-            <form onSubmit={handleOpenShift} className="flex items-center gap-1.5">
+            <form onSubmit={(e) => handleOpenShift(e, false)} className="flex items-center gap-1.5">
               <span className="text-xs text-amber-300 font-semibold">⚠️ Chưa mở ca:</span>
               <input
                 type="number"
@@ -1497,6 +1596,15 @@ export default function PosPage() {
                 placeholder="Tiền đầu ca..."
                 className="w-28 min-h-9 px-2 py-1 rounded-lg bg-stone-800 border border-stone-600 text-xs text-white"
               />
+              <button
+                type="button"
+                onClick={() => setShowOpenShiftModal(true)}
+                data-testid="pos-open-shift-denom-btn"
+                className="min-h-9 px-2.5 py-1 bg-amber-600 hover:bg-amber-500 rounded-lg text-xs font-bold cursor-pointer"
+                title="Đếm tiền đầu ca theo mệnh giá tờ để khớp quỹ bàn giao"
+              >
+                🧮 Đếm mệnh giá
+              </button>
               <button
                 type="submit"
                 disabled={openingShift}
@@ -1697,10 +1805,38 @@ export default function PosPage() {
         </div>
       )}
 
-      {/* Thanh đơn Lưu Tạm (Hold / Park Orders) */}
-      {heldOrders.length > 0 && (
-        <div className="bg-amber-100 border-b border-amber-300 px-4 py-2 flex flex-wrap items-center gap-2 text-xs">
-          <span className="font-extrabold text-amber-900">⏸️ Đơn đang giữ tạm ({heldOrders.length}):</span>
+      {/* Thanh đơn Lưu Tạm (Online DB /api/order/luu-tam + Local Offline Fallback) */}
+      {(onlineHeldOrders.length > 0 || heldOrders.length > 0) && (
+        <div
+          data-testid="pos-held-orders-bar"
+          className="bg-amber-100 border-b border-amber-300 px-4 py-2 flex flex-wrap items-center gap-2 text-xs"
+        >
+          <span className="font-extrabold text-amber-900">
+            ⏸️ Đơn đang giữ tạm ({onlineHeldOrders.length + heldOrders.length}):
+          </span>
+          {onlineHeldOrders.map((h) => (
+            <div
+              key={`online-${h.maHoaDon || h.id}`}
+              className="inline-flex items-center gap-1 bg-emerald-50 border border-emerald-400 rounded-xl px-2.5 py-1 shadow-xs"
+            >
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const hd = await orderService.getById(h.maHoaDon || h.id)
+                    setActiveInvoice(hd)
+                    toast.success(`☁️ Đã mở lại đơn tạm online #${h.maHoaDon || h.id}`)
+                  } catch {
+                    toast.error('Không thể tải chi tiết đơn lưu tạm online!')
+                  }
+                }}
+                className="font-bold text-emerald-900 hover:underline cursor-pointer"
+              >
+                ☁️ {h.tenKhachVangLai || h.ghiChu || h.label || `Đơn tạm #${h.maHoaDon || h.id}`}
+                {h.soMon ? ` (${h.soMon} món)` : ''}
+              </button>
+            </div>
+          ))}
           {heldOrders.map((h) => (
             <div
               key={h.id}
@@ -1730,22 +1866,26 @@ export default function PosPage() {
 
       <div className="flex-1 p-4 grid grid-cols-1 lg:grid-cols-12 gap-4">
         <div className="lg:col-span-8 space-y-4">
-          <TableMap
-            tables={tables}
-            selectedTable={selectedTable}
-            onSelectTable={handleSelectTable}
-            onRefresh={loadPosData}
-            userRole={user?.vaiTro}
-          />
-          <MenuGrid
-            menu={menu}
-            onPickProduct={setPickingProduct}
-            onQuickAdd={(item) => {
-              addToCart(item)
-              toast.success(`+1 ${item.tenMon} (${item.kichThuoc})`, { duration: 1200 })
-            }}
-            searchInputRef={searchInputRef}
-          />
+          <PosErrorBoundary section="Sơ đồ bàn (TableMap)">
+            <TableMap
+              tables={tables}
+              selectedTable={selectedTable}
+              onSelectTable={handleSelectTable}
+              onRefresh={loadPosData}
+              userRole={user?.vaiTro}
+            />
+          </PosErrorBoundary>
+          <PosErrorBoundary section="Thực đơn (MenuGrid)">
+            <MenuGrid
+              menu={menu}
+              onPickProduct={setPickingProduct}
+              onQuickAdd={(item) => {
+                addToCart(item)
+                toast.success(`+1 ${item.tenMon} (${item.kichThuoc})`, { duration: 1200 })
+              }}
+              searchInputRef={searchInputRef}
+            />
+          </PosErrorBoundary>
         </div>
 
         <div className="lg:col-span-4 flex flex-col gap-3">
@@ -1755,7 +1895,8 @@ export default function PosPage() {
             inputRef={customerInputRef}
           />
           <div className="flex-1">
-            <Cart
+            <PosErrorBoundary section="Giỏ hàng & Thanh toán (Cart)">
+              <Cart
               selectedTable={selectedTable}
               orderType={orderType}
               onChangeOrderType={setOrderType}
@@ -1787,6 +1928,7 @@ export default function PosPage() {
                       danhSachMon: buildOrderPayload().danhSachMon,
                     })
                     clearCart()
+                    await loadLiveOperations()
                     toast.success(res.message || '⏸️ Đã lưu tạm đơn lên máy chủ!')
                     return
                   } catch {
@@ -1831,10 +1973,12 @@ export default function PosPage() {
               submitting={submitting}
               paying={paying}
             />
+            </PosErrorBoundary>
           </div>
         </div>
       </div>
 
+      <PosErrorBoundary section="Hộp thoại nghiệp vụ (Modals)">
       <ToppingModal
         key={editingCartTarget ? `edit-${editingCartTarget.idx}-${editingCartTarget.item.cartKey}` : pickingProduct?.maMon || 'none'}
         product={editingCartTarget?.product || pickingProduct}
@@ -1863,13 +2007,66 @@ export default function PosPage() {
 
       <DongCaModal
         isOpen={showDongCaModal}
-        onClose={() => setShowDongCaModal(false)}
+        onClose={() => {
+          setShowDongCaModal(false)
+          setPreCloseWarning(null)
+        }}
         currentShift={currentShift}
+        preCloseWarning={preCloseWarning}
         onShiftClosed={() => {
           setCurrentShift(null)
+          setPreCloseWarning(null)
           loadPosData()
         }}
       />
+
+      {showOpenShiftModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div>
+                <h3 className="font-extrabold text-base text-gray-800">
+                  🧮 Kiểm Đếm Quỹ Đầu Ca Theo Mệnh Giá
+                </h3>
+                <p className="text-xs text-gray-500">
+                  Đếm khớp từng tờ tiền lẻ nhận bàn giao để triệt tiêu cảnh báo lệch ca
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowOpenShiftModal(false)}
+                className="w-9 h-9 rounded-full bg-gray-100 hover:bg-gray-200 font-bold text-gray-600 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <DenominationCounterGrid
+              counts={openShiftCounts}
+              onChange={setOpenShiftCounts}
+              totalLabel="Tổng quỹ tiền mặt đầu ca:"
+            />
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowOpenShiftModal(false)}
+                className="flex-1 min-h-11 border rounded-xl text-xs font-bold text-gray-700 cursor-pointer"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                disabled={openingShift}
+                onClick={(e) => handleOpenShift(e, true)}
+                className="flex-1 min-h-11 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold cursor-pointer disabled:opacity-50"
+              >
+                {openingShift
+                  ? 'Đang mở ca...'
+                  : `✅ Xác nhận Mở ca (${formatVND(calcDenominationTotal(openShiftCounts))})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <PaidOrdersRefundModal
         isOpen={showPaidHistoryModal}
@@ -2029,6 +2226,7 @@ export default function PosPage() {
         onRefreshPos={loadLiveOperations}
         onCountsChange={setEcoCounts}
       />
+      </PosErrorBoundary>
     </div>
   )
 }

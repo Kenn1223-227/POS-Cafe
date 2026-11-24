@@ -14,7 +14,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { buildReceiptK80, buildZReportK80, buildCashDrawerKickBuffer } = require('./escposBuilder');
+const { buildReceiptK80, buildRasterReceiptBuffer, buildZReportK80, buildCashDrawerKickBuffer } = require('./escposBuilder');
 const { buildCupLabelsTspl } = require('./tsplBuilder');
 const {
     dispatchRawBuffer,
@@ -381,7 +381,16 @@ function ensureJobBuffers(job, { failoverHeader = null } = {}) {
             body.kickDrawer !== undefined
                 ? Boolean(body.kickDrawer)
                 : Boolean(bridgeConfig.receiptPrinter.kickDrawerOnCash && body.isCashPayment);
-        const built = buildReceiptK80({
+        const built = body.rasterBase64
+            ? {
+                  ...buildRasterReceiptBuffer({
+                      rasterBase64: body.rasterBase64,
+                      kickDrawer,
+                      autoCut: bridgeConfig.receiptPrinter.autoCut !== false,
+                  }),
+                  previewText: '[RASTER_GS_V_0_VIETNAMESE_K80]',
+              }
+            : buildReceiptK80({
             hoaDon: body.hoaDon,
             tenQuan: body.tenQuan || 'QUAN CA PHE POS',
             diaChi: body.diaChi || '',

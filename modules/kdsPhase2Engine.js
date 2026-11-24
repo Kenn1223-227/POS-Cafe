@@ -226,56 +226,50 @@ async function recordAndEmitOrderNewByStation(
 // TRỤ CỘT 1.2: KHÓA IDEMPOTENCY 2-PHA (PROCESSING -> DONE / FAILED)
 // Chạy ngoài business transaction để các request đúp cách nhau 50ms thấy ngay PROCESSING!
 // -----------------------------------------------------------------------------
-async function acquireIdempotencyLock(pool, { tenantId = 'DEFAULT', khoaIdem, maNV, dauVanTay }) {
+async function acquireIdempotencyLock(
+    pool,
+    { tenantId = 'DEFAULT', khoaIdem, maNV, dauVanTay, requestFingerprint = null, leaseSeconds = 60 }
+) {
     if (!khoaIdem) return { acquired: true, disabled: true };
+    const tId = String(tenantId || 'DEFAULT');
+    const fp = requestFingerprint ? String(requestFingerprint).slice(0, 64) : (dauVanTay ? String(dauVanTay).slice(0, 64) : null);
+    const ttlSec = Math.max(5, Math.min(300, Number(leaseSeconds) || 60));
 
-    return pool.withTenant(tenantId, async (client) => {
-        // Thử chiếm khóa mới với trạng thái PROCESSING
+    return pool.withTenant(tId, async (client) => {
+        // 1 câu SQL nguyên tử: chiếm khóa mới HOẶC thu hồi khóa FAILED / zombie PROCESSING quá hạn lease (60s)
         const ins = await client.query(
-            `INSERT INTO public.donhang_idempotency (khoaidem, manv, dauvantay, trangthai)
-             VALUES ($1, $2, $3, 'PROCESSING')
-             ON CONFLICT (khoaidem) DO NOTHING
+            `INSERT INTO public.donhang_idempotency (
+                 tenantid, khoaidem, manv, dauvantay, request_fingerprint, trangthai, lease_expires_at, thoigiantao
+             )
+             VALUES ($1, $2, $3, $4, $5, 'PROCESSING', now() + ($6::int * interval '1 second'), now())
+             ON CONFLICT (tenantid, khoaidem) DO UPDATE
+                SET trangthai = 'PROCESSING',
+                    manv = EXCLUDED.manv,
+                    dauvantay = EXCLUDED.dauvantay,
+                    request_fingerprint = EXCLUDED.request_fingerprint,
+                    lease_expires_at = now() + ($6::int * interval '1 second'),
+                    thoigiantao = now()
+              WHERE public.donhang_idempotency.trangthai = 'FAILED'
+                 OR (
+                     public.donhang_idempotency.trangthai = 'PROCESSING'
+                     AND public.donhang_idempotency.lease_expires_at < now()
+                 )
              RETURNING khoaidem`,
-            [khoaIdem, String(maNV), dauVanTay]
+            [tId, khoaIdem, String(maNV), dauVanTay || null, fp, ttlSec]
         );
         if (ins.rows.length > 0) {
             return { acquired: true, state: 'PROCESSING' };
         }
 
-        // Nếu bản ghi cũ bị FAILED -> cho phép chiếm lại (retry an toàn)
-        const retry = await client.query(
-            `UPDATE public.donhang_idempotency
-                SET trangthai = 'PROCESSING',
-                    manv = $2,
-                    dauvantay = $3,
-                    thoigiantao = now()
-              WHERE khoaidem = $1
-                AND trangthai = 'FAILED'
-              RETURNING khoaidem`,
-            [khoaIdem, String(maNV), dauVanTay]
-        );
-        if (retry.rows.length > 0) {
-            return { acquired: true, state: 'PROCESSING' };
-        }
-
-        // Đọc trạng thái bản ghi đang có
+        // Đọc trạng thái bản ghi đang có trong đúng tenant
         const curRes = await client.query(
-            `SELECT manv, dauvantay, trangthai, mahoadon, mahoadonkq, lahoadonmoi, dsmacthd, responsejson, httpstatus
+            `SELECT manv, dauvantay, request_fingerprint, trangthai, mahoadon, mahoadonkq, lahoadonmoi, dsmacthd, responsejson, httpstatus
                FROM public.donhang_idempotency
-              WHERE khoaidem = $1`,
-            [khoaIdem]
+              WHERE tenantid = $1 AND khoaidem = $2`,
+            [tId, khoaIdem]
         );
         const k = curRes.rows[0];
         if (!k) {
-            // Hiếm gặp: vừa bị dọn -> thử insert lại 1 lần
-            const retryIns = await client.query(
-                `INSERT INTO public.donhang_idempotency (khoaidem, manv, dauvantay, trangthai)
-                 VALUES ($1, $2, $3, 'PROCESSING')
-                 ON CONFLICT (khoaidem) DO NOTHING
-                 RETURNING khoaidem`,
-                [khoaIdem, String(maNV), dauVanTay]
-            );
-            if (retryIns.rows.length > 0) return { acquired: true, state: 'PROCESSING' };
             return { acquired: false, state: 'IN_FLIGHT' };
         }
 
@@ -304,18 +298,20 @@ async function completeIdempotencyLock(
     { tenantId = 'DEFAULT', khoaIdem, maHoaDon, laHoaDonMoi = true, dsMaCTHD = [], responseJson = null, httpStatus = 200 }
 ) {
     if (!khoaIdem) return;
-    await pool.withTenant(tenantId, async (client) => {
+    const tId = String(tenantId || 'DEFAULT');
+    await pool.withTenant(tId, async (client) => {
         await client.query(
             `UPDATE public.donhang_idempotency
                 SET trangthai = 'DONE',
-                    mahoadon = $2::text,
-                    mahoadonkq = $3::varchar,
-                    lahoadonmoi = $4,
-                    dsmacthd = $5::jsonb,
-                    responsejson = $6::jsonb,
-                    httpstatus = $7
-              WHERE khoaidem = $1`,
+                    mahoadon = $3::text,
+                    mahoadonkq = $4::varchar,
+                    lahoadonmoi = $5,
+                    dsmacthd = $6::jsonb,
+                    responsejson = $7::jsonb,
+                    httpstatus = $8
+              WHERE tenantid = $1 AND khoaidem = $2`,
             [
+                tId,
                 khoaIdem,
                 String(maHoaDon),
                 String(maHoaDon),
@@ -330,13 +326,14 @@ async function completeIdempotencyLock(
 
 async function failIdempotencyLock(pool, { tenantId = 'DEFAULT', khoaIdem }) {
     if (!khoaIdem) return;
+    const tId = String(tenantId || 'DEFAULT');
     await pool
-        .withTenant(tenantId, async (client) => {
+        .withTenant(tId, async (client) => {
             await client.query(
                 `UPDATE public.donhang_idempotency
                     SET trangthai = 'FAILED'
-                  WHERE khoaidem = $1 AND trangthai = 'PROCESSING'`,
-                [khoaIdem]
+                  WHERE tenantid = $1 AND khoaidem = $2 AND trangthai = 'PROCESSING'`,
+                [tId, khoaIdem]
             );
         })
         .catch(() => {});

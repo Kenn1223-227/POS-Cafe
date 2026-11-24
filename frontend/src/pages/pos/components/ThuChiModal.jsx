@@ -50,11 +50,23 @@ const LOAI_OPTIONS = [
   },
 ]
 
+const DANH_MUC_CHI_OPTIONS = [
+  { id: 'MUA_DA', label: '🧊 Mua đá viên' },
+  { id: 'NGUYEN_LIEU_GAP', label: '🥛 Nguyên liệu gấp' },
+  { id: 'SHIP', label: '🛵 Phí giao hàng / Ship' },
+  { id: 'VE_SINH', label: '🧹 Vệ sinh / Tạp phẩm' },
+  { id: 'KHAC', label: '📦 Chi phí khác' },
+]
+
 export default function ThuChiModal({ isOpen, onClose, onSuccess }) {
   const [loaiThuChi, setLoaiThuChi] = useState('CHI')
+  const [danhMucChi, setDanhMucChi] = useState('MUA_DA')
   const [soTien, setSoTien] = useState('')
   const [lyDo, setLyDo] = useState('')
   const [anhChungTuUrl, setAnhChungTuUrl] = useState('')
+  const [idChungTu, setIdChungTu] = useState('')
+  const [uploadingPhoto, setUploadingPhoto] = useState(false)
+  const [managerPin, setManagerPin] = useState('')
   const [recentList, setRecentList] = useState([])
   const [previewImg, setPreviewImg] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -74,21 +86,35 @@ export default function ThuChiModal({ isOpen, onClose, onSuccess }) {
 
   const currentOpt = LOAI_OPTIONS.find((o) => o.id === loaiThuChi) || LOAI_OPTIONS[1]
 
+  const soTienNum = Number(soTien || 0)
+  const needsReceiptPhoto = loaiThuChi === 'CHI' && soTienNum >= 50000
+  const needsManagerPin = loaiThuChi === 'CHI' && soTienNum >= 200000
+
   const handlePickPhoto = async (e) => {
     const file = e.target.files?.[0]
     if (!file) return
+    setUploadingPhoto(true)
     try {
       const compressed = await compressReceiptImage(file)
       setAnhChungTuUrl(compressed)
-      toast.success('📷 Đã đính kèm ảnh chứng từ!')
+      const uploaded = await caService.uploadReceiptPhoto({
+        dataUrl: compressed,
+        mimeType: 'image/jpeg',
+      })
+      const nextId = uploaded?.idChungTu || uploaded?.id || ''
+      setIdChungTu(nextId)
+      toast.success(nextId ? `📷 Đã tải ảnh chứng từ (#${nextId.slice(0, 8)})!` : '📷 Đã đính kèm ảnh chứng từ!')
     } catch {
-      toast.error('Không thể xử lý ảnh chứng từ!')
+      setIdChungTu('')
+      toast.error('Không thể tải lên ảnh chứng từ!')
+    } finally {
+      setUploadingPhoto(false)
     }
   }
 
   const handleSubmit = async (e) => {
     e.preventDefault()
-    if (!soTien || Number(soTien) <= 0) {
+    if (!soTien || soTienNum <= 0) {
       toast.error('Vui lòng nhập số tiền hợp lệ (> 0)')
       return
     }
@@ -100,19 +126,32 @@ export default function ThuChiModal({ isOpen, onClose, onSuccess }) {
       )
       return
     }
+    if (needsReceiptPhoto && !idChungTu) {
+      toast.error('Phiếu chi từ 50.000đ trở lên bắt buộc tải lên ảnh chụp chứng từ!')
+      return
+    }
+    if (needsManagerPin && !managerPin.trim()) {
+      toast.error('Phiếu chi từ 200.000đ trở lên bắt buộc nhập mã PIN Quản lý phê duyệt!')
+      return
+    }
 
     setLoading(true)
     try {
       const res = await caService.thuChi({
         loaiThuChi,
-        soTien: Number(soTien),
+        danhMucChi: loaiThuChi === 'CHI' ? danhMucChi : loaiThuChi === 'RUT_KET' ? 'RUT_KET' : 'KHAC',
+        soTien: soTienNum,
         lyDo: lyDo.trim(),
+        idChungTu: idChungTu || undefined,
         anhChungTuUrl: anhChungTuUrl || null,
+        ...(managerPin.trim() ? { managerPin: managerPin.trim() } : {}),
       })
       toast.success(res?.message || `Đã ghi nhận khoản ${loaiThuChi} thành công!`)
       setSoTien('')
       setLyDo('')
       setAnhChungTuUrl('')
+      setIdChungTu('')
+      setManagerPin('')
       onSuccess()
       onClose()
     } catch {
@@ -168,6 +207,24 @@ export default function ThuChiModal({ isOpen, onClose, onSuccess }) {
             💡 {currentOpt.desc}
           </div>
 
+          {loaiThuChi === 'CHI' && (
+            <div>
+              <label className="block text-xs font-bold text-gray-600 mb-1">Danh mục chi</label>
+              <select
+                value={danhMucChi}
+                onChange={(e) => setDanhMucChi(e.target.value)}
+                data-testid="thuchi-danhmuc-select"
+                className="w-full px-3 py-2 border rounded-xl text-xs font-semibold outline-none focus:ring-2 focus:ring-amber-600 bg-white"
+              >
+                {DANH_MUC_CHI_OPTIONS.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <div>
             <label className="block text-xs font-bold text-gray-600 mb-1">Số tiền (VND)</label>
             <input
@@ -177,10 +234,29 @@ export default function ThuChiModal({ isOpen, onClose, onSuccess }) {
               step="1000"
               value={soTien}
               onChange={(e) => setSoTien(e.target.value)}
+              data-testid="thuchi-amount-input"
               placeholder="Nhập số tiền..."
               className="w-full px-3 py-2 border rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-amber-600"
             />
           </div>
+
+          {needsManagerPin && (
+            <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 space-y-1.5">
+              <label className="block text-xs font-bold text-rose-800">
+                🔐 Mã PIN Quản lý phê duyệt (bắt buộc cho phiếu chi &ge; 200.000đ) *
+              </label>
+              <input
+                type="password"
+                inputMode="numeric"
+                autoComplete="off"
+                value={managerPin}
+                onChange={(e) => setManagerPin(e.target.value)}
+                data-testid="thuchi-manager-pin-input"
+                placeholder="Nhập mã PIN Quản lý..."
+                className="w-full px-3 py-2 border border-rose-300 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-rose-500 bg-white"
+              />
+            </div>
+          )}
 
           <div>
             <label className="block text-xs font-bold text-gray-600 mb-1">
@@ -196,18 +272,40 @@ export default function ThuChiModal({ isOpen, onClose, onSuccess }) {
             />
           </div>
 
-          {/* Chụp / Đính kèm ảnh biên nhận hoặc chứng từ chi tại quầy (AnhChungTuUrl) */}
-          <div className="p-2.5 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-between gap-2 text-xs">
-            <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-gray-300 hover:bg-gray-100 font-bold text-gray-700 cursor-pointer">
-              <span>📷 {anhChungTuUrl ? 'Đổi ảnh chứng từ' : 'Chụp / Đính kèm ảnh biên nhận'}</span>
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={handlePickPhoto}
-                className="hidden"
-              />
-            </label>
+          {/* Chụp / Đính kèm ảnh biên nhận hoặc chứng từ chi tại quầy (upload thật -> idChungTu) */}
+          <div
+            className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 text-xs ${
+              needsReceiptPhoto && !idChungTu
+                ? 'bg-amber-50 border-amber-300'
+                : 'bg-gray-50 border-gray-200'
+            }`}
+          >
+            <div className="space-y-0.5">
+              <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-gray-300 hover:bg-gray-100 font-bold text-gray-700 cursor-pointer">
+                <span>
+                  {uploadingPhoto
+                    ? '⏳ Đang tải ảnh...'
+                    : anhChungTuUrl
+                    ? '📷 Đổi ảnh chứng từ'
+                    : needsReceiptPhoto
+                    ? '📷 Tải ảnh chứng từ (Bắt buộc >= 50k) *'
+                    : '📷 Chụp / Đính kèm ảnh biên nhận'}
+                </span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  data-testid="thuchi-receipt-file"
+                  onChange={handlePickPhoto}
+                  className="hidden"
+                />
+              </label>
+              {idChungTu && (
+                <p className="text-[10px] text-emerald-700 font-semibold">
+                  ✅ Đã xác thực chứng từ: {idChungTu}
+                </p>
+              )}
+            </div>
             {anhChungTuUrl && (
               <div className="flex items-center gap-2">
                 <img
@@ -218,7 +316,10 @@ export default function ThuChiModal({ isOpen, onClose, onSuccess }) {
                 />
                 <button
                   type="button"
-                  onClick={() => setAnhChungTuUrl('')}
+                  onClick={() => {
+                    setAnhChungTuUrl('')
+                    setIdChungTu('')
+                  }}
                   className="text-red-600 font-bold cursor-pointer"
                 >
                   ✕

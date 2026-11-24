@@ -13,6 +13,7 @@
     "test:unit": "node --test tests/unit/*.test.js",
     "test:integration": "node --test tests/integration/*.test.js",
     "test:wave1": "node --test tests/unit/vietqrEmvco.test.js tests/unit/printBridgeSecurity.test.js tests/unit/wave1CoreLogic.test.js tests/integration/00-rls-guard.test.js tests/integration/wave1-*.test.js",
+    "test:wave2": "node --test tests/unit/safeWac.test.js tests/unit/printBuilders.test.js tests/integration/wave2-idempotency-pnl.test.js tests/realtime/redis-socket-cluster.test.js tests/realtime/graceful-shutdown.test.js tests/e2e/qa01-pwa-offline-outbox.spec.js tests/e2e/pos-split-brain-modals.spec.js tests/e2e/print-bridge-security.spec.js",
     "test:phanhe7": "node scripts/test-phanhe7-unit.js",
     "test:phanhe1": "node scripts/test-phanhe1-unit.js",
     "test:phanhe1:integration": "node scripts/test-phanhe1-integration.js",
@@ -31,10 +32,12 @@
   "author": "Khang",
   "license": "ISC",
   "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
     "@supabase/server": "^1.9.2",
     "cors": "^2.8.6",
     "dotenv": "^18.0.8",
     "express": "^5.3.0",
+    "ioredis": "^6.1.0",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.23.1",
     "socket.io": "^4.8.4"
