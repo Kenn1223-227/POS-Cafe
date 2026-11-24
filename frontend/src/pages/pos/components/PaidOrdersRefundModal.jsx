@@ -105,11 +105,11 @@ export default function PaidOrdersRefundModal({ isOpen, onClose, isManager, onRe
       const validMenus = Array.isArray(menus) ? menus.filter((m) => !m.tamHet) : []
       setMenuList(validMenus)
       const swappable = (detail?.danhSachMon || []).filter(
-        (m) => !m.daHuy && m.trangThaiPhaChe === 'ChoPhaChe'
+        (m) => !m.daHuy && ['ChoPhaChe', 'ChoPha', 'DangLam', 'DaXong'].includes(m.trangThaiPhaChe)
       )
       if (swappable.length === 0) {
         toast.error(
-          'Tất cả các món trong đơn này đã được Barista nhận làm hoặc hoàn thành, không thể đổi ngang!'
+          'Tất cả các món trong đơn này đã được phục vụ hoặc đã hủy, không thể đổi món!'
         )
         return
       }
@@ -137,6 +137,13 @@ export default function PaidOrdersRefundModal({ isOpen, onClose, isManager, onRe
   const handleSubmitSwap = async (e) => {
     e.preventDefault()
     if (!swapOrderDetail || !selectedSwapCTHD || !maMonMoi) return
+    const targetOldItem = (swapOrderDetail.danhSachMon || []).find(
+      (m) => String(m.maCTHD) === String(selectedSwapCTHD)
+    )
+    const isInProgressOrDone = ['DangLam', 'DaXong'].includes(targetOldItem?.trangThaiPhaChe)
+    if (isInProgressOrDone && !isManager && !/^\d{4,6}$/.test(managerPin.trim())) {
+      return toast.error('Đổi món đang pha / đã xong yêu cầu mã PIN Quản lý (4–6 số) để xác nhận hao hụt!')
+    }
     setSubmitting(true)
     try {
       const res = await orderService.swapOrderItem({
@@ -149,9 +156,13 @@ export default function PaidOrdersRefundModal({ isOpen, onClose, isManager, onRe
         },
         phuongThucBuHoan: ptttChenhLech,
         lyDo: lyDoDoi.trim() || 'Khách xin đổi món tại quầy',
+        forceWasteIfInProgress: isInProgressOrDone,
+        managerPin: isInProgressOrDone && managerPin.trim() ? managerPin.trim() : null,
+        maNVDuyet: isInProgressOrDone && !isManager && maNVDuyet ? maNVDuyet : null,
       })
       toast.success(res.message, { duration: 5000 })
       setSwapOrderDetail(null)
+      setManagerPin('')
       await loadHistory()
       if (typeof onRefundSuccess === 'function') {
         onRefundSuccess(res)
@@ -240,11 +251,12 @@ export default function PaidOrdersRefundModal({ isOpen, onClose, isManager, onRe
         {swapOrderDetail ? (
           (() => {
             const swappableItems = (swapOrderDetail.danhSachMon || []).filter(
-              (m) => !m.daHuy && m.trangThaiPhaChe === 'ChoPhaChe'
+              (m) => !m.daHuy && ['ChoPhaChe', 'ChoPha', 'DangLam', 'DaXong'].includes(m.trangThaiPhaChe)
             )
             const currentOldItem = swappableItems.find(
               (m) => String(m.maCTHD) === String(selectedSwapCTHD)
             )
+            const isInProgressOrDone = ['DangLam', 'DaXong'].includes(currentOldItem?.trangThaiPhaChe)
             const newProduct = menuList.find((m) => m.maMon === maMonMoi)
             const newSizeObj =
               newProduct?.sizes?.find((s) => s.kichThuoc === kichThuocMoi) ||
@@ -274,7 +286,7 @@ export default function PaidOrdersRefundModal({ isOpen, onClose, isManager, onRe
 
                 <div>
                   <label className="block font-bold text-stone-700 mb-1">
-                    1. Chọn món đang chờ pha (`ChoPhaChe`) cần đổi:
+                    1. Chọn món cần đổi (hỗ trợ cả món đang pha / đã xong kèm PIN duyệt hao hụt):
                   </label>
                   <select
                     value={selectedSwapCTHD}
@@ -291,11 +303,45 @@ export default function PaidOrdersRefundModal({ isOpen, onClose, isManager, onRe
                   >
                     {swappableItems.map((m) => (
                       <option key={m.maCTHD} value={m.maCTHD}>
-                        {m.tenMon} (Size {m.kichThuoc}) ×{m.soLuong} — {formatVND(m.thanhTien)}
+                        {m.tenMon} (Size {m.kichThuoc}) ×{m.soLuong} [{m.trangThaiPhaChe}] — {formatVND(m.thanhTien)}
                       </option>
                     ))}
                   </select>
                 </div>
+
+                {isInProgressOrDone && (
+                  <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 space-y-2">
+                    <p className="font-bold text-amber-900">
+                      ⚠️ Món đã sang trạng thái <b>{currentOldItem?.trangThaiPhaChe}</b> — đổi món sẽ ghi nhận <b>Hao hụt (Waste)</b>!
+                    </p>
+                    {!isManager && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {approvers.length > 0 && (
+                          <select
+                            value={maNVDuyet}
+                            onChange={(e) => setMaNVDuyet(e.target.value)}
+                            className="px-3 py-2 border border-amber-400 rounded-xl bg-white font-bold"
+                          >
+                            {approvers.map((ap) => (
+                              <option key={ap.maNV} value={ap.maNV}>
+                                {ap.laCaTruong && Number(ap.vaiTro) !== 1 ? '🎖️ Ca trưởng: ' : '👔 Quản lý: '}
+                                {ap.tenNV} ({ap.maNV})
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        <input
+                          type="password"
+                          required
+                          value={managerPin}
+                          onChange={(e) => setManagerPin(e.target.value)}
+                          placeholder="Nhập PIN Quản lý 4–6 số..."
+                          className="px-3 py-2 border border-amber-400 rounded-xl bg-white font-mono text-sm tracking-widest"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   <div className="sm:col-span-2">

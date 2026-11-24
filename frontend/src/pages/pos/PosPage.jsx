@@ -13,6 +13,7 @@ import { ecosystemService } from '../../services/ecosystemService'
 import { useAuthStore } from '../../store/authStore'
 import { usePosStore } from '../../store/posStore'
 import { useSocketEvents } from '../../socket/useSocketEvents'
+import { getSocket } from '../../socket/socketClient'
 import { useBarcodeScanner } from '../../hooks/useBarcodeScanner'
 import { ROLES } from '../../constants/roles'
 import TableMap from './components/TableMap'
@@ -468,11 +469,69 @@ export default function PosPage() {
     }
   }, [activeInvoiceId, setActiveInvoice])
 
+  useEffect(() => {
+    try {
+      const sock = getSocket()
+      if (sock?.connected) {
+        sock.emit('room:subscribe', {
+          branchId: user?.branchId || 'DEFAULT',
+          role: 'POS',
+        })
+      }
+    } catch {
+      // ignore
+    }
+  }, [user?.branchId])
+
   useSocketEvents({
     connect: () => {
       setIsOnline(true)
+      try {
+        getSocket()?.emit('room:subscribe', {
+          branchId: user?.branchId || 'DEFAULT',
+          role: 'POS',
+        })
+      } catch {
+        // ignore
+      }
       void triggerOutboxSync(false)
       void loadPosData()
+    },
+    'menu:86_updated': (payload) => {
+      const prods = Array.isArray(payload?.affectedProducts) ? payload.affectedProducts : []
+      const mods = Array.isArray(payload?.affectedModifiers) ? payload.affectedModifiers : []
+      const tps = Array.isArray(payload?.affectedToppings) ? payload.affectedToppings : []
+      if (prods.length > 0 || mods.length > 0) {
+        const prodMap = new Map(prods.map((p) => [p.maMon, Boolean(p.tamHet)]))
+        const modMap = new Map(mods.map((m) => [Number(m.optionId), Boolean(m.tamHet)]))
+        setMenu((prev) =>
+          prev.map((m) => ({
+            ...m,
+            tamHet: prodMap.has(m.maMon) ? prodMap.get(m.maMon) : m.tamHet,
+            modifierGroups: Array.isArray(m.modifierGroups)
+              ? m.modifierGroups.map((g) => ({
+                  ...g,
+                  options: (g.options || []).map((o) =>
+                    modMap.has(Number(o.id)) ? { ...o, tamHet: modMap.get(Number(o.id)) } : o
+                  ),
+                }))
+              : m.modifierGroups,
+          }))
+        )
+      }
+      if (tps.length > 0) {
+        const tpMap = new Map(tps.map((t) => [t.maTopping, Boolean(t.tamHet)]))
+        setToppings((prev) =>
+          prev.map((t) => (tpMap.has(t.maTopping) ? { ...t, tamHet: tpMap.get(t.maTopping) } : t))
+        )
+      }
+      if (payload?.tenNL) {
+        toast(
+          payload.action === 'UNLOCK' || payload.tamHet === false
+            ? `✅ Đã mở bán lại theo ${payload.tenNL}`
+            : `🚫 Tạm hết (86) chi nhánh ${payload.branchId || ''}: ${payload.tenNL}`
+        )
+      }
     },
     BAN_THAY_DOI: ({ maBan, trangThai }) => {
       setTables((prev) => prev.map((b) => (b.maBan === maBan ? { ...b, trangThai } : b)))

@@ -322,6 +322,17 @@ export default function BaristaPage() {
       toast.error(`⚡ VÉ LÀM LẠI (0đ • Ưu tiên cao nhất): ${info?.mon?.tenMon || ''}`, { duration: 7000 })
       void dongBo()
     },
+    ORDER_RUSH_UPDATED: (info) => {
+      if (info?.seq) lastSeqRef.current = Math.max(lastSeqRef.current, Number(info.seq))
+      if (info?.rush && soundRef.current) playRushOrRemakeSound()
+      toast(
+        info?.rush
+          ? `🔥 ĐƠN GẤP: #${info.maHoaDon} vừa được đặt ưu tiên cao nhất!`
+          : `Đã gỡ cờ GẤP cho đơn #${info?.maHoaDon}`,
+        { duration: 5000 }
+      )
+      void dongBo()
+    },
     ORDER_ALL_READY: (info) => {
       if (soundRef.current) playAllReadySound()
       toast.success(
@@ -619,10 +630,22 @@ export default function BaristaPage() {
       }
       const sl = Number(item.soLuong || 1)
       acc[key].tongLy += sl
+      const modLabel =
+        Array.isArray(item.modifiersSnapshot) && item.modifiersSnapshot.length > 0
+          ? item.modifiersSnapshot
+              .map((m) => {
+                const mQty = Number(m.qty ?? m.soLuong ?? 1)
+                const lbl = m.tenInNgan || m.tenOption || ''
+                return mQty > 1 ? `${lbl} x${mQty}` : lbl
+              })
+              .filter(Boolean)
+              .join(', ')
+          : ''
       const tpLabel = item.toppings?.length
         ? ` (+${item.toppings.map((t) => t.tenTopping).join(', ')})`
         : ''
-      const noteKey = `${(item.ghiChu || 'Bình thường').trim()}${tpLabel}`
+      const baseNote = [modLabel, (item.ghiChu || '').trim()].filter(Boolean).join(' • ') || 'Bình thường'
+      const noteKey = `${baseNote}${tpLabel}`
       acc[key].nhomGhiChuMap[noteKey] = (acc[key].nhomGhiChuMap[noteKey] || 0) + sl
       acc[key].chiTiet.push(item)
       return acc
@@ -1080,6 +1103,18 @@ export default function BaristaPage() {
                                 {item.tenBan || 'Mang đi'} (#{item.maHoaDon}) • x{item.soLuong}
                               </span>
                             </p>
+                            {Array.isArray(item.modifiersSnapshot) && item.modifiersSnapshot.length > 0 && (
+                              <p className="text-sky-300 font-semibold">
+                                ⚙️{' '}
+                                {item.modifiersSnapshot
+                                  .map((m) => {
+                                    const mQty = Number(m.qty ?? m.soLuong ?? 1)
+                                    const lbl = m.tenInNgan || m.tenOption || ''
+                                    return mQty > 1 ? `${lbl} x${mQty}` : lbl
+                                  })
+                                  .join(', ')}
+                              </p>
+                            )}
                             {item.toppings?.length > 0 && (
                               <p className="text-amber-100">
                                 + {item.toppings.map((t) => `${t.tenTopping} x${t.soLuong}`).join(', ')}
@@ -1242,14 +1277,57 @@ export default function BaristaPage() {
                           Size {item.kichThuoc}
                         </span>
                       </div>
-                      <div className="flex items-center justify-between mt-2">
+                      <div className="flex items-center justify-between mt-2 gap-2">
                         <p className="text-2xl font-black text-emerald-400">×{item.soLuong}</p>
-                        {nhan && (
-                          <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${nhan.cls}`}>
-                            {nhan.text}
-                          </span>
-                        )}
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const nextRush = !(Number(item.mucDoUuTien || 0) >= 2)
+                                await orderService.setOrderRush(item.maHoaDon, { rush: nextRush })
+                                toast.success(
+                                  nextRush
+                                    ? `🔥 Đã đặt ưu tiên GẤP đơn #${item.maHoaDon}`
+                                    : `Đã gỡ cờ GẤP đơn #${item.maHoaDon}`
+                                )
+                                void dongBo()
+                              } catch {
+                                // interceptor handles error
+                              }
+                            }}
+                            className={`px-2 py-1 rounded-lg text-xs font-extrabold cursor-pointer ${
+                              Number(item.mucDoUuTien || 0) >= 2
+                                ? 'bg-red-600 text-white'
+                                : 'bg-stone-700 hover:bg-red-700 text-amber-200'
+                            }`}
+                          >
+                            🔥 {Number(item.mucDoUuTien || 0) >= 2 ? 'GẤP' : 'Đặt gấp'}
+                          </button>
+                          {nhan && (
+                            <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${nhan.cls}`}>
+                              {nhan.text}
+                            </span>
+                          )}
+                        </div>
                       </div>
+
+                      {Array.isArray(item.modifiersSnapshot) && item.modifiersSnapshot.length > 0 && (
+                        <div className="mt-2 p-2 rounded-xl bg-sky-950/60 border border-sky-600/50 text-xs text-sky-200 flex flex-wrap gap-1">
+                          {item.modifiersSnapshot.map((m, idx) => {
+                            const mQty = Number(m.qty ?? m.soLuong ?? 1)
+                            return (
+                              <span
+                                key={`${m.optionId || idx}`}
+                                className="px-2 py-0.5 rounded bg-sky-800/80 font-bold"
+                              >
+                                {m.tenInNgan || m.tenOption}
+                                {mQty > 1 ? ` x${mQty}` : ''}
+                              </span>
+                            )
+                          })}
+                        </div>
+                      )}
 
                       {item.toppings?.length > 0 && (
                         <div className="mt-2.5 p-2.5 rounded-xl bg-stone-900 border border-amber-700/50 text-sm text-amber-100 space-y-0.5">

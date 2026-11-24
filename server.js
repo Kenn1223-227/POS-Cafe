@@ -67,6 +67,7 @@ const {
     failIdempotencyLock,
     cascadeIngredient86,
     autoUn86OnRestock,
+    loadBranchAvailability86Map,
 } = require('./modules/kdsPhase2Engine');
 const { registerKdsPhase2Routes } = require('./modules/kdsPhase2Routes');
 const {
@@ -109,6 +110,12 @@ const {
     layBanDoGiamGiaLoBanhHomNay,
     registerEcosystemPhase8Routes,
 } = require('./modules/ecosystemPhase8Routes');
+const {
+    applyMixedRateTaxToOrder,
+    createAdjustmentDecreaseOnRefund,
+    maskPhoneForRole,
+} = require('./modules/vnTaxAndEInvoiceService');
+const { registerEInvoiceRoutes } = require('./modules/einvoiceRoutes');
 const {
     kiemTraToken,
     kiemTraNhanVienConHoatDong,
@@ -260,7 +267,8 @@ const TRAM_CHE_BIEN_HOP_LE = ['BAR_CHINH', 'BAR_LANH', 'BEP_BANH'];
 
 function suyLuanTramCheBien({ tramCheBien, nhomMon = '', tenMon = '' } = {}) {
     const clean = String(tramCheBien || '').trim().toUpperCase();
-    if (TRAM_CHE_BIEN_HOP_LE.includes(clean) && clean !== 'BAR_CHINH') {
+    // [Wave 3A — P1-03] Tôn trọng mọi trạm hợp lệ đã cấu hình rõ (bao gồm cả 'BAR_CHINH'), không ép nhảy trạm bằng regex!
+    if (TRAM_CHE_BIEN_HOP_LE.includes(clean)) {
         return clean;
     }
     const text = `${nhomMon || ''} ${tenMon || ''}`.toLowerCase();
@@ -270,7 +278,7 @@ function suyLuanTramCheBien({ tramCheBien, nhomMon = '', tenMon = '' } = {}) {
     if (/(trà|đá xay|sinh tố|nước ép|matcha|freeze|soda|yogurt)/i.test(text)) {
         return 'BAR_LANH';
     }
-    return TRAM_CHE_BIEN_HOP_LE.includes(clean) ? clean : 'BAR_CHINH';
+    return 'BAR_CHINH';
 }
 const PHUONG_THUC_TT = ['TIEN_MAT', 'CHUYEN_KHOAN', 'THE', 'VOUCHER', 'VI_KHACH', 'VI_DIEN_TU', 'SAN_GIAO_HANG'];
 const PHUONG_THUC_LEGACY = ['TIEN_MAT', 'CHUYEN_KHOAN', 'THE'];
@@ -1519,9 +1527,9 @@ io.on('connection', (socket) => {
     const tenantId = String(socket.user.tenantId || 'DEFAULT');
     console.log(`Client kết nối Socket [${tenantId}]:`, socket.id);
 
-    // Phòng theo từng nhân viên để ngắt kết nối Socket.IO tức thì khi Quản lý khóa tài khoản
+    // [Wave 3A — P1-03] Phòng cá nhân cô lập đa tenant: t:{tenantId}:user:{maNV}
     if (socket.user.maNV) {
-        socket.join(`user:${socket.user.maNV}`);
+        socket.join(`t:${tenantId}:user:${socket.user.maNV}`);
     }
 
     if (vaiTro === 1) {
@@ -1657,7 +1665,7 @@ io.on('connection', (socket) => {
 
         // Rời toàn bộ các phòng legacy & phòng 3 tầng cũ để đảm bảo cô lập tuyệt đối theo Branch + Station!
         for (const room of [...socket.rooms]) {
-            if (room === socket.id || room === `user:${socket.user.maNV}`) continue;
+            if (room === socket.id || room === `t:${tenantId}:user:${socket.user.maNV}`) continue;
             socket.leave(room);
         }
 
@@ -2319,9 +2327,9 @@ app.get('/api/ban', kiemTraToken, async (req, res) => {
 
 app.get('/api/sanpham', kiemTraToken, async (req, res) => {
     const tenantId = layTenantId(req);
-    const branchId = req.query.branchId ? String(req.query.branchId).trim() : null;
+    const branchId = normalizeBranchId(req.query.branchId || req.headers['x-branch-id'] || req.user?.branchId || 'DEFAULT');
     try {
-        const { rows, bakeryMap, regionalPriceMap, modGroupsByMon } = await pool.withTenant(tenantId, async (client) => {
+        const { rows, bakeryMap, regionalPriceMap, modGroupsByMon, branch86 } = await pool.withTenant(tenantId, async (client) => {
             const spRes = await client.query(`
                 SELECT sp.MaMon, sp.TenMon, sp.NhomMon, COALESCE(sp.TamHet, FALSE) AS TamHet,
                        to_jsonb(sp)->>'tramchebien' AS TramCheBien,
@@ -2331,6 +2339,7 @@ app.get('/api/sanpham', kiemTraToken, async (req, res) => {
                        COALESCE((to_jsonb(sp)->>'tamhettudong')::boolean, FALSE) AS TamHetTuDong,
                        COALESCE((to_jsonb(sp)->>'lahangdonggoi')::boolean, FALSE) AS LaHangDongGoi,
                        COALESCE((to_jsonb(sp)->>'intemcoc')::boolean, TRUE) AS InTemCoc,
+                       COALESCE(to_jsonb(sp)->>'tax_category_code', 'VAT_8_FB') AS TaxCategoryCode,
                        sz.KichThuoc, sz.GiaBan
                 FROM SanPham sp
                 JOIN SanPham_Size sz ON sp.MaMon = sz.MaMon
@@ -2338,6 +2347,7 @@ app.get('/api/sanpham', kiemTraToken, async (req, res) => {
                 ORDER BY sp.NhomMon, sp.TenMon, sz.GiaBan
             `, [tenantId]);
             const bMap = await layBanDoGiamGiaLoBanhHomNay(client, tenantId);
+            const b86 = await loadBranchAvailability86Map(client, tenantId, branchId);
 
             // Giá vùng theo Chi nhánh (SanPham_GiaVung)
             const rpMap = new Map();
@@ -2420,14 +2430,22 @@ app.get('/api/sanpham', kiemTraToken, async (req, res) => {
                 await client.query('ROLLBACK TO SAVEPOINT sp_sp_mods').catch(() => {});
             }
 
-            return { rows: spRes.rows, bakeryMap: bMap, regionalPriceMap: rpMap, modGroupsByMon: mgByMon };
+            return { rows: spRes.rows, bakeryMap: bMap, regionalPriceMap: rpMap, modGroupsByMon: mgByMon, branch86: b86 };
         });
 
         const menu = [];
         const map = new Map();
         rows.forEach(row => {
             const md = bakeryMap.get(row.mamon);
+            const bProd = branch86?.products?.get(String(row.mamon));
             if (!map.has(row.mamon)) {
+                const modGroups = (modGroupsByMon.get(row.mamon) || []).map((g) => ({
+                    ...g,
+                    options: (g.options || []).map((o) => {
+                        const bMod = branch86?.modifiers?.get(String(o.id));
+                        return bMod ? { ...o, tamHet: Boolean(bMod.isSoldOut) } : o;
+                    }),
+                }));
                 const newItem = {
                     maMon: row.mamon,
                     tenMon: row.tenmon,
@@ -2437,14 +2455,20 @@ app.get('/api/sanpham', kiemTraToken, async (req, res) => {
                         nhomMon: row.nhommon,
                         tenMon: row.tenmon,
                     }),
-                    tamHet: Boolean(row.tamhet),
-                    soLuongGioiHan86: row.soluonggioihan86 !== null && row.soluonggioihan86 !== undefined ? Number(row.soluonggioihan86) : null,
-                    tamHetTuDong: Boolean(row.tamhettudong),
+                    tamHet: bProd !== undefined ? Boolean(bProd.isSoldOut) : Boolean(row.tamhet),
+                    soLuongGioiHan86:
+                        bProd && bProd.dailyRemainingQty !== null
+                            ? bProd.dailyRemainingQty
+                            : row.soluonggioihan86 !== null && row.soluonggioihan86 !== undefined
+                              ? Number(row.soluonggioihan86)
+                              : null,
+                    tamHetTuDong: bProd !== undefined ? Boolean(bProd.isAutoCascaded) : Boolean(row.tamhettudong),
                     laHangDongGoi: Boolean(row.lahangdonggoi),
                     inTemCoc: row.intemcoc !== false,
                     laMonThoiGia: Boolean(row.lamonthoigia),
                     donViBanHang: row.donvibanhang || 'LY',
-                    modifierGroups: modGroupsByMon.get(row.mamon) || [],
+                    taxCategoryCode: row.taxcategorycode || 'VAT_8_FB',
+                    modifierGroups: modGroups,
                     bakeryMarkdown: md?.dangGiamGia
                         ? {
                               phanTramGiam: md.phanTramGiam,
@@ -5128,6 +5152,22 @@ app.post('/api/order/:maHoaDon/hoan-tien', kiemTraToken, choPhepVaiTro(1, 4), as
                 batBuoc: true,
             });
 
+            // [Wave 3A — P1-01] Nếu hóa đơn đã phát hành HĐĐT gốc (ISSUED), tự sinh HĐĐT điều chỉnh giảm (Credit Note) vào hàng đợi QUEUED
+            let einvoiceAdjustment = null;
+            await client.query('SAVEPOINT sp_refund_einvoice_adj');
+            try {
+                einvoiceAdjustment = await createAdjustmentDecreaseOnRefund(client, {
+                    tenantId,
+                    branchId: normalizeBranchForShift(tenantId, ca.branchid),
+                    maHoaDon,
+                    refundAmount: tongHoan,
+                    reason: cleanLyDo,
+                });
+                await client.query('RELEASE SAVEPOINT sp_refund_einvoice_adj');
+            } catch {
+                await client.query('ROLLBACK TO SAVEPOINT sp_refund_einvoice_adj').catch(() => {});
+            }
+
             return {
                 maHoaDon,
                 laHoanMotPhan,
@@ -5136,6 +5176,7 @@ app.post('/api/order/:maHoaDon/hoan-tien', kiemTraToken, choPhepVaiTro(1, 4), as
                 phuongThucHoan,
                 hoanKho: thucHienHoanKho,
                 diemThuHoi,
+                einvoiceAdjustmentId: einvoiceAdjustment ? einvoiceAdjustment.id : null,
             };
         }, tenantId);
 
@@ -6129,24 +6170,32 @@ async function handleSplitOrder(req, res) {
 
 app.post('/api/order/:maHoaDon/tach', kiemTraToken, choPhepVaiTro(1, 4), handleSplitOrder);
 
-// [P1] Khóa/Mở nhanh món tạm hết (86'ing) trực tiếp từ Quầy Bar hoặc Quản lý (cô lập TenantId)
+// [Wave 3A — P1-03] Khóa/Mở nhanh món tạm hết (86'ing) cô lập theo Chi nhánh trong branch_availability_86
 app.put('/api/sanpham/:maMon/tamhet', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) => {
     const { maMon } = req.params;
     const tamHet = Boolean(req.body?.tamHet);
     const tenantId = layTenantId(req);
+    const branchId = normalizeBranchId(req.body?.branchId || req.headers['x-branch-id'] || req.user?.branchId || 'DEFAULT');
     try {
         const mon = await pool.withTenant(tenantId, async (client) => {
             const r = await client.query(
-                `UPDATE SanPham
-                    SET TamHet = $2,
-                        TamHetTuDong = FALSE,
-                        TamHetBoiMaNL = CASE WHEN $2 = FALSE THEN '{}'::text[] ELSE COALESCE(TamHetBoiMaNL, '{}'::text[]) END
-                  WHERE MaMon = $1 AND COALESCE(TenantId, 'DEFAULT') = $3
-                  RETURNING MaMon, TenMon, TamHet`,
-                [maMon, tamHet, tenantId]
+                `SELECT MaMon, TenMon FROM SanPham WHERE MaMon = $1 AND COALESCE(TenantId, 'DEFAULT') = $2`,
+                [maMon, tenantId]
             );
             if (r.rows.length === 0) return null;
             const row = r.rows[0];
+            await client.query(
+                `INSERT INTO public.branch_availability_86
+                    (tenant_id, branch_id, entity_type, entity_id, is_sold_out, is_auto_cascaded, caused_by_ingredients, updated_by, updated_at)
+                 VALUES ($1, $2, 'PRODUCT', $3, $4, FALSE, '{}'::text[], $5, now())
+                 ON CONFLICT (tenant_id, branch_id, entity_type, entity_id) DO UPDATE
+                     SET is_sold_out = EXCLUDED.is_sold_out,
+                         is_auto_cascaded = FALSE,
+                         caused_by_ingredients = CASE WHEN EXCLUDED.is_sold_out = FALSE THEN '{}'::text[] ELSE public.branch_availability_86.caused_by_ingredients END,
+                         updated_by = EXCLUDED.updated_by,
+                         updated_at = now()`,
+                [tenantId, branchId, maMon, tamHet, req.user.maNV]
+            );
             await ghiAuditLog(client, {
                 tenantId,
                 maNV: req.user.maNV,
@@ -6154,21 +6203,36 @@ app.put('/api/sanpham/:maMon/tamhet', kiemTraToken, choPhepVaiTro(1, 2), async (
                 hanhDong: 'MENU_86_TOGGLE',
                 doiTuong: 'SANPHAM',
                 maDoiTuong: maMon,
-                giaTriMoi: { tenMon: row.tenmon, tamHet },
+                giaTriMoi: { tenMon: row.tenmon, branchId, tamHet },
                 ip: req.ip,
             });
-            return row;
+            return { ...row, tamhet: tamHet };
         });
         if (!mon) return res.status(404).json({ message: 'Không tìm thấy món này!' });
 
-        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).to(roomTen(tenantId, 'barista')).emit('THUC_DON_THAY_DOI', {
+        const payload = {
+            branchId,
             maMon: mon.mamon,
             tenMon: mon.tenmon,
             tamHet: Boolean(mon.tamhet),
+            affectedProducts: [{ maMon: mon.mamon, tenMon: mon.tenmon, branchId, tamHet: Boolean(mon.tamhet) }],
+        };
+        emitScopedKdsEvent(io, {
+            tenantId,
+            branchId,
+            station: 'ALL',
+            eventType: 'MENU_86_UPDATED',
+            socketEvents: ['menu:86_updated', 'THUC_DON_THAY_DOI'],
+            payload,
+            includeExpo: true,
+            includeWaiter: true,
+            includePos: true,
+            includeQr: true,
         });
 
         res.json({
-            message: tamHet ? `Đã báo TẠM HẾT món "${mon.tenmon}"!` : `Đã mở bán lại món "${mon.tenmon}"!`,
+            message: tamHet ? `Đã báo TẠM HẾT món "${mon.tenmon}" tại chi nhánh ${branchId}!` : `Đã mở bán lại món "${mon.tenmon}" tại chi nhánh ${branchId}!`,
+            branchId,
             maMon: mon.mamon,
             tamHet: Boolean(mon.tamhet),
         });
@@ -6177,19 +6241,31 @@ app.put('/api/sanpham/:maMon/tamhet', kiemTraToken, choPhepVaiTro(1, 2), async (
     }
 });
 
-// [P1] Khóa/Mở nhanh Topping tạm hết giữa ca (VD: hết kem cheese, trân châu — cô lập TenantId)
+// [Wave 3A — P1-03] Khóa/Mở nhanh Topping tạm hết cô lập theo Chi nhánh
 app.put('/api/topping/:maTopping/tamhet', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) => {
     const { maTopping } = req.params;
     const tamHet = Boolean(req.body?.tamHet);
     const tenantId = layTenantId(req);
+    const branchId = normalizeBranchId(req.body?.branchId || req.headers['x-branch-id'] || req.user?.branchId || 'DEFAULT');
     try {
         const tp = await pool.withTenant(tenantId, async (client) => {
             const r = await client.query(
-                "UPDATE Topping SET TamHet = $2 WHERE MaTopping = $1 AND COALESCE(TenantId, 'DEFAULT') = $3 RETURNING MaTopping, TenTopping, TamHet",
-                [maTopping, tamHet, tenantId]
+                "SELECT MaTopping, TenTopping FROM Topping WHERE MaTopping = $1 AND COALESCE(TenantId, 'DEFAULT') = $2",
+                [maTopping, tenantId]
             );
             if (r.rows.length === 0) return null;
             const row = r.rows[0];
+            await client.query(
+                `INSERT INTO public.branch_availability_86
+                    (tenant_id, branch_id, entity_type, entity_id, is_sold_out, is_auto_cascaded, caused_by_ingredients, updated_by, updated_at)
+                 VALUES ($1, $2, 'TOPPING', $3, $4, FALSE, '{}'::text[], $5, now())
+                 ON CONFLICT (tenant_id, branch_id, entity_type, entity_id) DO UPDATE
+                     SET is_sold_out = EXCLUDED.is_sold_out,
+                         is_auto_cascaded = FALSE,
+                         updated_by = EXCLUDED.updated_by,
+                         updated_at = now()`,
+                [tenantId, branchId, maTopping, tamHet, req.user.maNV]
+            );
             await ghiAuditLog(client, {
                 tenantId,
                 maNV: req.user.maNV,
@@ -6197,21 +6273,36 @@ app.put('/api/topping/:maTopping/tamhet', kiemTraToken, choPhepVaiTro(1, 2), asy
                 hanhDong: 'TOPPING_86_TOGGLE',
                 doiTuong: 'TOPPING',
                 maDoiTuong: maTopping,
-                giaTriMoi: { tenTopping: row.tentopping, tamHet },
+                giaTriMoi: { tenTopping: row.tentopping, branchId, tamHet },
                 ip: req.ip,
             });
-            return row;
+            return { ...row, tamhet: tamHet };
         });
         if (!tp) return res.status(404).json({ message: 'Không tìm thấy topping này!' });
 
-        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).to(roomTen(tenantId, 'barista')).emit('TOPPING_THAY_DOI', {
+        const payload = {
+            branchId,
             maTopping: tp.matopping,
             tenTopping: tp.tentopping,
             tamHet: Boolean(tp.tamhet),
+            affectedToppings: [{ maTopping: tp.matopping, tenTopping: tp.tentopping, branchId, tamHet: Boolean(tp.tamhet) }],
+        };
+        emitScopedKdsEvent(io, {
+            tenantId,
+            branchId,
+            station: 'ALL',
+            eventType: 'MENU_86_UPDATED',
+            socketEvents: ['menu:86_updated', 'TOPPING_THAY_DOI'],
+            payload,
+            includeExpo: true,
+            includeWaiter: true,
+            includePos: true,
+            includeQr: true,
         });
 
         res.json({
-            message: tamHet ? `Đã báo TẠM HẾT topping "${tp.tentopping}"!` : `Đã mở lại topping "${tp.tentopping}"!`,
+            message: tamHet ? `Đã báo TẠM HẾT topping "${tp.tentopping}" tại chi nhánh ${branchId}!` : `Đã mở lại topping "${tp.tentopping}" tại chi nhánh ${branchId}!`,
+            branchId,
             maTopping: tp.matopping,
             tamHet: Boolean(tp.tamhet),
         });
@@ -7944,11 +8035,19 @@ app.get('/api/topping', kiemTraToken, async (req, res) => {
 // [Phân hệ 7] Snapshot danh sách khách hàng thân thiết để POS cache xuống IndexedDB phục vụ tra cứu Offline
 app.get('/api/khachhang/cache', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) => {
     const tenantId = layTenantId(req);
-    const limit = Math.min(2000, Math.max(50, Number(req.query.limit) || 1000));
+    const isManager = Number(req.user?.vaiTro) === 1;
+    const limit = isManager ? Math.min(2000, Math.max(50, Number(req.query.limit) || 1000)) : 5;
+    if (!isManager) {
+        return res.status(403).json({
+            message: 'Thu ngân không được phép tải toàn bộ tệp khách hàng (NĐ 13/2023/NĐ-CP)!',
+            customers: [],
+        });
+    }
     try {
         const r = await qTenant(
             req,
-            `SELECT MaKH, TenKH, SoDienThoai, DiemTichLuy
+            `SELECT MaKH, COALESCE(to_jsonb(KhachHang)->>'tenkh', to_jsonb(KhachHang)->>'hoten', '') AS TenKH,
+                    SoDienThoai, DiemTichLuy
                FROM KhachHang
               WHERE COALESCE(TenantId, 'DEFAULT') = $1
               ORDER BY DiemTichLuy DESC NULLS LAST, TenKH ASC
@@ -7961,7 +8060,7 @@ app.get('/api/khachhang/cache', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req
             customers: r.rows.map((k) => ({
                 maKH: k.makh,
                 tenKH: k.tenkh,
-                soDienThoai: k.sodienthoai,
+                soDienThoai: maskPhoneForRole(k.sodienthoai, req.user?.vaiTro),
                 diemTichLuy: Number(k.diemtichluy || 0),
             })),
         });
@@ -7973,11 +8072,15 @@ app.get('/api/khachhang/cache', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req
 app.get('/api/khachhang', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) => {
     const rawQuery = String(req.query.soDienThoai || req.query.sdt || req.query.q || '').trim();
     const tenantId = layTenantId(req);
+    const isManager = Number(req.user?.vaiTro) === 1;
+    const rowLimit = isManager ? 10 : 5;
     if (!rawQuery) return res.status(400).json({ message: 'Vui lòng cung cấp soDienThoai (hoặc 4 số cuối SĐT)!' });
     const digitsOnly = rawQuery.replace(/[^0-9]/g, '');
     try {
         const selectCols = `
-            MaKH, TenKH, SoDienThoai, COALESCE(DiemTichLuy, 0) AS DiemTichLuy,
+            MaKH,
+            COALESCE(to_jsonb(KhachHang)->>'tenkh', to_jsonb(KhachHang)->>'hoten', '') AS TenKH,
+            SoDienThoai, COALESCE(DiemTichLuy, 0) AS DiemTichLuy,
             COALESCE(to_jsonb(KhachHang)->>'hangthanhvien', 'DONG') AS HangThanhVien,
             COALESCE((to_jsonb(KhachHang)->>'tongchitieu')::numeric, 0) AS TongChiTieu,
             COALESCE((to_jsonb(KhachHang)->>'soduvi')::numeric, 0) AS SoDuVi
@@ -7992,8 +8095,8 @@ app.get('/api/khachhang', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res)
                   WHERE COALESCE(TenantId, 'DEFAULT') = $2
                     AND (RIGHT(SoDienThoai, 4) = $1 OR RIGHT(REGEXP_REPLACE(COALESCE(SoDienThoai, ''), '[^0-9]', '', 'g'), 4) = $1)
                   ORDER BY DiemTichLuy DESC, TenKH ASC
-                  LIMIT 10`,
-                [digitsOnly, tenantId]
+                  LIMIT $3`,
+                [digitsOnly, tenantId, rowLimit]
             );
         } else {
             r = await qTenant(
@@ -8003,8 +8106,8 @@ app.get('/api/khachhang', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res)
                   WHERE COALESCE(TenantId, 'DEFAULT') = $2
                     AND (SoDienThoai = $1 OR ($3 <> '' AND RIGHT(SoDienThoai, 4) = $3))
                   ORDER BY CASE WHEN SoDienThoai = $1 THEN 0 ELSE 1 END, TenKH ASC
-                  LIMIT 10`,
-                [rawQuery, tenantId, digitsOnly.length === 4 ? digitsOnly : '']
+                  LIMIT $4`,
+                [rawQuery, tenantId, digitsOnly.length === 4 ? digitsOnly : '', rowLimit]
             );
         }
         const danhSach = r.rows.map((k) => {
@@ -8012,7 +8115,7 @@ app.get('/api/khachhang', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res)
             return {
                 maKH: k.makh,
                 tenKH: k.tenkh,
-                soDienThoai: k.sodienthoai,
+                soDienThoai: maskPhoneForRole(k.sodienthoai, req.user?.vaiTro),
                 diemTichLuy: Number(k.diemtichluy || 0),
                 hangThanhVien: k.hangthanhvien || tier.hang,
                 tenHang: tier.tenHang,
@@ -11149,12 +11252,12 @@ app.put('/api/nhansu/nhanvien/:maNV/trangthai', kiemTraToken, choPhepVaiTro(1), 
         });
         if (!nvRow) return res.status(404).json({ message: 'Không tìm thấy nhân viên thuộc quán này!' });
 
-        xoaCacheTrangThaiNV(maNV); // Thu hồi ngay phiên JWT đang hoạt động (không chờ hết hạn)
+        xoaCacheTrangThaiNV(maNV, tenantId); // Thu hồi ngay phiên JWT đang hoạt động (không chờ hết hạn)
         if (!trangThaiLamViec) {
             // Thu hồi toàn bộ Refresh Token của nhân viên bị khóa ngay lập tức
             await pool.query('SELECT public.fn_revoke_staff_refresh_tokens($1, $2)', [tenantId, maNV]).catch(() => {});
-            // Đẩy ngay toàn bộ kết nối Socket.IO đang mở của nhân viên bị khóa ra khỏi phòng Bar/POS
-            io.in(`user:${maNV}`).disconnectSockets(true);
+            // [Wave 3A — P1-03] Đẩy ngay kết nối Socket.IO đúng tenant (t:{tenantId}:user:{maNV})
+            io.in(`t:${tenantId}:user:${maNV}`).disconnectSockets(true);
         }
         res.json({
             message: trangThaiLamViec ? `Đã mở khóa tài khoản ${nvRow.tennv}!` : `Đã khóa ngay tài khoản ${nvRow.tennv}!`,
@@ -11877,11 +11980,12 @@ app.post('/api/kho/san-xuat-me', kiemTraToken, choPhepVaiTro(1, 2), async (req, 
     }
 });
 
-// [Phân hệ 2 - Cascade 86'ing 5 lớp] Khóa/Mở đệ quy BTP -> Món -> Topping -> Modifier -> Combo
+// [Phân hệ 2 - Cascade 86'ing 5 lớp] Khóa/Mở đệ quy theo Chi nhánh (branch_availability_86)
 app.put('/api/kho/nguyenlieu/:maNL/tamhet', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) => {
     const { maNL } = req.params;
     const tamHet = Boolean(req.body?.tamHet);
     const tenantId = layTenantId(req);
+    const branchId = normalizeBranchId(req.body?.branchId || req.headers['x-branch-id'] || req.user?.branchId || 'DEFAULT');
 
     try {
         const result = await chayGiaoDich(async (client) => {
@@ -11895,8 +11999,10 @@ app.put('/api/kho/nguyenlieu/:maNL/tamhet', kiemTraToken, choPhepVaiTro(1, 2), a
             const nl = nlRes.rows[0];
             const cascade = await cascadeIngredient86(client, {
                 tenantId,
+                branchId,
                 maNL,
                 action: tamHet ? 'LOCK' : 'UNLOCK',
+                updatedBy: req.user.maNV,
             });
 
             await ghiAuditLog(client, {
@@ -11907,6 +12013,7 @@ app.put('/api/kho/nguyenlieu/:maNL/tamhet', kiemTraToken, choPhepVaiTro(1, 2), a
                 doiTuong: 'NGUYENLIEU',
                 maDoiTuong: maNL,
                 giaTriMoi: {
+                    branchId,
                     tenNL: nl.tennl,
                     tamHet,
                     cascadedSubRecipes: cascade.cascadedSubRecipes,
@@ -11922,6 +12029,7 @@ app.put('/api/kho/nguyenlieu/:maNL/tamhet', kiemTraToken, choPhepVaiTro(1, 2), a
             });
 
             return {
+                branchId,
                 maNL: nl.manl,
                 tenNL: nl.tennl,
                 tamHet,
@@ -11929,13 +12037,46 @@ app.put('/api/kho/nguyenlieu/:maNL/tamhet', kiemTraToken, choPhepVaiTro(1, 2), a
             };
         }, tenantId);
 
-        // Phát Socket đồng bộ tức thì tới mọi màn hình Thu ngân, Phục vụ, Barista
-        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).to(roomTen(tenantId, 'barista')).emit('menu:86_updated', result);
+        // [Wave 3A — P1-03] Phát Socket 3 tầng cô lập tuyệt đối theo đúng Chi nhánh (branchId)
+        emitScopedKdsEvent(io, {
+            tenantId,
+            branchId,
+            station: 'ALL',
+            eventType: 'MENU_86_UPDATED',
+            socketEvents: ['menu:86_updated'],
+            payload: result,
+            includeExpo: true,
+            includeWaiter: true,
+            includePos: true,
+            includeQr: true,
+        });
         for (const m of result.affectedProducts) {
-            io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).to(roomTen(tenantId, 'barista')).emit('THUC_DON_THAY_DOI', m);
+            emitScopedKdsEvent(io, {
+                tenantId,
+                branchId,
+                station: 'ALL',
+                eventType: 'THUC_DON_THAY_DOI',
+                socketEvents: ['THUC_DON_THAY_DOI'],
+                payload: m,
+                includeExpo: true,
+                includeWaiter: true,
+                includePos: true,
+                includeQr: true,
+            });
         }
         for (const t of result.affectedToppings) {
-            io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).to(roomTen(tenantId, 'barista')).emit('TOPPING_THAY_DOI', t);
+            emitScopedKdsEvent(io, {
+                tenantId,
+                branchId,
+                station: 'ALL',
+                eventType: 'TOPPING_THAY_DOI',
+                socketEvents: ['TOPPING_THAY_DOI'],
+                payload: t,
+                includeExpo: true,
+                includeWaiter: true,
+                includePos: true,
+                includeQr: true,
+            });
         }
 
         const tongMon = result.affectedProducts.length;
@@ -12327,6 +12468,16 @@ registerEcosystemPhase8Routes(app, {
             hoaDon,
         };
     },
+});
+
+// [Wave 3A — P1-01] Đăng ký nhóm API Thuế VAT Đa Mức & Hóa Đơn Điện Tử Máy Tính Tiền (nội bộ + công khai QR)
+registerEInvoiceRoutes(app, {
+    pool,
+    chayGiaoDich,
+    kiemTraToken,
+    choPhepVaiTro,
+    layTenantId,
+    layChiNhanhHienTai: (req) => String(req.headers['x-branch-id'] || req.query?.branchId || req.body?.branchId || 'CN01').trim(),
 });
 
 app.get('/', (req, res) => {

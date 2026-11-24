@@ -188,13 +188,37 @@ export async function printReceiptK80(
   const diemSuDung = Number(hoaDon.diemSuDung || 0)
   const phiPhucVu = Number(hoaDon.phiPhucVu ?? hoaDon.tienPhiPhucVu ?? 0)
   const thueVAT = Number(hoaDon.thueVAT ?? hoaDon.tienThueVAT ?? hoaDon.tienVat ?? 0)
-  const discountRowsHtml = tienGiamKM > 0 || tienGiamDiem > 0 || phiPhucVu > 0 || thueVAT > 0
+  const maskPhoneReceipt = (sdt) => {
+    const raw = String(sdt || '').trim()
+    if (!raw) return ''
+    if (raw.length < 7) {
+      if (raw.length <= 2) return '***'
+      return `${raw.slice(0, 1)}***${raw.slice(-1)}`
+    }
+    return `${raw.slice(0, 4)}***${raw.slice(-3)}`
+  }
+
+  const taxBreakdown = Array.isArray(hoaDon.taxBreakdown || hoaDon.tax_breakdown_json)
+    ? hoaDon.taxBreakdown || hoaDon.tax_breakdown_json
+    : []
+  const taxBreakdownHtml = taxBreakdown.length > 0
+    ? taxBreakdown
+        .map((b) => {
+          const rateLbl = b.isKct ? 'KCT (0%)' : `VAT ${Number(b.vatRate || 0)}%`
+          return `<div style="display:flex;justify-content:space-between;font-size:10.5px"><span>${escapeHtml(rateLbl)} (DT ${escapeHtml(formatVND(b.taxableBase || 0))}):</span><span>${escapeHtml(formatVND(b.vatAmount || 0))}</span></div>`
+        })
+        .join('')
+    : thueVAT > 0
+      ? `<div style="display:flex;justify-content:space-between"><span>Thuế VAT${Number(hoaDon.tyLeThueVAT || 0) > 0 ? ` (${Number(hoaDon.tyLeThueVAT)}%)` : ''}:</span><span>+${escapeHtml(formatVND(thueVAT))}</span></div>`
+      : ''
+
+  const discountRowsHtml = tienGiamKM > 0 || tienGiamDiem > 0 || phiPhucVu > 0 || thueVAT > 0 || taxBreakdown.length > 0
     ? `<div style="font-size:11px;margin-bottom:4px">
         <div style="display:flex;justify-content:space-between"><span>Tạm tính:</span><span>${escapeHtml(formatVND(hoaDon.tongTamTinh || 0))}</span></div>
         ${tienGiamKM > 0 ? `<div style="display:flex;justify-content:space-between"><span>Giảm KM${hoaDon.maKhuyenMai ? ` (${escapeHtml(hoaDon.maKhuyenMai)})` : ''}:</span><span>-${escapeHtml(formatVND(tienGiamKM))}</span></div>` : ''}
         ${tienGiamDiem > 0 ? `<div style="display:flex;justify-content:space-between"><span>Đổi điểm (${diemSuDung} điểm):</span><span>-${escapeHtml(formatVND(tienGiamDiem))}</span></div>` : ''}
         ${phiPhucVu > 0 ? `<div style="display:flex;justify-content:space-between"><span>Phí phục vụ${Number(hoaDon.tyLePhiPhucVu || 0) > 0 ? ` (${Number(hoaDon.tyLePhiPhucVu)}%)` : ''}:</span><span>+${escapeHtml(formatVND(phiPhucVu))}</span></div>` : ''}
-        ${thueVAT > 0 ? `<div style="display:flex;justify-content:space-between"><span>Thuế VAT${Number(hoaDon.tyLeThueVAT || 0) > 0 ? ` (${Number(hoaDon.tyLeThueVAT)}%)` : ''}:</span><span>+${escapeHtml(formatVND(thueVAT))}</span></div>` : ''}
+        ${taxBreakdownHtml}
        </div>`
     : ''
   const tongCong = escapeHtml(formatVND(hoaDon.tongTienThanhToan ?? hoaDon.tongSauGiam ?? hoaDon.tongTamTinh))
@@ -229,7 +253,15 @@ export async function printReceiptK80(
     .join('')
 
   const khLine = hoaDon.khachHang
-    ? `<p style="font-size:11px;margin:2px 0">KH: ${escapeHtml(hoaDon.khachHang.tenKH)} (${escapeHtml(hoaDon.khachHang.soDienThoai)}) • ⭐ ${Number(hoaDon.khachHang.diemTichLuy || 0)} điểm</p>`
+    ? `<p style="font-size:11px;margin:2px 0">KH: ${escapeHtml(hoaDon.khachHang.tenKH)} (${escapeHtml(maskPhoneReceipt(hoaDon.khachHang.soDienThoai))}) • ⭐ ${Number(hoaDon.khachHang.diemTichLuy || 0)} điểm</p>`
+    : ''
+
+  const einvoiceCode = String(hoaDon.einvoiceLookupCode || hoaDon.einvoice_lookup_code || '').trim()
+  const einvoiceFooterHtml = einvoiceCode && !laTamTinh
+    ? `<div style="margin-top:6px;padding:4px 6px;border:1px dashed #000;text-align:center;font-size:10px">
+         <div><b>XUẤT HÓA ĐƠN ĐIỆN TỬ (MTT)</b></div>
+         <div>Mã tra cứu: <b>${escapeHtml(einvoiceCode)}</b></div>
+       </div>`
     : ''
 
   // [Chống Gian lận Bill Recycling] Mã đối chiếu 4 ký tự cuối + giờ in đậm + thông điệp nhắc khách kiểm tra
@@ -284,6 +316,7 @@ export async function printReceiptK80(
         <div style="margin-top:2px">Quý khách vui lòng kiểm tra ĐÚNG GIỜ IN &amp; SỐ THỨ TỰ trên hóa đơn.</div>
       </div>
       <p style="text-align:center;font-size:10px;margin-top:6px">Cảm ơn Quý khách &amp; Hẹn gặp lại!</p>
+      ${einvoiceFooterHtml}
       ${plgFooterHtml}
     </body></html>`
 

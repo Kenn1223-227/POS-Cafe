@@ -14,6 +14,7 @@
     "test:integration": "node --test tests/integration/*.test.js",
     "test:wave1": "node --test tests/unit/vietqrEmvco.test.js tests/unit/printBridgeSecurity.test.js tests/unit/wave1CoreLogic.test.js tests/integration/00-rls-guard.test.js tests/integration/wave1-*.test.js",
     "test:wave2": "node --test tests/unit/safeWac.test.js tests/unit/printBuilders.test.js tests/integration/wave2-idempotency-pnl.test.js tests/realtime/redis-socket-cluster.test.js tests/realtime/graceful-shutdown.test.js tests/e2e/qa01-pwa-offline-outbox.spec.js tests/e2e/pos-split-brain-modals.spec.js tests/e2e/print-bridge-security.spec.js",
+    "test:wave3a": "node --test tests/unit/taxCalculator.test.js tests/unit/kdsRoutingAndPrivacy.test.js tests/integration/wave3a-tax-einvoice-nd13.test.js tests/realtime/isolation-3tier-86.test.js tests/realtime/kds-delta-sync.test.js",
     "test:phanhe7": "node scripts/test-phanhe7-unit.js",
     "test:phanhe1": "node scripts/test-phanhe1-unit.js",
     "test:phanhe1:integration": "node scripts/test-phanhe1-integration.js",

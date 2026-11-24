@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { applyMixedRateTaxToOrder } = require('./vnTaxAndEInvoiceService');
 
 const VN_TZ = 'Asia/Ho_Chi_Minh';
 const lam3 = (x) => Math.round(Number(x || 0) * 1000) / 1000;
@@ -806,10 +807,27 @@ async function recalculateInvoiceTotals(
         });
     }
 
+    // [Wave 3A — P1-01] Đồng bộ snapshot thuế đa mức (8%/10%/5%/0%/KCT) & einvoice_lookup_code
+    let mixedTaxResult = null;
+    await client.query('SAVEPOINT sp_recalc_mixed_tax');
+    try {
+        mixedTaxResult = await applyMixedRateTaxToOrder(client, {
+            tenantId,
+            maHoaDon,
+            orderDiscountTotal: newTienGiamKM + newTienGiamDiem,
+            serviceChargePct: Number(hd.phiphucvuphantram || 0),
+            taxMode: hd.cachtinhthue || 'INCLUDED',
+        });
+        await client.query('RELEASE SAVEPOINT sp_recalc_mixed_tax');
+    } catch {
+        await client.query('ROLLBACK TO SAVEPOINT sp_recalc_mixed_tax').catch(() => {});
+    }
+
     return {
         promoAdjusted,
         promoAdjustReasons,
         totals,
+        mixedTax: mixedTaxResult,
     };
 }
 

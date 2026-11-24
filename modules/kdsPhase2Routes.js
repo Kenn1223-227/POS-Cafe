@@ -535,8 +535,8 @@ function registerKdsPhase2Routes(app, deps) {
                 // 1. Khóa chặt dòng món cũ + hóa đơn bằng FOR UPDATE chống Race Condition với Barista
                 const cRes = await client.query(
                     `SELECT c.MaCTHD, c.MaHoaDon, c.MaMon, c.KichThuoc, c.SoLuong, c.DonGia,
-                            COALESCE(c.GiaModifiers, 0) AS GiaModifiers,
-                            COALESCE(c.GiaGiam, 0) AS GiaGiam,
+                            COALESCE((to_jsonb(c)->>'giamodifiers')::numeric, 0) AS GiaModifiers,
+                            COALESCE((to_jsonb(c)->>'giagiam')::numeric, 0) AS GiaGiam,
                             c.TrangThaiPhaChe, c.DotGoi,
                             COALESCE(to_jsonb(sp)->>'tramchebien', '') AS TramCheBienCu,
                             sp.TenMon AS TenMonCu, sp.NhomMon AS NhomMonCu,
@@ -683,7 +683,40 @@ function registerKdsPhase2Routes(app, deps) {
                     { maCTHD, maMon: oldItem.mamon, kichThuoc: oldItem.kichthuoc, soLuong: oldItem.soluong },
                     tieuHaoCu
                 );
-                const hoanKhoMonCu = !daBatDauPha || Boolean(oldItem.lahangdonggoicu);
+                const hoanKhoMonCu =
+                    oldItem.trangthaiphache !== 'DaPhucVu' &&
+                    (!daBatDauPha || Boolean(oldItem.lahangdonggoicu));
+                const bIdStock = normalizeBranchId(oldItem.branchid || req.user?.branchId || 'DEFAULT');
+                const adjustBranchStock = async (maNL, deltaQty) => {
+                    await client.query('SAVEPOINT sp_swap_branch_stock');
+                    try {
+                        const tkUpd = await client.query(
+                            `UPDATE public.tonkhochinhanh
+                                SET soluongton = COALESCE(soluongton, 0) + $1,
+                                    capnhatluc = now()
+                              WHERE tenantid = $2 AND branchid = $3 AND manl = $4
+                              RETURNING soluongton`,
+                            [deltaQty, tenantId, bIdStock, maNL]
+                        );
+                        if (tkUpd.rows.length === 0) {
+                            await client.query(
+                                `INSERT INTO public.tonkhochinhanh (tenantid, branchid, manl, soluongton, capnhatluc)
+                                 VALUES ($1, $2, $3, $4, now())
+                                 ON CONFLICT (branchid, manl) DO UPDATE
+                                     SET soluongton = COALESCE(public.tonkhochinhanh.soluongton, 0) + $4,
+                                         capnhatluc = now()`,
+                                [tenantId, bIdStock, maNL, deltaQty]
+                            );
+                        }
+                        await client.query('RELEASE SAVEPOINT sp_swap_branch_stock');
+                    } catch {
+                        await client.query('ROLLBACK TO SAVEPOINT sp_swap_branch_stock').catch(() => {});
+                        await client.query(
+                            "UPDATE NguyenLieu SET SoLuongTon = SoLuongTon + $1 WHERE MaNL = $2 AND COALESCE(TenantId, 'DEFAULT') = $3",
+                            [deltaQty, maNL, tenantId]
+                        );
+                    }
+                };
                 const giaVonCuMap = await layMapGiaVonNguyenLieu(client, tenantId, [...tieuHaoCu.keys()]);
                 if (tieuHaoCu.size > 0) {
                     const phieuCu = await client.query(
@@ -704,10 +737,7 @@ function registerKdsPhase2Routes(app, deps) {
                             [maGDCu, maNL, qty, giaVonCuMap.get(maNL) || 0, hoanKhoMonCu ? 'Hoàn kho đổi món' : 'Hao hụt đổi món đã pha']
                         );
                         if (hoanKhoMonCu) {
-                            await client.query(
-                                "UPDATE NguyenLieu SET SoLuongTon = SoLuongTon + $1 WHERE MaNL = $2 AND COALESCE(TenantId, 'DEFAULT') = $3",
-                                [qty, maNL, tenantId]
-                            );
+                            await adjustBranchStock(maNL, qty);
                         }
                     }
                 }
@@ -760,10 +790,7 @@ function registerKdsPhase2Routes(app, deps) {
                              VALUES ($1, $2, $3, $4, 'Xuất bán đổi món')`,
                             [maGDMoi, maNL, qty, giaVonMoiMap.get(maNL) || 0]
                         );
-                        await client.query(
-                            "UPDATE NguyenLieu SET SoLuongTon = SoLuongTon - $1 WHERE MaNL = $2 AND COALESCE(TenantId, 'DEFAULT') = $3",
-                            [qty, maNL, tenantId]
-                        );
+                        await adjustBranchStock(maNL, -qty);
                     }
                 }
 
@@ -996,7 +1023,13 @@ function registerKdsPhase2Routes(app, deps) {
                 );
                 if (nlRes.rows.length === 0) throw new LoiNghiepVu(404, `Không tìm thấy nguyên liệu ${maNL}!`);
 
-                const cascade = await cascadeIngredient86(client, { tenantId, maNL, action: act });
+                const cascade = await cascadeIngredient86(client, {
+                    tenantId,
+                    branchId: bId,
+                    maNL,
+                    action: act,
+                    updatedBy: req.user.maNV,
+                });
 
                 await ghiAuditLog(client, {
                     tenantId,
@@ -1029,7 +1062,7 @@ function registerKdsPhase2Routes(app, deps) {
                 return { tenNL: nlRes.rows[0].tennl, ...cascade, seq: logInfo.seq };
             }, tenantId);
 
-            // Đồng bộ đa kênh tới POS, KDS, Expo, Waiter, QR
+            // [Wave 3A — P1-03] Đồng bộ cô lập 3 tầng theo đúng Chi nhánh (không leak sang phòng 2 tầng legacy)
             emitScopedKdsEvent(io, {
                 tenantId,
                 branchId: bId,
@@ -1042,12 +1075,20 @@ function registerKdsPhase2Routes(app, deps) {
                 includeWaiter: true,
                 includePos: true,
                 includeQr: true,
-                legacyBaristaEvent: 'menu:86_updated',
-                legacyPosEvent: 'menu:86_updated',
-                legacyWaiterEvent: 'menu:86_updated',
             });
             for (const p of ketQua.affectedProducts) {
-                io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).to(roomTen(tenantId, 'barista')).emit('THUC_DON_THAY_DOI', p);
+                emitScopedKdsEvent(io, {
+                    tenantId,
+                    branchId: bId,
+                    station: 'ALL',
+                    eventType: 'THUC_DON_THAY_DOI',
+                    socketEvents: ['THUC_DON_THAY_DOI'],
+                    payload: p,
+                    includeExpo: true,
+                    includeWaiter: true,
+                    includePos: true,
+                    includeQr: true,
+                });
             }
 
             res.json({
@@ -1059,6 +1100,120 @@ function registerKdsPhase2Routes(app, deps) {
             });
         } catch (error) {
             guiLoi(res, error, 'Lỗi API Cascade 86 nguyên liệu:');
+        }
+    });
+
+    // =========================================================================
+    // [Wave 3A — P1-03] PATCH /api/order/:maHoaDon/rush — Đặt/Gỡ ưu tiên GẤP (Rush Order)
+    // =========================================================================
+    app.patch('/api/order/:maHoaDon/rush', kiemTraToken, choPhepVaiTro(1, 2, 3, 4), async (req, res) => {
+        const tenantId = layTenantId(req);
+        const { maHoaDon } = req.params;
+        const rush = req.body?.rush !== undefined ? Boolean(req.body.rush) : true;
+        const priority = rush ? Math.max(1, Number(req.body?.priority || 2)) : 0;
+        const lyDo = String(req.body?.lyDo || (rush ? 'Đánh dấu đơn GẤP (Rush)' : 'Gỡ cờ GẤP')).trim().slice(0, 200);
+
+        try {
+            const ketQua = await chayGiaoDich(async (client) => {
+                const hdRes = await client.query(
+                    `SELECT MaHoaDon,
+                            COALESCE(NULLIF(to_jsonb(HoaDon)->>'branchid', ''), $3) AS BranchId
+                       FROM public.HoaDon
+                      WHERE MaHoaDon = $1 AND COALESCE(TenantId, 'DEFAULT') = $2`,
+                    [maHoaDon, tenantId, normalizeBranchId(req.user?.branchId || 'DEFAULT')]
+                );
+                if (hdRes.rows.length === 0) {
+                    throw new LoiNghiepVu(404, 'Không tìm thấy hóa đơn!');
+                }
+                const branchId = normalizeBranchId(hdRes.rows[0].branchid || 'DEFAULT');
+
+                const updRes = await client.query(
+                    `UPDATE public.ChiTietHoaDon c
+                        SET MucDoUuTien = $2
+                       FROM public.SanPham sp
+                      WHERE c.MaMon = sp.MaMon
+                        AND c.MaHoaDon = $1
+                        AND c.TrangThaiPhaChe NOT IN ('DaHuy', 'DaXong', 'DaPhucVu')
+                      RETURNING c.MaCTHD, c.MaMon, sp.TenMon, sp.NhomMon,
+                                COALESCE(to_jsonb(sp)->>'tramchebien', '') AS TramCheBien`,
+                    [maHoaDon, priority]
+                );
+
+                const stations = [
+                    ...new Set(
+                        updRes.rows.map((r) =>
+                            suyLuanTramCheBien({
+                                tramCheBien: r.tramchebien,
+                                nhomMon: r.nhommon,
+                                tenMon: r.tenmon,
+                            })
+                        )
+                    ),
+                ];
+                if (stations.length === 0) stations.push('ALL');
+
+                const payload = {
+                    maHoaDon,
+                    branchId,
+                    rush,
+                    mucDoUuTien: priority,
+                    updatedMaCTHD: updRes.rows.map((r) => r.macthd),
+                    updatedBy: req.user?.maNV || 'SYSTEM',
+                    lyDo,
+                    updatedAt: new Date().toISOString(),
+                };
+
+                const seqs = [];
+                for (const st of stations) {
+                    const logInfo = await insertKdsEventLog(client, {
+                        tenantId,
+                        branchId,
+                        station: st,
+                        eventType: 'ORDER_RUSH_UPDATED',
+                        maHoaDon,
+                        payload,
+                    });
+                    seqs.push({ station: st, seq: logInfo.seq });
+                }
+
+                await ghiAuditLog(client, {
+                    tenantId,
+                    maNV: req.user?.maNV || 'SYSTEM',
+                    vaiTro: req.user?.vaiTro,
+                    hanhDong: rush ? 'ORDER_RUSH_SET' : 'ORDER_RUSH_CLEARED',
+                    doiTuong: 'HOADON',
+                    maDoiTuong: maHoaDon,
+                    giaTriMoi: { rush, mucDoUuTien: priority, count: updRes.rows.length },
+                    lyDo,
+                    ip: req.ip,
+                });
+
+                return { ...payload, stations, seqs };
+            }, tenantId);
+
+            for (const { station, seq } of ketQua.seqs) {
+                emitScopedKdsEvent(io, {
+                    tenantId,
+                    branchId: ketQua.branchId,
+                    station,
+                    seq,
+                    eventType: 'ORDER_RUSH_UPDATED',
+                    socketEvents: ['ORDER_RUSH_UPDATED'],
+                    payload: ketQua,
+                    includeExpo: true,
+                    includeWaiter: true,
+                    includePos: true,
+                });
+            }
+
+            return res.json({
+                message: rush
+                    ? `🔥 Đã đặt ưu tiên GẤP cho ${ketQua.updatedMaCTHD.length} món thuộc đơn #${maHoaDon}!`
+                    : `Đã gỡ ưu tiên GẤP cho đơn #${maHoaDon}!`,
+                ...ketQua,
+            });
+        } catch (error) {
+            guiLoi(res, error, 'Lỗi API Đặt ưu tiên GẤP (Rush Order):');
         }
     });
 

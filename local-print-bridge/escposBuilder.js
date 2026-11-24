@@ -162,6 +162,16 @@ function buildEscPosQrCodeBuffer(data, moduleSize = 4) {
     ]);
 }
 
+function maskPhoneForReceipt(sdt) {
+    const raw = String(sdt || '').trim();
+    if (!raw) return '';
+    if (raw.length < 7) {
+        if (raw.length <= 2) return '***';
+        return `${raw.slice(0, 1)}***${raw.slice(-1)}`;
+    }
+    return `${raw.slice(0, 4)}***${raw.slice(-3)}`;
+}
+
 // Dựng Buffer nhị phân ESC/POS + bản xem trước dạng text cho Bill K80
 function buildReceiptK80({
     hoaDon,
@@ -250,7 +260,8 @@ function buildReceiptK80({
     pushLine(`Gio: ${gio}`);
     if (thuNgan) pushLine(`Thu ngan: ${thuNgan}`);
     if (hoaDon?.khachHang) {
-        pushLine(`KH: ${hoaDon.khachHang.tenKH} (${hoaDon.khachHang.soDienThoai || ''})`);
+        const maskedPhone = maskPhoneForReceipt(hoaDon.khachHang.soDienThoai);
+        pushLine(`KH: ${hoaDon.khachHang.tenKH}${maskedPhone ? ` (${maskedPhone})` : ''}`);
     }
     pushLine(LINE);
     pushBytes(ESC, 0x45, 0x01);
@@ -277,7 +288,10 @@ function buildReceiptK80({
     const diemSuDung = Number(hoaDon?.diemSuDung || 0);
     const phiPhucVu = Number(hoaDon?.phiPhucVu ?? hoaDon?.tienPhiPhucVu ?? 0);
     const thueVAT = Number(hoaDon?.thueVAT ?? hoaDon?.tienThueVAT ?? hoaDon?.tienVat ?? 0);
-    if (tienGiamKM > 0 || tienGiamDiem > 0 || phiPhucVu > 0 || thueVAT > 0) {
+    const taxBreakdown = Array.isArray(hoaDon?.taxBreakdown || hoaDon?.tax_breakdown_json)
+        ? hoaDon.taxBreakdown || hoaDon.tax_breakdown_json
+        : [];
+    if (tienGiamKM > 0 || tienGiamDiem > 0 || phiPhucVu > 0 || thueVAT > 0 || taxBreakdown.length > 0) {
         pushLine(padTwoCols('Tam tinh:', dinhDangTien(hoaDon?.tongTamTinh ?? 0)));
         if (tienGiamKM > 0) {
             const labelKm = hoaDon?.maKhuyenMai ? `Giam KM (${hoaDon.maKhuyenMai}):` : 'Giam khuyen mai:';
@@ -291,7 +305,17 @@ function buildReceiptK80({
             const srvLabel = pctSrv > 0 ? `Phi phuc vu (${pctSrv}%):` : 'Phi phuc vu:';
             pushLine(padTwoCols(srvLabel, '+' + dinhDangTien(phiPhucVu)));
         }
-        if (thueVAT > 0) {
+        if (taxBreakdown.length > 0) {
+            for (const b of taxBreakdown) {
+                const rateLbl = b.isKct ? 'KCT (0%)' : `VAT ${Number(b.vatRate || 0)}%`;
+                pushLine(
+                    padTwoCols(
+                        `  ${rateLbl} (DT ${dinhDangTien(b.taxableBase || 0)}):`,
+                        dinhDangTien(b.vatAmount || 0)
+                    )
+                );
+            }
+        } else if (thueVAT > 0) {
             const pctVat = Number(hoaDon?.tyLeThueVAT || 0);
             const vatLabel = pctVat > 0 ? `Thue VAT (${pctVat}%):` : 'Thue VAT:';
             pushLine(padTwoCols(vatLabel, '+' + dinhDangTien(thueVAT)));
@@ -318,6 +342,19 @@ function buildReceiptK80({
     pushLine(`MA DOI CHIEU: #${maDoiChieu} | GIO IN: ${gioIn}`);
     pushBytes(ESC, 0x45, 0x00);
     pushLine('Quy khach vui long kiem tra DUNG GIO IN & STT');
+    const einvoiceCode = String(hoaDon?.einvoiceLookupCode || hoaDon?.einvoice_lookup_code || '').trim();
+    if (einvoiceCode && !laTamTinh) {
+        const einvoiceUrl = String(
+            hoaDon?.einvoiceLookupUrl || `https://einvoice.cafepos.vn/lookup/${einvoiceCode}`
+        ).trim();
+        pushLine(LINE);
+        pushBytes(ESC, 0x45, 0x01);
+        pushLine(`XUAT HOA DON VAT (MTT) - MA: ${einvoiceCode}`);
+        pushBytes(ESC, 0x45, 0x00);
+        pushLine('Quet QR trong ngay de xuat hoa don dien tu:');
+        chunks.push(buildEscPosQrCodeBuffer(einvoiceUrl, 4));
+        previewLines.push(`[QR E-INVOICE: ${einvoiceCode}]`);
+    }
     pushLine('Cam on Quy khach & Hen gap lai!');
     if (showPlgWatermark) {
         const refUrl = String(plgReferralUrl || 'https://cafepos.vn/onboarding').trim();

@@ -334,4 +334,6 @@ export const orderService = {
     axiosClient.put(`/sanpham/${encodeURIComponent(maMon)}/countdown`, { soLuongGioiHan86 }),
   parkOrderV2: (body) => axiosClient.post('/order/park', body),
   resumeParkOrderV2: (maHoaDon) => axiosClient.post(`/order/${encodeURIComponent(maHoaDon)}/resume`),
+  setOrderRush: (maHoaDon, { rush = true, priority = 2, lyDo = '' } = {}) =>
+    axiosClient.patch(`/order/${encodeURIComponent(maHoaDon)}/rush`, { rush, priority, lyDo }),
 }

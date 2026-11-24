@@ -7,6 +7,22 @@
 
 const VALID_STATIONS = ['BAR_CHINH', 'BAR_LANH', 'BEP_BANH'];
 
+function suyLuanTramCheBien({ tramCheBien, nhomMon = '', tenMon = '' } = {}) {
+    const clean = String(tramCheBien || '').trim().toUpperCase();
+    // [Wave 3A — P1-03] Tôn trọng mọi trạm hợp lệ đã cấu hình rõ (bao gồm cả 'BAR_CHINH'), không ép nhảy trạm bằng regex!
+    if (VALID_STATIONS.includes(clean)) {
+        return clean;
+    }
+    const text = `${nhomMon || ''} ${tenMon || ''}`.toLowerCase();
+    if (/(bánh|bếp|snack|ăn vặt|đồ ăn|croissant|tiramisu|toast|mousse|cookie)/i.test(text)) {
+        return 'BEP_BANH';
+    }
+    if (/(trà|đá xay|sinh tố|nước ép|matcha|freeze|soda|yogurt)/i.test(text)) {
+        return 'BAR_LANH';
+    }
+    return 'BAR_CHINH';
+}
+
 function normalizeBranchId(branchId) {
     const clean = String(branchId || '').trim();
     return clean || 'DEFAULT';
@@ -347,7 +363,8 @@ function formatModifierTag(item) {
     if (Array.isArray(item.modifiersSnapshot) && item.modifiersSnapshot.length > 0) {
         for (const m of item.modifiersSnapshot) {
             const label = m.tenInNgan || m.tenOption || '';
-            if (label) parts.push(m.soLuong > 1 ? `${label} x${m.soLuong}` : label);
+            const qty = Number(m.qty ?? m.soLuong ?? 1);
+            if (label) parts.push(qty > 1 ? `${label} x${qty}` : label);
         }
     }
     if (Array.isArray(item.toppings) && item.toppings.length > 0) {
@@ -535,11 +552,58 @@ function buildExpoTickets(items = []) {
 //   Lớp 4: Modifier Option (modifier_option_bom với khoiluongdelta > 0)
 //   Lớp 5: Combo (combo_slots + combo_slot_items -> khóa khi 1 slot hết sạch món chọn)
 // -----------------------------------------------------------------------------
-async function cascadeIngredient86(client, { tenantId = 'DEFAULT', maNL, action = 'LOCK' }) {
+async function loadBranchAvailability86Map(client, tenantId = 'DEFAULT', branchId = 'DEFAULT') {
     const tId = String(tenantId || 'DEFAULT');
-    const act = String(action || 'LOCK').toUpperCase() === 'UNLOCK' ? 'UNLOCK' : 'LOCK';
+    const bId = normalizeBranchId(branchId);
+    const out = {
+        products: new Map(),
+        toppings: new Map(),
+        modifiers: new Map(),
+        combos: new Map(),
+        ingredients: new Map(),
+    };
+    await client.query('SAVEPOINT sp_load_b86');
+    try {
+        const r = await client.query(
+            `SELECT entity_type, entity_id, is_sold_out, is_auto_cascaded, caused_by_ingredients, daily_remaining_qty
+               FROM public.branch_availability_86
+              WHERE tenant_id = $1 AND branch_id = $2`,
+            [tId, bId]
+        );
+        await client.query('RELEASE SAVEPOINT sp_load_b86');
+        for (const row of r.rows) {
+            const val = {
+                isSoldOut: Boolean(row.is_sold_out),
+                isAutoCascaded: Boolean(row.is_auto_cascaded),
+                causedByIngredients: row.caused_by_ingredients || [],
+                dailyRemainingQty:
+                    row.daily_remaining_qty !== null && row.daily_remaining_qty !== undefined
+                        ? Number(row.daily_remaining_qty)
+                        : null,
+            };
+            const type = String(row.entity_type || '').toUpperCase();
+            if (type === 'PRODUCT') out.products.set(String(row.entity_id), val);
+            else if (type === 'TOPPING') out.toppings.set(String(row.entity_id), val);
+            else if (type === 'MODIFIER') out.modifiers.set(String(row.entity_id), val);
+            else if (type === 'COMBO') out.combos.set(String(row.entity_id), val);
+            else if (type === 'INGREDIENT') out.ingredients.set(String(row.entity_id), val);
+        }
+    } catch {
+        await client.query('ROLLBACK TO SAVEPOINT sp_load_b86').catch(() => {});
+    }
+    return out;
+}
 
-    // Bước 1: Duyệt đệ quy đồ thị Bán thành phẩm (chỉ lan truyền qua BTP có SoLuongTon <= 0 khi LOCK!)
+async function cascadeIngredient86(
+    client,
+    { tenantId = 'DEFAULT', branchId = 'DEFAULT', maNL, action = 'LOCK', updatedBy = 'SYSTEM' }
+) {
+    const tId = String(tenantId || 'DEFAULT');
+    const bId = normalizeBranchId(branchId);
+    const act = String(action || 'LOCK').toUpperCase() === 'UNLOCK' ? 'UNLOCK' : 'LOCK';
+    const actor = String(updatedBy || 'SYSTEM').slice(0, 64);
+
+    // Bước 1: Duyệt đệ quy đồ thị Bán thành phẩm theo tồn kho của đúng Chi nhánh (fallback NguyenLieu)
     let affectedIngredients = [maNL];
     await client.query('SAVEPOINT sp_86_recursive');
     try {
@@ -552,11 +616,13 @@ async function cascadeIngredient86(client, { tenantId = 'DEFAULT', maNL, action 
                    JOIN affected_nl a ON a.manl = b.manlthanhphan
                    JOIN public.nguyenlieu nl_tp ON nl_tp.manl = b.manlthanhpham
                     AND COALESCE(nl_tp.tenantid, 'DEFAULT') = $2
+                   LEFT JOIN public.tonkhochinhanh tk ON tk.tenantid = $2
+                    AND tk.branchid = $4 AND tk.manl = b.manlthanhpham
                   WHERE b.tenantid = $2
-                    AND ($3::text = 'UNLOCK' OR COALESCE(nl_tp.soluongton, 0) <= 0)
+                    AND ($3::text = 'UNLOCK' OR COALESCE(tk.soluongton, nl_tp.soluongton, 0) <= 0)
              )
              SELECT DISTINCT manl FROM affected_nl`,
-            [maNL, tId, act]
+            [maNL, tId, act, bId]
         );
         if (recRes.rows.length > 0) {
             affectedIngredients = recRes.rows.map((r) => r.manl);
@@ -574,275 +640,169 @@ async function cascadeIngredient86(client, { tenantId = 'DEFAULT', maNL, action 
     let affectedModifiers = [];
     let affectedCombos = [];
 
+    // Ghi nhận trạng thái nguyên liệu vào branch_availability_86 (tuyệt đối KHÔNG sửa sanpham.tamhet toàn chuỗi!)
+    for (const ingCode of affectedIngredients) {
+        await client.query(
+            `INSERT INTO public.branch_availability_86
+                (tenant_id, branch_id, entity_type, entity_id, is_sold_out, is_auto_cascaded, caused_by_ingredients, updated_by, updated_at)
+             VALUES ($1, $2, 'INGREDIENT', $3, $4, $5, $6::text[], $7, now())
+             ON CONFLICT (tenant_id, branch_id, entity_type, entity_id) DO UPDATE
+                 SET is_sold_out = EXCLUDED.is_sold_out,
+                     is_auto_cascaded = EXCLUDED.is_auto_cascaded,
+                     caused_by_ingredients = EXCLUDED.caused_by_ingredients,
+                     updated_by = EXCLUDED.updated_by,
+                     updated_at = now()`,
+            [tId, bId, String(ingCode), act === 'LOCK', ingCode !== maNL, act === 'LOCK' ? [maNL] : [], actor]
+        );
+    }
+
     if (act === 'LOCK') {
-        // Lớp 2: SanPham
-        const spRes = await client.query(
-            `UPDATE public.sanpham
-                SET tamhettudong = CASE WHEN COALESCE(tamhet, FALSE) = FALSE OR COALESCE(tamhettudong, FALSE) = TRUE THEN TRUE ELSE FALSE END,
-                    tamhet = TRUE,
-                    tamhetboimanl = (
-                        SELECT ARRAY(SELECT DISTINCT unnest(COALESCE(tamhetboimanl, '{}'::text[]) || $1::text[]))
-                    )
-              WHERE COALESCE(tenantid, 'DEFAULT') = $2
-                AND mamon IN (
-                    SELECT DISTINCT ct.mamon
-                      FROM public.congthuc ct
-                     WHERE ct.manl::text = ANY($1::text[])
-                )
-              RETURNING mamon, tenmon, tamhet, tamhettudong, tamhetboimanl`,
+        // Lớp 2: SanPham theo đúng Chi nhánh trong branch_availability_86
+        const spCandRes = await client.query(
+            `SELECT DISTINCT sp.mamon, sp.tenmon
+               FROM public.sanpham sp
+               JOIN public.congthuc ct ON ct.mamon = sp.mamon
+              WHERE COALESCE(sp.tenantid, 'DEFAULT') = $2
+                AND ct.manl::text = ANY($1::text[])`,
             [affectedIngredients, tId]
         );
-        affectedProducts = spRes.rows.map((r) => ({
-            maMon: r.mamon,
-            tenMon: r.tenmon,
-            tamHet: Boolean(r.tamhet),
-            tamHetTuDong: Boolean(r.tamhettudong),
-            tamHetBoiMaNL: r.tamhetboimanl || [],
-        }));
+        for (const sp of spCandRes.rows) {
+            const up = await client.query(
+                `INSERT INTO public.branch_availability_86
+                    (tenant_id, branch_id, entity_type, entity_id, is_sold_out, is_auto_cascaded, caused_by_ingredients, updated_by, updated_at)
+                 VALUES ($1, $2, 'PRODUCT', $3, TRUE, TRUE, $4::text[], $5, now())
+                 ON CONFLICT (tenant_id, branch_id, entity_type, entity_id) DO UPDATE
+                     SET is_auto_cascaded = CASE
+                             WHEN public.branch_availability_86.is_sold_out = FALSE OR public.branch_availability_86.is_auto_cascaded = TRUE THEN TRUE
+                             ELSE FALSE
+                         END,
+                         is_sold_out = TRUE,
+                         caused_by_ingredients = ARRAY(
+                             SELECT DISTINCT unnest(COALESCE(public.branch_availability_86.caused_by_ingredients, '{}'::text[]) || $4::text[])
+                         ),
+                         updated_by = EXCLUDED.updated_by,
+                         updated_at = now()
+                 RETURNING is_sold_out, is_auto_cascaded, caused_by_ingredients`,
+                [tId, bId, String(sp.mamon), affectedIngredients, actor]
+            );
+            const r = up.rows[0];
+            affectedProducts.push({
+                maMon: sp.mamon,
+                tenMon: sp.tenmon,
+                branchId: bId,
+                tamHet: Boolean(r.is_sold_out),
+                tamHetTuDong: Boolean(r.is_auto_cascaded),
+                tamHetBoiMaNL: r.caused_by_ingredients || [],
+            });
+        }
 
         // Lớp 3: Topping
         await client.query('SAVEPOINT sp_86_tp_lock');
         try {
-            const tpRes = await client.query(
-                `UPDATE public.topping
-                    SET tamhettudong = CASE WHEN COALESCE(tamhet, FALSE) = FALSE OR COALESCE(tamhettudong, FALSE) = TRUE THEN TRUE ELSE FALSE END,
-                        tamhet = TRUE,
-                        tamhetboimanl = (
-                            SELECT ARRAY(SELECT DISTINCT unnest(COALESCE(tamhetboimanl, '{}'::text[]) || $1::text[]))
-                        )
-                  WHERE COALESCE(tenantid, 'DEFAULT') = $2
+            const tpCandRes = await client.query(
+                `SELECT DISTINCT t.matopping, t.tentopping
+                   FROM public.topping t
+                  WHERE COALESCE(t.tenantid, 'DEFAULT') = $2
                     AND (
-                        manl::text = ANY($1::text[])
-                        OR matopping IN (
+                        t.manl::text = ANY($1::text[])
+                        OR t.matopping IN (
                             SELECT DISTINCT matopping FROM public.topping_congthuc
                              WHERE tenantid = $2 AND manl::text = ANY($1::text[])
                         )
-                    )
-                  RETURNING matopping, tentopping, tamhet, tamhettudong, tamhetboimanl`,
+                    )`,
                 [affectedIngredients, tId]
             );
-            affectedToppings = tpRes.rows.map((r) => ({
-                maTopping: r.matopping,
-                tenTopping: r.tentopping,
-                tamHet: Boolean(r.tamhet),
-                tamHetTuDong: Boolean(r.tamhettudong),
-                tamHetBoiMaNL: r.tamhetboimanl || [],
-            }));
+            for (const tp of tpCandRes.rows) {
+                const up = await client.query(
+                    `INSERT INTO public.branch_availability_86
+                        (tenant_id, branch_id, entity_type, entity_id, is_sold_out, is_auto_cascaded, caused_by_ingredients, updated_by, updated_at)
+                     VALUES ($1, $2, 'TOPPING', $3, TRUE, TRUE, $4::text[], $5, now())
+                     ON CONFLICT (tenant_id, branch_id, entity_type, entity_id) DO UPDATE
+                         SET is_auto_cascaded = CASE
+                                 WHEN public.branch_availability_86.is_sold_out = FALSE OR public.branch_availability_86.is_auto_cascaded = TRUE THEN TRUE
+                                 ELSE FALSE
+                             END,
+                             is_sold_out = TRUE,
+                             caused_by_ingredients = ARRAY(
+                                 SELECT DISTINCT unnest(COALESCE(public.branch_availability_86.caused_by_ingredients, '{}'::text[]) || $4::text[])
+                             ),
+                             updated_by = EXCLUDED.updated_by,
+                             updated_at = now()
+                     RETURNING is_sold_out, is_auto_cascaded, caused_by_ingredients`,
+                    [tId, bId, String(tp.matopping), affectedIngredients, actor]
+                );
+                const r = up.rows[0];
+                affectedToppings.push({
+                    maTopping: tp.matopping,
+                    tenTopping: tp.tentopping,
+                    branchId: bId,
+                    tamHet: Boolean(r.is_sold_out),
+                    tamHetTuDong: Boolean(r.is_auto_cascaded),
+                    tamHetBoiMaNL: r.caused_by_ingredients || [],
+                });
+            }
             await client.query('RELEASE SAVEPOINT sp_86_tp_lock');
         } catch {
             await client.query('ROLLBACK TO SAVEPOINT sp_86_tp_lock').catch(() => {});
         }
 
-        // Lớp 4: Modifier Options (chỉ những option cộng thêm/thay thế dùng nguyên liệu này: khoiluongdelta > 0)
+        // Lớp 4: Modifier Options
         await client.query('SAVEPOINT sp_86_mod_lock');
         try {
-            const modRes = await client.query(
-                `UPDATE public.modifier_options
-                    SET tamhettudong = CASE WHEN COALESCE(tamhet, FALSE) = FALSE OR COALESCE(tamhettudong, FALSE) = TRUE THEN TRUE ELSE FALSE END,
-                        tamhet = TRUE,
-                        tamhetboimanl = (
-                            SELECT ARRAY(SELECT DISTINCT unnest(COALESCE(tamhetboimanl, '{}'::text[]) || $1::text[]))
-                        )
+            const modCandRes = await client.query(
+                `SELECT id, groupid, tenoption
+                   FROM public.modifier_options
                   WHERE tenantid = $2
                     AND id IN (
                         SELECT DISTINCT optionid FROM public.modifier_option_bom
                          WHERE tenantid = $2
                            AND manl::text = ANY($1::text[])
                            AND khoiluongdelta > 0
-                    )
-                  RETURNING id, groupid, tenoption, tamhet, tamhettudong, tamhetboimanl`,
+                    )`,
                 [affectedIngredients, tId]
             );
-            affectedModifiers = modRes.rows.map((r) => ({
-                optionId: Number(r.id),
-                groupId: Number(r.groupid),
-                tenOption: r.tenoption,
-                tamHet: Boolean(r.tamhet),
-                tamHetTuDong: Boolean(r.tamhettudong),
-            }));
+            for (const m of modCandRes.rows) {
+                const up = await client.query(
+                    `INSERT INTO public.branch_availability_86
+                        (tenant_id, branch_id, entity_type, entity_id, is_sold_out, is_auto_cascaded, caused_by_ingredients, updated_by, updated_at)
+                     VALUES ($1, $2, 'MODIFIER', $3, TRUE, TRUE, $4::text[], $5, now())
+                     ON CONFLICT (tenant_id, branch_id, entity_type, entity_id) DO UPDATE
+                         SET is_auto_cascaded = CASE
+                                 WHEN public.branch_availability_86.is_sold_out = FALSE OR public.branch_availability_86.is_auto_cascaded = TRUE THEN TRUE
+                                 ELSE FALSE
+                             END,
+                             is_sold_out = TRUE,
+                             caused_by_ingredients = ARRAY(
+                                 SELECT DISTINCT unnest(COALESCE(public.branch_availability_86.caused_by_ingredients, '{}'::text[]) || $4::text[])
+                             ),
+                             updated_by = EXCLUDED.updated_by,
+                             updated_at = now()
+                     RETURNING is_sold_out, is_auto_cascaded`,
+                    [tId, bId, String(m.id), affectedIngredients, actor]
+                );
+                affectedModifiers.push({
+                    optionId: Number(m.id),
+                    groupId: Number(m.groupid),
+                    tenOption: m.tenoption,
+                    branchId: bId,
+                    tamHet: Boolean(up.rows[0].is_sold_out),
+                    tamHetTuDong: Boolean(up.rows[0].is_auto_cascaded),
+                });
+            }
             await client.query('RELEASE SAVEPOINT sp_86_mod_lock');
         } catch {
             await client.query('ROLLBACK TO SAVEPOINT sp_86_mod_lock').catch(() => {});
         }
 
-        // Lớp 5: Combo (khóa Combo nếu bất kỳ slot nào không còn món khả dụng nào)
+        // Lớp 5: Combo theo Chi nhánh
         await client.query('SAVEPOINT sp_86_cmb_lock');
         try {
-            const cmbRes = await client.query(
-                `UPDATE public.combo c
-                    SET tamhettudong = CASE WHEN COALESCE(c.tamhet, FALSE) = FALSE OR COALESCE(c.tamhettudong, FALSE) = TRUE THEN TRUE ELSE FALSE END,
-                        tamhet = TRUE,
-                        tamhetboimanl = (
-                            SELECT ARRAY(SELECT DISTINCT unnest(COALESCE(c.tamhetboimanl, '{}'::text[]) || $1::text[]))
-                        )
-                  WHERE c.tenantid = $2
+            const cmbCandRes = await client.query(
+                `SELECT c.macombo, c.tencombo
+                   FROM public.combo c
+                  WHERE c.tenantid = $1
                     AND c.dangkinhdoanh = TRUE
                     AND EXISTS (
-                        SELECT 1
-                          FROM public.combo_slots cs
-                         WHERE cs.tenantid = $2
-                           AND cs.macombo = c.macombo
-                           AND NOT EXISTS (
-                               SELECT 1
-                                 FROM public.combo_slot_items csi
-                                 JOIN public.sanpham sp ON sp.mamon = csi.mamon
-                                  AND COALESCE(sp.tenantid, 'DEFAULT') = $2
-                                WHERE csi.slotid = cs.id
-                                  AND sp.dangkinhdoanh = TRUE
-                                  AND COALESCE(sp.tamhet, FALSE) = FALSE
-                           )
-                    )
-                  RETURNING c.macombo, c.tencombo, c.tamhet, c.tamhettudong`,
-                [affectedIngredients, tId]
-            );
-            affectedCombos = cmbRes.rows.map((r) => ({
-                maCombo: r.macombo,
-                tenCombo: r.tencombo,
-                tamHet: Boolean(r.tamhet),
-                tamHetTuDong: Boolean(r.tamhettudong),
-            }));
-            await client.query('RELEASE SAVEPOINT sp_86_cmb_lock');
-        } catch {
-            await client.query('ROLLBACK TO SAVEPOINT sp_86_cmb_lock').catch(() => {});
-        }
-    } else {
-        // UNLOCK thông minh: gỡ danh sách affectedIngredients khỏi tamhetboimanl;
-        // CHỈ tự mở khóa (tamhet = FALSE) nếu tamhettudong = TRUE và mảng nguyên nhân trống (cardinality = 0)
-        // Bảo toàn 100% các món quản lý khóa tay (tamhettudong = FALSE)!
-        const spRes = await client.query(
-            `WITH cleaned AS (
-                 SELECT mamon,
-                        ARRAY(
-                            SELECT elem FROM unnest(COALESCE(tamhetboimanl, '{}'::text[])) AS elem
-                             WHERE NOT (elem = ANY($1::text[]))
-                        ) AS remaining_nl
-                   FROM public.sanpham
-                  WHERE COALESCE(tenantid, 'DEFAULT') = $2
-                    AND (
-                        tamhetboimanl && $1::text[]
-                        OR (tamhet = TRUE AND mamon IN (SELECT DISTINCT mamon FROM public.congthuc WHERE manl::text = ANY($1::text[])))
-                    )
-             )
-             UPDATE public.sanpham sp
-                SET tamhetboimanl = c.remaining_nl,
-                    tamhet = CASE
-                        WHEN COALESCE(sp.tamhettudong, FALSE) = TRUE AND COALESCE(cardinality(c.remaining_nl), 0) = 0 THEN FALSE
-                        ELSE sp.tamhet
-                    END,
-                    tamhettudong = CASE
-                        WHEN COALESCE(sp.tamhettudong, FALSE) = TRUE AND COALESCE(cardinality(c.remaining_nl), 0) = 0 THEN FALSE
-                        ELSE sp.tamhettudong
-                    END
-               FROM cleaned c
-              WHERE sp.mamon = c.mamon
-              RETURNING sp.mamon, sp.tenmon, sp.tamhet, sp.tamhettudong, sp.tamhetboimanl`,
-            [affectedIngredients, tId]
-        );
-        affectedProducts = spRes.rows.map((r) => ({
-            maMon: r.mamon,
-            tenMon: r.tenmon,
-            tamHet: Boolean(r.tamhet),
-            tamHetTuDong: Boolean(r.tamhettudong),
-            tamHetBoiMaNL: r.tamhetboimanl || [],
-        }));
-
-        await client.query('SAVEPOINT sp_86_tp_unlock');
-        try {
-            const tpRes = await client.query(
-                `WITH cleaned AS (
-                     SELECT matopping,
-                            ARRAY(
-                                SELECT elem FROM unnest(COALESCE(tamhetboimanl, '{}'::text[])) AS elem
-                                 WHERE NOT (elem = ANY($1::text[]))
-                            ) AS remaining_nl
-                       FROM public.topping
-                      WHERE COALESCE(tenantid, 'DEFAULT') = $2
-                        AND (
-                            tamhetboimanl && $1::text[]
-                            OR manl::text = ANY($1::text[])
-                            OR matopping IN (SELECT DISTINCT matopping FROM public.topping_congthuc WHERE tenantid = $2 AND manl::text = ANY($1::text[]))
-                        )
-                 )
-                 UPDATE public.topping tp
-                    SET tamhetboimanl = c.remaining_nl,
-                        tamhet = CASE
-                            WHEN COALESCE(tp.tamhettudong, FALSE) = TRUE AND COALESCE(cardinality(c.remaining_nl), 0) = 0 THEN FALSE
-                            ELSE tp.tamhet
-                        END,
-                        tamhettudong = CASE
-                            WHEN COALESCE(tp.tamhettudong, FALSE) = TRUE AND COALESCE(cardinality(c.remaining_nl), 0) = 0 THEN FALSE
-                            ELSE tp.tamhettudong
-                        END
-                   FROM cleaned c
-                  WHERE tp.matopping = c.matopping
-                  RETURNING tp.matopping, tp.tentopping, tp.tamhet, tp.tamhettudong`,
-                [affectedIngredients, tId]
-            );
-            affectedToppings = tpRes.rows.map((r) => ({
-                maTopping: r.matopping,
-                tenTopping: r.tentopping,
-                tamHet: Boolean(r.tamhet),
-                tamHetTuDong: Boolean(r.tamhettudong),
-            }));
-            await client.query('RELEASE SAVEPOINT sp_86_tp_unlock');
-        } catch {
-            await client.query('ROLLBACK TO SAVEPOINT sp_86_tp_unlock').catch(() => {});
-        }
-
-        await client.query('SAVEPOINT sp_86_mod_unlock');
-        try {
-            const modRes = await client.query(
-                `WITH cleaned AS (
-                     SELECT id,
-                            ARRAY(
-                                SELECT elem FROM unnest(COALESCE(tamhetboimanl, '{}'::text[])) AS elem
-                                 WHERE NOT (elem = ANY($1::text[]))
-                            ) AS remaining_nl
-                       FROM public.modifier_options
-                      WHERE tenantid = $2
-                        AND (
-                            tamhetboimanl && $1::text[]
-                            OR id IN (SELECT DISTINCT optionid FROM public.modifier_option_bom WHERE tenantid = $2 AND manl::text = ANY($1::text[]) AND khoiluongdelta > 0)
-                        )
-                 )
-                 UPDATE public.modifier_options mo
-                    SET tamhetboimanl = c.remaining_nl,
-                        tamhet = CASE
-                            WHEN COALESCE(mo.tamhettudong, FALSE) = TRUE AND COALESCE(cardinality(c.remaining_nl), 0) = 0 THEN FALSE
-                            ELSE mo.tamhet
-                        END,
-                        tamhettudong = CASE
-                            WHEN COALESCE(mo.tamhettudong, FALSE) = TRUE AND COALESCE(cardinality(c.remaining_nl), 0) = 0 THEN FALSE
-                            ELSE mo.tamhettudong
-                        END
-                   FROM cleaned c
-                  WHERE mo.id = c.id
-                  RETURNING mo.id, mo.groupid, mo.tenoption, mo.tamhet, mo.tamhettudong`,
-                [affectedIngredients, tId]
-            );
-            affectedModifiers = modRes.rows.map((r) => ({
-                optionId: Number(r.id),
-                groupId: Number(r.groupid),
-                tenOption: r.tenoption,
-                tamHet: Boolean(r.tamhet),
-                tamHetTuDong: Boolean(r.tamhettudong),
-            }));
-            await client.query('RELEASE SAVEPOINT sp_86_mod_unlock');
-        } catch {
-            await client.query('ROLLBACK TO SAVEPOINT sp_86_mod_unlock').catch(() => {});
-        }
-
-        await client.query('SAVEPOINT sp_86_cmb_unlock');
-        try {
-            const cmbRes = await client.query(
-                `UPDATE public.combo c
-                    SET tamhet = FALSE,
-                        tamhettudong = FALSE,
-                        tamhetboimanl = '{}'::text[]
-                  WHERE c.tenantid = $1
-                    AND COALESCE(c.tamhet, FALSE) = TRUE
-                    AND COALESCE(c.tamhettudong, FALSE) = TRUE
-                    AND NOT EXISTS (
                         SELECT 1
                           FROM public.combo_slots cs
                          WHERE cs.tenantid = $1
@@ -852,27 +812,122 @@ async function cascadeIngredient86(client, { tenantId = 'DEFAULT', maNL, action 
                                  FROM public.combo_slot_items csi
                                  JOIN public.sanpham sp ON sp.mamon = csi.mamon
                                   AND COALESCE(sp.tenantid, 'DEFAULT') = $1
+                                 LEFT JOIN public.branch_availability_86 b86
+                                   ON b86.tenant_id = $1 AND b86.branch_id = $2
+                                  AND b86.entity_type = 'PRODUCT' AND b86.entity_id = sp.mamon
                                 WHERE csi.slotid = cs.id
                                   AND sp.dangkinhdoanh = TRUE
-                                  AND COALESCE(sp.tamhet, FALSE) = FALSE
+                                  AND COALESCE(b86.is_sold_out, COALESCE(sp.tamhet, FALSE)) = FALSE
                            )
-                    )
-                  RETURNING c.macombo, c.tencombo, c.tamhet, c.tamhettudong`,
-                [tId]
+                    )`,
+                [tId, bId]
             );
-            affectedCombos = cmbRes.rows.map((r) => ({
-                maCombo: r.macombo,
-                tenCombo: r.tencombo,
-                tamHet: Boolean(r.tamhet),
-                tamHetTuDong: Boolean(r.tamhettudong),
-            }));
-            await client.query('RELEASE SAVEPOINT sp_86_cmb_unlock');
+            for (const c of cmbCandRes.rows) {
+                const up = await client.query(
+                    `INSERT INTO public.branch_availability_86
+                        (tenant_id, branch_id, entity_type, entity_id, is_sold_out, is_auto_cascaded, caused_by_ingredients, updated_by, updated_at)
+                     VALUES ($1, $2, 'COMBO', $3, TRUE, TRUE, $4::text[], $5, now())
+                     ON CONFLICT (tenant_id, branch_id, entity_type, entity_id) DO UPDATE
+                         SET is_sold_out = TRUE,
+                             is_auto_cascaded = TRUE,
+                             caused_by_ingredients = ARRAY(
+                                 SELECT DISTINCT unnest(COALESCE(public.branch_availability_86.caused_by_ingredients, '{}'::text[]) || $4::text[])
+                             ),
+                             updated_by = EXCLUDED.updated_by,
+                             updated_at = now()
+                     RETURNING is_sold_out, is_auto_cascaded`,
+                    [tId, bId, String(c.macombo), affectedIngredients, actor]
+                );
+                affectedCombos.push({
+                    maCombo: c.macombo,
+                    tenCombo: c.tencombo,
+                    branchId: bId,
+                    tamHet: Boolean(up.rows[0].is_sold_out),
+                    tamHetTuDong: Boolean(up.rows[0].is_auto_cascaded),
+                });
+            }
+            await client.query('RELEASE SAVEPOINT sp_86_cmb_lock');
         } catch {
-            await client.query('ROLLBACK TO SAVEPOINT sp_86_cmb_unlock').catch(() => {});
+            await client.query('ROLLBACK TO SAVEPOINT sp_86_cmb_lock').catch(() => {});
+        }
+    } else {
+        // UNLOCK thông minh trong branch_availability_86: bảo toàn món khóa tay (is_auto_cascaded = FALSE)
+        const unlockByType = async (entityType) => {
+            const r = await client.query(
+                `WITH cleaned AS (
+                     SELECT entity_id,
+                            ARRAY(
+                                SELECT elem FROM unnest(COALESCE(caused_by_ingredients, '{}'::text[])) AS elem
+                                 WHERE NOT (elem = ANY($3::text[]))
+                            ) AS remaining_nl
+                       FROM public.branch_availability_86
+                      WHERE tenant_id = $1
+                        AND branch_id = $2
+                        AND entity_type = $4
+                        AND is_sold_out = TRUE
+                        AND caused_by_ingredients && $3::text[]
+                 )
+                 UPDATE public.branch_availability_86 b
+                    SET caused_by_ingredients = c.remaining_nl,
+                        is_sold_out = CASE
+                            WHEN b.is_auto_cascaded = TRUE AND COALESCE(cardinality(c.remaining_nl), 0) = 0 THEN FALSE
+                            ELSE b.is_sold_out
+                        END,
+                        is_auto_cascaded = CASE
+                            WHEN b.is_auto_cascaded = TRUE AND COALESCE(cardinality(c.remaining_nl), 0) = 0 THEN FALSE
+                            ELSE b.is_auto_cascaded
+                        END,
+                        updated_by = $5,
+                        updated_at = now()
+                   FROM cleaned c
+                  WHERE b.tenant_id = $1 AND b.branch_id = $2 AND b.entity_type = $4 AND b.entity_id = c.entity_id
+                  RETURNING b.entity_id, b.is_sold_out, b.is_auto_cascaded, b.caused_by_ingredients`,
+                [tId, bId, affectedIngredients, entityType, actor]
+            );
+            return r.rows;
+        };
+
+        const prodRows = await unlockByType('PRODUCT');
+        for (const r of prodRows) {
+            affectedProducts.push({
+                maMon: r.entity_id,
+                branchId: bId,
+                tamHet: Boolean(r.is_sold_out),
+                tamHetTuDong: Boolean(r.is_auto_cascaded),
+                tamHetBoiMaNL: r.caused_by_ingredients || [],
+            });
+        }
+        const tpRows = await unlockByType('TOPPING');
+        for (const r of tpRows) {
+            affectedToppings.push({
+                maTopping: r.entity_id,
+                branchId: bId,
+                tamHet: Boolean(r.is_sold_out),
+                tamHetTuDong: Boolean(r.is_auto_cascaded),
+            });
+        }
+        const modRows = await unlockByType('MODIFIER');
+        for (const r of modRows) {
+            affectedModifiers.push({
+                optionId: Number(r.entity_id),
+                branchId: bId,
+                tamHet: Boolean(r.is_sold_out),
+                tamHetTuDong: Boolean(r.is_auto_cascaded),
+            });
+        }
+        const cmbRows = await unlockByType('COMBO');
+        for (const r of cmbRows) {
+            affectedCombos.push({
+                maCombo: r.entity_id,
+                branchId: bId,
+                tamHet: Boolean(r.is_sold_out),
+                tamHetTuDong: Boolean(r.is_auto_cascaded),
+            });
         }
     }
 
     return {
+        branchId: bId,
         maNL,
         action: act,
         affectedIngredients,
@@ -884,7 +939,7 @@ async function cascadeIngredient86(client, { tenantId = 'DEFAULT', maNL, action 
     };
 }
 
-async function autoUn86OnRestock(client, { tenantId = 'DEFAULT', maNLList = [] }) {
+async function autoUn86OnRestock(client, { tenantId = 'DEFAULT', branchId = 'DEFAULT', maNLList = [] }) {
     const cleanList = [...new Set((maNLList || []).filter(Boolean))];
     if (cleanList.length === 0) {
         return { unlockedProducts: [], unlockedToppings: [], unlockedModifiers: [], unlockedCombos: [] };
@@ -906,7 +961,7 @@ async function autoUn86OnRestock(client, { tenantId = 'DEFAULT', maNLList = [] }
     const unlockedCombosMap = new Map();
 
     for (const maNL of availableNLs) {
-        const res = await cascadeIngredient86(client, { tenantId, maNL, action: 'UNLOCK' });
+        const res = await cascadeIngredient86(client, { tenantId, branchId, maNL, action: 'UNLOCK' });
         for (const p of res.affectedProducts) {
             if (!p.tamHet) unlockedProductsMap.set(p.maMon, p);
         }
@@ -1027,6 +1082,9 @@ function computeKdsBottleneckTelemetry(rows = []) {
 
 module.exports = {
     VALID_STATIONS,
+    suyLuanTramCheBien,
+    formatModifierTag,
+    loadBranchAvailability86Map,
     normalizeBranchId,
     normalizeStation,
     roomBranchPos,
