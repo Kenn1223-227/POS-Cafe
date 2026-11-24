@@ -633,39 +633,10 @@ function registerPlatformAdminRoutes(
     // 4. Tổng quan sức khỏe toàn nền tảng SaaS (Overview KPIs + Churn Radar 3 Màu + Upsell Signals)
     app.get('/api/platform/overview', kiemTraPlatformAdmin, async (req, res) => {
         try {
+            // [Wave 1 — P0-04] Dùng SECURITY DEFINER RPCs để chạy chuẩn xác dưới app_runtime (NOBYPASSRLS + FORCE RLS)
             const [tRes, billRes] = await Promise.all([
-                pool.query(`
-                    SELECT t.TenantId, t.TenQuan, t.GoiCuoc, t.TrangThai, t.TrialEndsAt, t.SubscriptionEndsAt,
-                           t.FeatureFlags, t.ThoiGianTao,
-                           to_jsonb(t)->>'lastloginat' AS last_login_at,
-                           COALESCE((to_jsonb(t)->>'offlinefailedcount')::int, 0) AS offline_failed_count,
-                           COALESCE((to_jsonb(t)->>'offlinetotalsynccount')::int, 0) AS offline_total_sync_count,
-                           to_jsonb(t)->>'ownercontact' AS owner_contact,
-                           to_jsonb(t)->>'referredby' AS referred_by,
-                           (SELECT COUNT(*) FROM HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1) AS so_don,
-                           (SELECT COUNT(*) FROM HoaDon h WHERE h.TenantId = t.TenantId
-                               AND date_trunc('month', h.ThoiGianTao::timestamptz AT TIME ZONE 'Asia/Ho_Chi_Minh')
-                                   = date_trunc('month', now() AT TIME ZONE 'Asia/Ho_Chi_Minh')) AS so_don_thang_nay,
-                           (SELECT COUNT(*) FROM HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1
-                               AND h.ThoiGianTao >= now() - interval '3 days') AS so_don_3_ngay,
-                           (SELECT COUNT(*) FROM HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1
-                               AND h.ThoiGianTao >= now() - interval '7 days') AS so_don_7_ngay,
-                           (SELECT COUNT(*) FROM HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1
-                               AND h.ThoiGianTao >= now() - interval '14 days'
-                               AND h.ThoiGianTao < now() - interval '7 days') AS so_don_7_14_ngay,
-                           (SELECT COUNT(*) FROM HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1
-                               AND h.ThoiGianTao >= now() - interval '14 days') AS so_don_14_ngay,
-                           (SELECT MAX(h.ThoiGianTao) FROM HoaDon h WHERE h.TenantId = t.TenantId) AS lan_ban_cuoi
-                      FROM Tenants t
-                `),
-                pool.query(`
-                    SELECT
-                        COUNT(*) FILTER (WHERE TrangThai = 'PENDING') AS don_cho_duyet,
-                        COALESCE(SUM(SoTien) FILTER (WHERE TrangThai = 'PENDING'), 0) AS tien_cho_duyet,
-                        COUNT(*) FILTER (WHERE TrangThai = 'PAID') AS don_da_duyet,
-                        COALESCE(SUM(SoTien) FILTER (WHERE TrangThai = 'PAID'), 0) AS tong_thu_goi
-                      FROM Tenant_Billing_Orders
-                `),
+                pool.query('SELECT * FROM public.fn_platform_overview_tenants()'),
+                pool.query('SELECT * FROM public.fn_platform_overview_billing()'),
             ]);
 
             let activePaid = 0;
@@ -774,35 +745,7 @@ function registerPlatformAdminRoutes(
     // 5. Danh sách toàn bộ Tenants kèm Health Metrics 3 màu, Offline Telemetry & Feature Flags
     app.get('/api/platform/tenants', kiemTraPlatformAdmin, async (req, res) => {
         try {
-            const r = await pool.query(`
-                SELECT t.TenantId, t.MaTienTo, t.TenQuan, t.Slug, t.MoHinh, t.GoiCuoc, t.TrangThai,
-                       t.TrialEndsAt, t.SubscriptionEndsAt, t.LastPaymentAt, t.FeatureFlags, t.ThoiGianTao,
-                       to_jsonb(t)->>'lastloginat' AS last_login_at,
-                       COALESCE((to_jsonb(t)->>'offlinefailedcount')::int, 0) AS offline_failed_count,
-                       COALESCE((to_jsonb(t)->>'offlinetotalsynccount')::int, 0) AS offline_total_sync_count,
-                       to_jsonb(t)->>'ownercontact' AS owner_contact,
-                       to_jsonb(t)->>'referredby' AS referred_by,
-                       (SELECT COUNT(*) FROM HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1) AS so_don,
-                       (SELECT COUNT(*) FROM HoaDon h WHERE h.TenantId = t.TenantId
-                           AND date_trunc('month', h.ThoiGianTao::timestamptz AT TIME ZONE 'Asia/Ho_Chi_Minh')
-                               = date_trunc('month', now() AT TIME ZONE 'Asia/Ho_Chi_Minh')) AS so_don_thang_nay,
-                       (SELECT COUNT(*) FROM HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1
-                           AND h.ThoiGianTao >= now() - interval '3 days') AS so_don_3_ngay,
-                       (SELECT COUNT(*) FROM HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1
-                           AND h.ThoiGianTao >= now() - interval '7 days') AS so_don_7_ngay,
-                       (SELECT COUNT(*) FROM HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1
-                           AND h.ThoiGianTao >= now() - interval '14 days'
-                           AND h.ThoiGianTao < now() - interval '7 days') AS so_don_7_14_ngay,
-                       (SELECT COUNT(*) FROM HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1
-                           AND h.ThoiGianTao >= now() - interval '14 days') AS so_don_14_ngay,
-                       (SELECT COALESCE(SUM(h.TongTienThanhToan), 0) FROM HoaDon h WHERE h.TenantId = t.TenantId AND h.TrangThaiTT = 1) AS tong_doanh_thu,
-                       (SELECT MAX(h.ThoiGianTao) FROM HoaDon h WHERE h.TenantId = t.TenantId) AS lan_ban_cuoi,
-                       (SELECT COUNT(*) FROM SanPham s WHERE s.TenantId = t.TenantId AND s.DangKinhDoanh = TRUE) AS so_mon,
-                       (SELECT COUNT(*) FROM NhanVien n WHERE n.TenantId = t.TenantId AND n.TrangThaiLamViec = TRUE) AS so_nv
-                  FROM Tenants t
-                 ORDER BY t.ThoiGianTao DESC
-                 LIMIT 200
-            `);
+            const r = await pool.query('SELECT * FROM public.fn_platform_list_tenants($1)', [200]);
 
             res.json(
                 r.rows.map((row) => {
@@ -972,15 +915,8 @@ function registerPlatformAdminRoutes(
     // 7. Danh sách tất cả đơn thanh toán gói bản quyền trên toàn nền tảng
     app.get('/api/platform/billing/orders', kiemTraPlatformAdmin, async (req, res) => {
         try {
-            const r = await pool.query(`
-                SELECT o.MaDonThanhToan, o.TenantId, t.TenQuan, o.GoiCuoc, o.SoThang, o.SoTien,
-                       o.TrangThai, o.PhuongThucTT, o.MaGiaoDichNgoai, o.GhiChu,
-                       o.ThoiGianTao, o.ThoiGianThanhToan
-                  FROM Tenant_Billing_Orders o
-                  JOIN Tenants t ON t.TenantId = o.TenantId
-                 ORDER BY CASE WHEN o.TrangThai = 'PENDING' THEN 0 ELSE 1 END, o.ThoiGianTao DESC
-                 LIMIT 100
-            `);
+            const statusFilter = req.query?.status ? String(req.query.status).trim().toUpperCase() : null;
+            const r = await pool.query('SELECT * FROM public.fn_platform_list_billing_orders($1, $2)', [statusFilter, 100]);
             res.json(
                 r.rows.map((o) => ({
                     maDonThanhToan: o.madonthanhtoan,
@@ -1018,87 +954,38 @@ function registerPlatformAdminRoutes(
         }
 
         try {
-            const result = await chayGiaoDich(async (client) => {
-                const oRes = await client.query(
-                    `SELECT Id, TenantId, GoiCuoc, SoThang, SoTien, TrangThai
-                       FROM Tenant_Billing_Orders
-                      WHERE MaDonThanhToan = $1
-                      FOR UPDATE`,
-                    [maDonThanhToan]
-                );
-                if (oRes.rows.length === 0) return { notFound: true };
-                const order = oRes.rows[0];
-                if (order.trangthai === 'PAID') return { alreadyPaid: true, order };
-
-                const targetTenantId = order.tenantid;
-                const tRes = await client.query(
-                    'SELECT TenantId, TenQuan, SubscriptionEndsAt FROM Tenants WHERE TenantId = $1 FOR UPDATE',
-                    [targetTenantId]
-                );
-                const t = tRes.rows[0];
-                const baseMs =
-                    t?.subscriptionendsat && new Date(t.subscriptionendsat).getTime() > Date.now()
-                        ? new Date(t.subscriptionendsat).getTime()
-                        : Date.now();
-                const newEnd = new Date(baseMs + Number(order.sothang) * 30 * 86400000).toISOString();
-                const flags = hopNhatFeatureFlags(order.goicuoc, null);
-
-                await client.query(
-                    `UPDATE Tenant_Billing_Orders
-                        SET TrangThai = 'PAID',
-                            MaGiaoDichNgoai = $2,
-                            GhiChu = COALESCE(NULLIF($3, ''), GhiChu),
-                            ThoiGianThanhToan = now()
-                      WHERE Id = $1`,
-                    [order.id, bankTxRef, ghiChu]
-                );
-
-                await client.query(
-                    `UPDATE Tenants
-                        SET GoiCuoc = $2,
-                            FeatureFlags = $3::jsonb,
-                            TrangThai = 'ACTIVE',
-                            SubscriptionEndsAt = $4::timestamptz,
-                            LastPaymentAt = now()
-                      WHERE TenantId = $1`,
-                    [targetTenantId, order.goicuoc, JSON.stringify(flags), newEnd]
-                );
-
-                await ghiAuditLog(client, {
-                    tenantId: targetTenantId,
-                    maNV: `PLATFORM:${req.platformAdmin.username}`,
-                    nguoiDuyet: req.platformAdmin.username,
-                    hanhDong: 'PLATFORM_BILLING_APPROVED',
-                    doiTuong: 'TENANT',
-                    maDoiTuong: maDonThanhToan,
-                    giaTriMoi: {
-                        goiCuoc: order.goicuoc,
-                        soThang: Number(order.sothang),
-                        soTien: Number(order.sotien),
-                        bankTxRef,
-                        subscriptionEndsAt: newEnd,
-                    },
-                    lyDo: ghiChu || `Super Admin đối soát sao kê ${bankTxRef}`,
-                    ip: req.ip,
-                    batBuoc: true,
-                });
-
-                return {
-                    alreadyPaid: false,
-                    targetTenantId,
-                    tenQuan: t?.tenquan || targetTenantId,
-                    goiCuoc: order.goicuoc,
-                    soThang: Number(order.sothang),
-                    subscriptionEndsAt: newEnd,
-                };
-            }, 'DEFAULT');
-
-            if (result.notFound) {
+            // [Wave 1 — P0-04] Dùng SECURITY DEFINER RPC fn_platform_manual_approve_billing (hoạt động an toàn dưới app_runtime NOBYPASSRLS + ghi Audit_Logs)
+            const lookup = await pool.query('SELECT * FROM public.fn_lookup_billing_order($1)', [maDonThanhToan]);
+            if (lookup.rows.length === 0) {
                 return res.status(404).json({ message: 'Không tìm thấy đơn thanh toán!' });
             }
-            if (result.alreadyPaid) {
+            const flags = hopNhatFeatureFlags(lookup.rows[0].goicuoc, null);
+            const rpcRes = await pool.query(
+                `SELECT * FROM public.fn_platform_manual_approve_billing($1, $2, $3, $4::jsonb, $5, $6)`,
+                [
+                    maDonThanhToan,
+                    bankTxRef,
+                    ghiChu,
+                    JSON.stringify(flags),
+                    req.platformAdmin.username,
+                    req.ip || null,
+                ]
+            );
+            const row = rpcRes.rows[0];
+            if (!row || row.status === 'NOT_FOUND') {
+                return res.status(404).json({ message: 'Không tìm thấy đơn thanh toán!' });
+            }
+            if (row.status === 'ALREADY_PAID') {
                 return res.json({ message: 'Đơn thanh toán này đã được duyệt trước đó!' });
             }
+            const result = {
+                alreadyPaid: false,
+                targetTenantId: row.target_tenant_id,
+                tenQuan: row.ten_quan || row.target_tenant_id,
+                goiCuoc: row.goi_cuoc,
+                soThang: Number(row.so_thang),
+                subscriptionEndsAt: row.subscription_ends_at,
+            };
             xoaCacheEntitlement(result.targetTenantId);
 
             res.json({
@@ -1119,36 +1006,27 @@ function registerPlatformAdminRoutes(
         }
 
         try {
-            const tRes = await pool.query(
-                `SELECT TenantId, MaTienTo, TenQuan, GoiCuoc, TrangThai, TrialEndsAt, SubscriptionEndsAt, FeatureFlags
-                   FROM Tenants WHERE TenantId = $1`,
-                [tenantId]
+            const expiresInSeconds = 15 * 60;
+            const impersonatedExpiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
+
+            // [Wave 1 — P0-04] Dùng SECURITY DEFINER RPC fn_platform_impersonate_prepare (tra cứu NV + ghi Audit_Logs dưới NOBYPASSRLS)
+            const impRes = await pool.query(
+                `SELECT * FROM public.fn_platform_impersonate_prepare($1, $2, $3, $4::timestamptz, $5)`,
+                [tenantId, req.platformAdmin.username, lyDo, impersonatedExpiresAt, req.ip || null]
             );
-            if (tRes.rows.length === 0) {
+            const row = impRes.rows[0];
+            if (!row || row.status === 'TENANT_NOT_FOUND') {
                 return res.status(404).json({ message: 'Không tìm thấy quán cần hỗ trợ!' });
             }
-            const t = tRes.rows[0];
-
-            // Tìm 1 tài khoản Quản lý đang hoạt động của quán để chạy phiên hỗ trợ 15 phút
-            const nvRes = await pool.query(
-                `SELECT MaNV, TenNV, VaiTro
-                   FROM NhanVien
-                  WHERE COALESCE(TenantId, 'DEFAULT') = $1
-                    AND TrangThaiLamViec = TRUE
-                  ORDER BY CASE WHEN VaiTro = 1 THEN 0 ELSE 1 END, MaNV ASC
-                  LIMIT 1`,
-                [tenantId]
-            );
-            if (nvRes.rows.length === 0) {
+            if (row.status === 'NO_ACTIVE_STAFF') {
                 return res.status(409).json({
                     message: 'Quán này chưa có tài khoản nhân viên đang hoạt động để mở phiên hỗ trợ!',
                 });
             }
-            const nv = nvRes.rows[0];
+            const t = row;
+            const nv = { manv: row.manv, tennv: row.tennv, vaitro: row.vaitro };
             const subscription = danhGiaTrangThaiGoi(t);
             const featureFlags = hopNhatFeatureFlags(t.goicuoc, t.featureflags);
-            const expiresInSeconds = 15 * 60;
-            const impersonatedExpiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
 
             const token = jwt.sign(
                 {
@@ -1165,24 +1043,6 @@ function registerPlatformAdminRoutes(
                 process.env.JWT_SECRET,
                 { expiresIn: '15m' }
             );
-
-            await ghiAuditLog(pool, {
-                tenantId: t.tenantid,
-                maNV: nv.manv,
-                vaiTro: 1,
-                nguoiDuyet: req.platformAdmin.username,
-                hanhDong: 'PLATFORM_IMPERSONATION_STARTED',
-                doiTuong: 'TENANT',
-                maDoiTuong: t.tenantid,
-                giaTriMoi: {
-                    impersonatedBy: req.platformAdmin.username,
-                    asStaff: nv.manv,
-                    expiresAt: impersonatedExpiresAt,
-                },
-                lyDo,
-                ip: req.ip,
-                batBuoc: true,
-            });
 
             res.json({
                 message: `🕵️ Đã mở phiên hỗ trợ 15 phút cho "${t.tenquan}" (được ghi nhật ký kiểm toán).`,

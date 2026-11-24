@@ -105,6 +105,62 @@ function computeSafeWacOnStockIn({
 }
 
 /**
+ * [Wave 2 — P0-05] Ghi bút toán chênh lệch giá vốn vào sổ public.cogs_adjustment_journal
+ * khi bù tồn âm (NEGATIVE_STOCK_CATCHUP) hoặc hồi tố đảo phiếu nhập (RECEIPT_REVERSAL_REPLAY).
+ */
+async function recordCogsAdjustment(
+    client,
+    {
+        tenantId = 'DEFAULT',
+        branchId = null,
+        businessDate = null,
+        maNL,
+        sourceType,
+        refMaGiaoDich = null,
+        qtyAffected = 0,
+        oldUnitCost = 0,
+        newUnitCost = 0,
+        adjustmentAmount = 0,
+        createdBy = 'SYSTEM',
+    }
+) {
+    const adj = lam2(adjustmentAmount);
+    if (!maNL || Math.abs(adj) < 0.01) return null;
+    const tId = String(tenantId || 'DEFAULT');
+    const bId = normalizeInventoryBranch(tId, branchId);
+    const bizDate =
+        businessDate && /^\d{4}-\d{2}-\d{2}$/.test(String(businessDate).slice(0, 10))
+            ? String(businessDate).slice(0, 10)
+            : todayDateVN();
+
+    const r = await client.query(
+        `INSERT INTO public.cogs_adjustment_journal (
+             tenant_id, branch_id, business_date, ma_nl, source_type,
+             ref_ma_giao_dich, qty_affected, old_unit_cost, new_unit_cost,
+             adjustment_amount, created_by
+         )
+         VALUES ($1::varchar, $2::varchar, $3::date, $4::varchar, $5::varchar,
+                 $6::varchar, $7::numeric, $8::numeric, $9::numeric,
+                 $10::numeric, $11::varchar)
+         RETURNING id, adjustment_amount`,
+        [
+            tId,
+            bId,
+            bizDate,
+            String(maNL),
+            String(sourceType || 'NEGATIVE_STOCK_CATCHUP'),
+            refMaGiaoDich !== null && refMaGiaoDich !== undefined ? String(refMaGiaoDich) : null,
+            lam3(qtyAffected),
+            lam4(oldUnitCost),
+            lam4(newUnitCost),
+            adj,
+            String(createdBy || 'SYSTEM').slice(0, 64),
+        ]
+    );
+    return r.rows[0] || null;
+}
+
+/**
  * Phân bổ chi phí vận chuyển / giảm giá NCC (Landed Cost) theo tỷ trọng tiền hàng từng dòng.
  * Dòng cuối gánh phần làm tròn dư để tổng phân bổ khớp tuyệt đối 0đ sai số.
  */
@@ -526,9 +582,21 @@ async function detectSubRecipeCycle(client, tenantId = 'DEFAULT', maNLThanhPham,
  * Chạy lại lịch sử WAC (WAC Replay) sau khi lập phiếu đảo (LoaiGD = 9) cho 1 phiếu nhập sai giá!
  * Tự động loại bỏ cặp (phiếu nhập sai + phiếu đảo) và tính lại đúng GiaVonDonVi tuần tự cho nguyên liệu.
  */
-async function replayWacForBranchIngredient(client, { tenantId = 'DEFAULT', branchId = null, maNL }) {
+async function replayWacForBranchIngredient(
+    client,
+    { tenantId = 'DEFAULT', branchId = null, maNL, refMaGiaoDich = null, createdBy = 'SYSTEM' }
+) {
     const tId = String(tenantId || 'DEFAULT');
     const bId = normalizeInventoryBranch(tId, branchId);
+
+    // Lấy mốc ngày khóa sổ kho gần nhất (không được sửa giavonsau cho các kỳ đã khóa)
+    const lockRes = await client.query(
+        `SELECT MAX(ngaykhoasoden)::text AS locked_until
+           FROM public.khoaso_kho
+          WHERE tenantid = $1::text AND branchid = $2::text`,
+        [tId, bId]
+    );
+    const lockedUntil = lockRes.rows[0]?.locked_until || null;
 
     // Lấy danh sách các phiếu nhập gốc đã bị đảo (LoaiGD = 9)
     const revRes = await client.query(
@@ -544,9 +612,11 @@ async function replayWacForBranchIngredient(client, { tenantId = 'DEFAULT', bran
 
     // Kéo toàn bộ lịch sử giao dịch POSTED của nguyên liệu tại chi nhánh này
     const histRes = await client.query(
-        `SELECT p.magiaodich, p.loaigd, p.thoigiantao,
+        `SELECT ct.ctid AS row_ctid, p.magiaodich, p.loaigd, p.thoigiantao,
+                COALESCE(p.ngaychungtu::text, TO_CHAR(p.thoigiantao AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD')) AS doc_date,
                 ct.soluong, COALESCE(ct.dongianhap, 0) AS dongianhap,
-                COALESCE(ct.chiphiphanbo, 0) AS chiphiphanbo
+                COALESCE(ct.chiphiphanbo, 0) AS chiphiphanbo,
+                COALESCE(ct.giavonsau, 0) AS giavonsau
            FROM public.chitietgiaodichkho ct
            JOIN public.phieugiaodichkho p ON p.magiaodich = ct.magiaodich
           WHERE COALESCE(p.tenantid::text, 'DEFAULT') = $1::text
@@ -559,6 +629,10 @@ async function replayWacForBranchIngredient(client, { tenantId = 'DEFAULT', bran
 
     let runningStock = 0;
     let runningWac = 0;
+    let replayCogsDelta = 0;
+    let replayQtyAffected = 0;
+    let lastOldUnitCost = 0;
+    let updatedLedgerRows = 0;
 
     for (const row of histRes.rows) {
         const gdId = String(row.magiaodich);
@@ -566,11 +640,14 @@ async function replayWacForBranchIngredient(client, { tenantId = 'DEFAULT', bran
         const qty = Number(row.soluong || 0);
         const unitPrice = Number(row.dongianhap || 0);
         const landed = Number(row.chiphiphanbo || 0);
+        const oldGiaVonSau = Number(row.giavonsau || 0);
+        const docDate = row.doc_date ? String(row.doc_date).slice(0, 10) : todayDateVN();
+        const isLockedPeriod = Boolean(lockedUntil && docDate <= lockedUntil);
 
         // Bỏ qua cặp phiếu nhập bị đảo & phiếu đảo (triệt tiêu hoàn toàn ảnh hưởng của giá nhập sai!)
         if (loai === 9 || reversedIds.has(gdId)) continue;
 
-        if (loai === 1 || loai === 10) {
+        if (loai === 1 || loai === 5 || loai === 10) {
             const wac = computeSafeWacOnStockIn({
                 tonCu: runningStock,
                 giaVonCu: runningWac,
@@ -580,23 +657,41 @@ async function replayWacForBranchIngredient(client, { tenantId = 'DEFAULT', bran
             });
             runningStock = lam3(runningStock + qty);
             runningWac = wac.giaVonMoi;
-        } else if (loai === 2 || loai === 6) {
+        } else if (loai === 2 || loai === 4 || loai === 6) {
             runningStock = lam3(runningStock - qty);
+            if ((loai === 6 || loai === 2) && Math.abs(runningWac - oldGiaVonSau) >= 0.0001) {
+                replayQtyAffected = lam3(replayQtyAffected + Math.abs(qty));
+                replayCogsDelta = lam2(replayCogsDelta + Math.abs(qty) * (runningWac - oldGiaVonSau));
+                lastOldUnitCost = oldGiaVonSau;
+            }
         } else if (loai === 7) {
             runningStock = lam3(runningStock + qty);
         } else if (loai === 3) {
             runningStock = lam3(runningStock + qty);
+        }
+
+        // Cập nhật lại chitietgiaodichkho.giavonsau cho các kỳ chưa bị khóa trong khoaso_kho
+        if (!isLockedPeriod && Math.abs(runningWac - oldGiaVonSau) >= 0.0001) {
+            await client.query(
+                `UPDATE public.chitietgiaodichkho
+                    SET giavonsau = $1::numeric
+                  WHERE ctid = $2::tid`,
+                [lam4(runningWac), row.row_ctid]
+            );
+            updatedLedgerRows += 1;
         }
         // LoaiGD = 8 (Hao hụt hủy món đã pha): tồn đã trừ ở LoaiGD = 6
         void landed;
     }
 
     const curTk = await client.query(
-        `SELECT soluongton FROM public.tonkhochinhanh
+        `SELECT soluongton, COALESCE(giavondonvi, 0) AS giavondonvi
+           FROM public.tonkhochinhanh
           WHERE tenantid = $1::text AND branchid = $2::text AND manl = $3::text`,
         [tId, bId, maNL]
     );
     const actualStock = curTk.rows.length > 0 ? Number(curTk.rows[0].soluongton || 0) : runningStock;
+    const prevBranchWac = curTk.rows.length > 0 ? Number(curTk.rows[0].giavondonvi || 0) : lastOldUnitCost;
 
     await updateBranchStockRow(client, {
         tenantId: tId,
@@ -606,7 +701,29 @@ async function replayWacForBranchIngredient(client, { tenantId = 'DEFAULT', bran
         nextWac: runningWac,
     });
 
-    return { maNL, replayedWac: runningWac, currentStock: actualStock };
+    if (Math.abs(replayCogsDelta) >= 0.01) {
+        await recordCogsAdjustment(client, {
+            tenantId: tId,
+            branchId: bId,
+            businessDate: todayDateVN(),
+            maNL,
+            sourceType: 'RECEIPT_REVERSAL_REPLAY',
+            refMaGiaoDich,
+            qtyAffected: replayQtyAffected,
+            oldUnitCost: lastOldUnitCost || prevBranchWac,
+            newUnitCost: runningWac,
+            adjustmentAmount: replayCogsDelta,
+            createdBy,
+        });
+    }
+
+    return {
+        maNL,
+        replayedWac: runningWac,
+        currentStock: actualStock,
+        updatedLedgerRows,
+        cogsAdjustment: replayCogsDelta,
+    };
 }
 
 /**
@@ -823,12 +940,25 @@ async function computeShiftAvtReport(client, { tenantId = 'DEFAULT', branchId = 
     for (const r of txRes.rows) {
         allNlIds.add(r.manl);
         if (!txByNl.has(r.manl)) {
-            txByNl.set(r.manl, { nhapNau: 0, banHang: 0, hoanKho: 0, xuatHuy: 0, haoHutHuyMon: 0, wasteByReason: {} });
+            txByNl.set(r.manl, {
+                nhapNau: 0,
+                transferIn: 0,
+                transferOut: 0,
+                daoNhap: 0,
+                banHang: 0,
+                hoanKho: 0,
+                xuatHuy: 0,
+                haoHutHuyMon: 0,
+                wasteByReason: {},
+            });
         }
         const entry = txByNl.get(r.manl);
         const loai = Number(r.loaigd);
         const qty = Number(r.tong_sl || 0);
         if (loai === 1 || loai === 10) entry.nhapNau = lam3(entry.nhapNau + qty);
+        else if (loai === 5) entry.transferIn = lam3(entry.transferIn + Math.abs(qty));
+        else if (loai === 4) entry.transferOut = lam3(entry.transferOut + Math.abs(qty));
+        else if (loai === 9) entry.daoNhap = lam3(entry.daoNhap + Math.abs(qty));
         else if (loai === 6) entry.banHang = lam3(entry.banHang + qty);
         else if (loai === 7) entry.hoanKho = lam3(entry.hoanKho + qty);
         else if (loai === 2) {
@@ -847,14 +977,25 @@ async function computeShiftAvtReport(client, { tenantId = 'DEFAULT', branchId = 
 
     for (const maNL of [...allNlIds].sort()) {
         const snap = snapMap.get(maNL);
-        const tx = txByNl.get(maNL) || { nhapNau: 0, banHang: 0, hoanKho: 0, xuatHuy: 0, haoHutHuyMon: 0, wasteByReason: {} };
+        const tx = txByNl.get(maNL) || {
+            nhapNau: 0,
+            transferIn: 0,
+            transferOut: 0,
+            daoNhap: 0,
+            banHang: 0,
+            hoanKho: 0,
+            xuatHuy: 0,
+            haoHutHuyMon: 0,
+            wasteByReason: {},
+        };
         if (!snap) continue; // Chỉ tính AvT chính xác trên các nguyên liệu đã chốt tồn đầu/cuối ca
 
         const tonDauCa = lam3(snap.tondauca);
         const tonCuoiCa = snap.toncuoica !== null && snap.toncuoica !== undefined ? lam3(snap.toncuoica) : lam3(snap.tonhientai);
         const giaVon = Number(snap.giavon || 0);
 
-        const actualUsage = lam3(tonDauCa + tx.nhapNau - tonCuoiCa);
+        // [Wave 2 — P0-05] Đưa đủ TRANSFER_IN (5), TRANSFER_OUT (4) và phiếu đảo nhập (9) vào actualUsage
+        const actualUsage = lam3(tonDauCa + tx.nhapNau + tx.transferIn - tx.transferOut - tx.daoNhap - tonCuoiCa);
         // Loại trừ hoàn kho (7) & hao hụt hủy món đã pha (8) khỏi tổng tiêu hao bán hàng (6) để không đếm trùng
         const theoreticalUsage = lam3(Math.max(0, tx.banHang - tx.hoanKho - tx.haoHutHuyMon));
         const recordedWaste = lam3(tx.xuatHuy + tx.haoHutHuyMon);
@@ -872,6 +1013,9 @@ async function computeShiftAvtReport(client, { tenantId = 'DEFAULT', branchId = 
             giaVonDonVi: giaVon,
             tonDauCa,
             nhapHoacNauTrongCa: tx.nhapNau,
+            transferInTrongCa: tx.transferIn,
+            transferOutTrongCa: tx.transferOut,
+            daoNhapTrongCa: tx.daoNhap,
             tonKiemCuoiCa: tonCuoiCa,
             actualUsage,
             theoreticalUsage,
@@ -910,6 +1054,7 @@ module.exports = {
     todayDateVN,
     ensureBranchRecord,
     computeSafeWacOnStockIn,
+    recordCogsAdjustment,
     allocateLandedCost,
     lockBranchStockOrdered,
     updateBranchStockRow,

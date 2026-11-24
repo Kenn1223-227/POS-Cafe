@@ -4,6 +4,7 @@ const {
     recalculateInvoiceTotals,
     capSoThuTuNgayKhongTrung,
 } = require('./fohEngineService');
+const { emitScopedKdsEvent, normalizeBranchId } = require('./kdsPhase2Engine');
 
 function layGioHienTaiHHMMVN() {
     const parts = new Intl.DateTimeFormat('en-GB', {
@@ -1019,23 +1020,29 @@ function registerFohPhase1Routes(app, deps) {
                 };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'barista')).emit('CO_DON_MOI', {
-                maHoaDon,
-                tenBan: ketQua.monFired[0]?.tenBan || null,
-                laBaoBepCourse: true,
-                courseNo: courseNo ? Number(courseNo) : null,
-                danhSachMon: ketQua.monFired,
-            });
-            io.to(roomTen(tenantId, 'barista'))
-                .to(roomTen(tenantId, 'phucvu'))
-                .to(roomTen(tenantId, 'thungan'))
-                .emit('kds:course_fired', {
-                    maHoaDon,
-                    courseNo: courseNo ? Number(courseNo) : null,
-                    firedIds: ketQua.firedIds,
-                    danhSachMon: ketQua.monFired,
-                    firedAt: new Date().toISOString(),
+            const fireBranchId = normalizeBranchId(ketQua.hoaDon?.branchId || req.user?.branchId || 'DEFAULT');
+            const fireStations = [...new Set((ketQua.monFired || []).map((m) => m.tramCheBien || 'BAR_CHINH'))];
+            for (const st of fireStations.length > 0 ? fireStations : ['ALL']) {
+                emitScopedKdsEvent(io, {
+                    tenantId,
+                    branchId: fireBranchId,
+                    station: st,
+                    eventType: 'COURSE_FIRED',
+                    socketEvents: ['CO_DON_MOI', 'kds:course_fired'],
+                    payload: {
+                        maHoaDon,
+                        tenBan: ketQua.monFired[0]?.tenBan || null,
+                        laBaoBepCourse: true,
+                        courseNo: courseNo ? Number(courseNo) : null,
+                        firedIds: ketQua.firedIds,
+                        danhSachMon: ketQua.monFired.filter((m) => st === 'ALL' || (m.tramCheBien || 'BAR_CHINH') === st),
+                        firedAt: new Date().toISOString(),
+                    },
+                    includeExpo: true,
+                    includeWaiter: true,
+                    includePos: true,
                 });
+            }
 
             res.json({
                 message: `🔥 Đã báo bếp ra ${ketQua.firedIds.length} món${courseNo ? ` (Đợt món #${courseNo})` : ''}!`,
@@ -1590,17 +1597,25 @@ function registerFohPhase1Routes(app, deps) {
                     trangThai: 2,
                 });
             }
-            io.to(roomTen(tenantId, 'barista'))
-                .to(roomTen(tenantId, 'phucvu'))
-                .to(roomTen(tenantId, 'thungan'))
-                .emit('kds:item_transferred', {
+            const transferBranchId = normalizeBranchId(req.user?.branchId || 'DEFAULT');
+            emitScopedKdsEvent(io, {
+                tenantId,
+                branchId: transferBranchId,
+                station: 'ALL',
+                eventType: 'ITEM_TRANSFERRED',
+                socketEvents: ['kds:item_transferred'],
+                payload: {
                     fromMaHoaDon: ketQua.fromMaHoaDon,
                     toMaHoaDon: ketQua.toMaHoaDon,
                     fromTenBan: ketQua.fromTenBan,
                     toTenBan: ketQua.destTenBan,
                     transferredIds: ketQua.transferredIds,
                     transferredAt: new Date().toISOString(),
-                });
+                },
+                includeExpo: true,
+                includeWaiter: true,
+                includePos: true,
+            });
 
             res.json({
                 message: `🔄 Đã chuyển ${ketQua.movedCups} ly từ ${ketQua.fromTenBan} sang ${ketQua.destTenBan}${ketQua.sourceClosed ? ' (đã đóng sạch bàn nguồn)' : ''}!`,

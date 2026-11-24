@@ -47,12 +47,13 @@ export function useBarcodeScanner({ onScan, enabled = true, maxInterKeyMs = 50, 
             activeEl.value.endsWith(code)
           ) {
             const cleanVal = activeEl.value.slice(0, activeEl.value.length - code.length)
-            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-              window.HTMLInputElement.prototype,
-              'value'
-            )?.set
-            if (nativeInputValueSetter) {
-              nativeInputValueSetter.call(activeEl, cleanVal)
+            const targetProto =
+              activeEl.tagName === 'TEXTAREA'
+                ? window.HTMLTextAreaElement.prototype
+                : window.HTMLInputElement.prototype
+            const nativeValueSetter = Object.getOwnPropertyDescriptor(targetProto, 'value')?.set
+            if (nativeValueSetter) {
+              nativeValueSetter.call(activeEl, cleanVal)
               activeEl.dispatchEvent(new Event('input', { bubbles: true }))
             }
           }

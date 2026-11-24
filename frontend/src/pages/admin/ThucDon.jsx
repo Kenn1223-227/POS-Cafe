@@ -7,6 +7,8 @@ import FeatureLockedCard from '../../components/FeatureLockedCard'
 import { hasFeatureFlag } from '../../utils/featureFlags'
 import { formatVND } from '../../utils/format'
 import AiMenuImporterModal from './components/AiMenuImporterModal'
+import ConfirmPinModal from '../../components/ConfirmPinModal'
+import axiosClient from '../../api/axiosClient'
 
 const TRAM_KDS_OPTIONS = [
   { value: 'BAR_CHINH', label: '☕ Bar Chính (Espresso / Cà phê)' },
@@ -122,8 +124,66 @@ export default function ThucDon() {
     })
   }
 
-  const handleDelete = async (maMon) => {
-    if (!window.confirm(`Ngừng kinh doanh món ${maMon}?`)) return
+  const [deleteTargetMon, setDeleteTargetMon] = useState(null)
+  const [combos, setCombos] = useState([])
+  const [comboForm, setComboForm] = useState({ maCombo: '', tenCombo: '', giaBanCombo: 59000, slotName: 'Chọn đồ uống', maMons: '' })
+  const [savingCombo, setSavingCombo] = useState(false)
+
+  const loadCombos = async () => {
+    try {
+      const res = await axiosClient.get('/combos', { silent: true })
+      setCombos(Array.isArray(res?.danhSachCombo) ? res.danhSachCombo : Array.isArray(res) ? res : [])
+    } catch {
+      // ignore
+    }
+  }
+
+  useEffect(() => {
+    loadCombos()
+  }, [])
+
+  const handleCreateCombo = async (e) => {
+    e.preventDefault()
+    const maMons = String(comboForm.maMons || '')
+      .split(',')
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean)
+    if (!comboForm.maCombo.trim() || !comboForm.tenCombo.trim() || maMons.length === 0) {
+      toast.error('Nhập đủ Mã Combo, Tên Combo và ít nhất 1 Mã món!')
+      return
+    }
+    setSavingCombo(true)
+    try {
+      await axiosClient.post('/combos', {
+        maCombo: comboForm.maCombo.trim().toUpperCase(),
+        tenCombo: comboForm.tenCombo.trim(),
+        giaBanCombo: Number(comboForm.giaBanCombo || 0),
+        slots: [
+          {
+            tenSlot: comboForm.slotName || 'Chọn món',
+            soLuongChon: 1,
+            items: maMons.map((m) => ({ maMon: m, kichThuocMacDinh: 'M', phuThu: 0 })),
+          },
+        ],
+      })
+      toast.success(`🎁 Đã lưu Combo "${comboForm.tenCombo}"!`)
+      setComboForm({ maCombo: '', tenCombo: '', giaBanCombo: 59000, slotName: 'Chọn đồ uống', maMons: '' })
+      await loadCombos()
+    } catch {
+      // Interceptor xử lý
+    } finally {
+      setSavingCombo(false)
+    }
+  }
+
+  const handleDelete = (maMon) => {
+    setDeleteTargetMon(maMon)
+  }
+
+  const executeDelete = async () => {
+    if (!deleteTargetMon) return
+    const maMon = deleteTargetMon
+    setDeleteTargetMon(null)
     try {
       await sanPhamService.remove(maMon)
       toast.success('Đã chuyển trạng thái ngừng kinh doanh')
@@ -904,10 +964,83 @@ export default function ThucDon() {
         </div>
       )}
 
+      {/* [Wave 3B — P1-02] Quản lý Combo theo Slot */}
+      <div className="bg-white rounded-2xl border border-purple-200 p-5 shadow-sm space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-extrabold text-purple-900">🎁 Quản lý Combo theo Slot</h2>
+            <p className="text-xs text-stone-500">Tạo gói Combo cố định giá (phân bổ Pro-rata 0đ sai số) hiện trực tiếp trên POS</p>
+          </div>
+          <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-purple-100 text-purple-800">
+            {combos.length} Combo
+          </span>
+        </div>
+        <form onSubmit={handleCreateCombo} className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
+          <input
+            type="text"
+            placeholder="Mã Combo (VD: CB_SANG)"
+            value={comboForm.maCombo}
+            onChange={(e) => setComboForm((p) => ({ ...p, maCombo: e.target.value }))}
+            className="rounded-xl border border-stone-300 px-3 py-2 text-xs font-semibold"
+          />
+          <input
+            type="text"
+            placeholder="Tên Combo (VD: Combo Bữa Sáng)"
+            value={comboForm.tenCombo}
+            onChange={(e) => setComboForm((p) => ({ ...p, tenCombo: e.target.value }))}
+            className="rounded-xl border border-stone-300 px-3 py-2 text-xs font-semibold"
+          />
+          <input
+            type="number"
+            min="0"
+            placeholder="Giá Combo (VNĐ)"
+            value={comboForm.giaBanCombo}
+            onChange={(e) => setComboForm((p) => ({ ...p, giaBanCombo: e.target.value }))}
+            className="rounded-xl border border-stone-300 px-3 py-2 text-xs font-semibold"
+          />
+          <input
+            type="text"
+            placeholder="Mã món trong Slot (VD: CF01,BX01)"
+            value={comboForm.maMons}
+            onChange={(e) => setComboForm((p) => ({ ...p, maMons: e.target.value }))}
+            className="rounded-xl border border-stone-300 px-3 py-2 text-xs font-semibold"
+          />
+          <button
+            type="submit"
+            disabled={savingCombo}
+            className="rounded-xl bg-purple-700 hover:bg-purple-800 text-white text-xs font-extrabold px-4 py-2 cursor-pointer disabled:opacity-50"
+          >
+            {savingCombo ? 'Đang lưu...' : '➕ Tạo / Cập nhật Combo'}
+          </button>
+        </form>
+        {combos.length > 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {combos.map((c) => (
+              <div key={c.maCombo} className="p-3 rounded-xl bg-purple-50/60 border border-purple-200 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-extrabold text-purple-950">{c.tenCombo} ({c.maCombo})</p>
+                  <p className="text-[11px] text-purple-700">{(c.slots || []).length} slot • {formatVND(c.giaBanCombo)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <AiMenuImporterModal
         isOpen={showAiImporter}
         onClose={() => setShowAiImporter(false)}
         onImported={loadMenu}
+      />
+      <ConfirmPinModal
+        open={Boolean(deleteTargetMon)}
+        mode="confirm"
+        danger
+        title="Ngừng kinh doanh món"
+        message={deleteTargetMon ? `Ngừng kinh doanh món ${deleteTargetMon}?` : ''}
+        confirmText="Ngừng kinh doanh"
+        onConfirm={executeDelete}
+        onCancel={() => setDeleteTargetMon(null)}
       />
     </div>
   )

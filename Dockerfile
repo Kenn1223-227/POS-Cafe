@@ -15,7 +15,6 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY server.js db.js config.js middleware.js password.js ./
 COPY modules ./modules
 COPY db ./db
-COPY scripts ./scripts
 
 RUN chown -R node:node /app
 USER node

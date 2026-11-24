@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import toast from 'react-hot-toast'
 import { khuyenMaiService } from '../../services/khuyenMaiService'
 import { formatVND } from '../../utils/format'
+import ConfirmPinModal from '../../components/ConfirmPinModal'
 
 const WEEKDAYS = [
   { id: '1', label: 'T2' },
@@ -105,8 +106,16 @@ export default function KhuyenMai() {
     }
   }
 
-  const handleDelete = async (km) => {
-    if (!window.confirm(`Xóa chương trình "${km.tenChuongTrinh}"?`)) return
+  const [deleteTarget, setDeleteTarget] = useState(null)
+
+  const handleDelete = (km) => {
+    setDeleteTarget(km)
+  }
+
+  const executeDelete = async () => {
+    if (!deleteTarget) return
+    const km = deleteTarget
+    setDeleteTarget(null)
     try {
       const res = await khuyenMaiService.remove(km.id)
       toast.success(res.message)
@@ -430,6 +439,16 @@ export default function KhuyenMai() {
           </div>
         )}
       </div>
+      <ConfirmPinModal
+        open={Boolean(deleteTarget)}
+        mode="confirm"
+        danger
+        title="Xóa chương trình khuyến mãi"
+        message={deleteTarget ? `Xóa chương trình "${deleteTarget.tenChuongTrinh}"?` : ''}
+        confirmText="Xóa chương trình"
+        onConfirm={executeDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   )
 }

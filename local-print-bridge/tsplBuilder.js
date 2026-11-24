@@ -9,8 +9,44 @@
  */
 const { boDauTiengViet } = require('./escposBuilder');
 
-function escapeTspl(str) {
-    return boDauTiengViet(str).replace(/"/g, "'").trim();
+// [Wave 2 — P0-08] Chống TSPL Command Injection: lọc sạch toàn bộ ký tự điều khiển [\r\n\t\x00-\x1F\x7F]+ và chuẩn hóa " -> '
+function escapeTsplSafe(str) {
+    return boDauTiengViet(
+        String(str || '').replace(/[\r\n\t\x00-\x1f\x7f]+/g, ' ')
+    )
+        .replace(/[\r\n\t\x00-\x1f\x7f]+/g, ' ')
+        .replace(/"/g, "'")
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+// Giữ alias tương thích ngược
+const escapeTspl = escapeTsplSafe;
+
+// Regex nhận diện tùy chọn nhạy cảm cần đảo nền đen chữ trắng (REVERSE) trên tem cốc
+const SENSITIVE_MODIFIER_RE =
+    /(0%|khong duong|không đường|khong da|không đá|it da|ít đá|sua hat|sữa hạt|yen mach|yến mạch|di ung|dị ứng)/i;
+
+// Tự động xuống dòng (word-wrap) tối đa maxLines dòng cho tên món dài thay vì cắt cụt cứng
+function wrapTsplLines(text, maxChars = 26, maxLines = 2) {
+    const clean = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!clean) return [''];
+    if (clean.length <= maxChars || maxLines <= 1) {
+        return [clean.slice(0, maxChars)];
+    }
+    const lines = [];
+    let rest = clean;
+    while (rest.length > 0 && lines.length < maxLines) {
+        if (rest.length <= maxChars || lines.length === maxLines - 1) {
+            lines.push(rest.slice(0, maxChars).trim());
+            break;
+        }
+        let cut = rest.lastIndexOf(' ', maxChars);
+        if (cut <= Math.floor(maxChars * 0.4)) cut = maxChars;
+        lines.push(rest.slice(0, cut).trim());
+        rest = rest.slice(cut).trim();
+    }
+    return lines;
 }
 
 // Bảng 5x7 font pixel tối giản (Zero-dependency monochrome rasterizer cho BITMAP_VI)
@@ -253,11 +289,20 @@ function buildCupLabelsTspl({
             : '';
 
         const header = `${sttDisplay} | ${tenBan} (${cupIndex}/${total})`;
-        const titleVi = `${cup.tenMon} (${cup.kichThuoc})${cup.trongLuongGram ? ` ${cup.trongLuongGram}g` : ''}`;
-        const titleAscii = escapeTspl(titleVi).slice(0, widthMm <= 40 ? 20 : 26);
+        const titleViRaw = `${cup.tenMon} (${cup.kichThuoc})${cup.trongLuongGram ? ` ${cup.trongLuongGram}g` : ''}`
+            .replace(/[\r\n\t\x00-\x1f\x7f]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const maxTitleChars = widthMm <= 40 ? 20 : 26;
+        const titleViLines = wrapTsplLines(titleViRaw, maxTitleChars, 2);
+        const titleAsciiLines = wrapTsplLines(escapeTsplSafe(titleViRaw), maxTitleChars, 2);
         const { modLine, tpLine } = formatModifiersAndToppings(cup);
-        const detailVi = [modLine, tpLine, cup.ghiChu].filter(Boolean).join(' • ') || 'Tiêu chuẩn';
-        const detailAscii = escapeTspl(detailVi).slice(0, widthMm <= 40 ? 26 : 34);
+        const detailViRaw = ([modLine, tpLine, cup.ghiChu].filter(Boolean).join(' • ') || 'Tiêu chuẩn')
+            .replace(/[\r\n\t\x00-\x1f\x7f]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const detailAscii = escapeTsplSafe(detailViRaw).slice(0, widthMm <= 40 ? 26 : 34);
+        const hasSensitiveModifier = SENSITIVE_MODIFIER_RE.test(detailViRaw);
 
         const parts = [];
         parts.push(
@@ -267,8 +312,8 @@ function buildCupLabelsTspl({
                     'GAP 2 mm,0 mm',
                     'DIRECTION 1',
                     'CLS',
-                    failoverHeader ? `TEXT 10,2,"1",0,1,1,"${escapeTspl(failoverHeader).slice(0, 32)}"` : null,
-                    `TEXT 10,12,"2",0,1,1,"${header.slice(0, widthMm <= 40 ? 22 : 30)}"`,
+                    failoverHeader ? `TEXT 10,2,"1",0,1,1,"${escapeTsplSafe(failoverHeader).slice(0, 32)}"` : null,
+                    `TEXT 10,12,"2",0,1,1,"${escapeTsplSafe(header).slice(0, widthMm <= 40 ? 22 : 30)}"`,
                     badge ? `TEXT ${widthDots - 108},12,"2",0,1,1,"${badge}"` : null,
                     badge ? `REVERSE ${widthDots - 112},10,104,22` : null,
                     `BAR 10,36,${maxW},2`,
@@ -279,19 +324,28 @@ function buildCupLabelsTspl({
             )
         );
 
+        const hasSecondTitleLine = (useBitmapVi ? titleViLines.length : titleAsciiLines.length) > 1;
+        const detailY = hasSecondTitleLine ? 98 : 78;
+
         if (useBitmapVi) {
-            parts.push(buildTsplVietnameseBitmapCommand(titleVi, { x: 10, y: 42, scale: 2, maxDotsWidth: maxW }));
-            parts.push(buildTsplVietnameseBitmapCommand(detailVi, { x: 10, y: 74, scale: 1, maxDotsWidth: maxW }));
+            parts.push(buildTsplVietnameseBitmapCommand(titleViLines[0], { x: 10, y: 42, scale: 2, maxDotsWidth: maxW }));
+            if (titleViLines[1]) {
+                parts.push(buildTsplVietnameseBitmapCommand(titleViLines[1], { x: 10, y: 68, scale: 2, maxDotsWidth: maxW }));
+            }
+            parts.push(buildTsplVietnameseBitmapCommand(detailViRaw, { x: 10, y: detailY, scale: 1, maxDotsWidth: maxW }));
+            if (hasSensitiveModifier) {
+                parts.push(Buffer.from(`REVERSE 8,${Math.max(40, detailY - 2)},${maxW + 4},18\r\n`, 'ascii'));
+            }
         } else {
-            parts.push(
-                Buffer.from(
-                    [
-                        `TEXT 10,44,"3",0,1,1,"${titleAscii}"`,
-                        `TEXT 10,82,"2",0,1,1,"${detailAscii}"`,
-                    ].join('\r\n') + '\r\n',
-                    'ascii'
-                )
-            );
+            const textCmds = [`TEXT 10,44,"3",0,1,1,"${titleAsciiLines[0]}"`];
+            if (titleAsciiLines[1]) {
+                textCmds.push(`TEXT 10,70,"3",0,1,1,"${titleAsciiLines[1]}"`);
+            }
+            textCmds.push(`TEXT 10,${detailY},"2",0,1,1,"${detailAscii}"`);
+            if (hasSensitiveModifier) {
+                textCmds.push(`REVERSE 8,${Math.max(40, detailY - 2)},${maxW + 4},22`);
+            }
+            parts.push(Buffer.from(textCmds.join('\r\n') + '\r\n', 'ascii'));
         }
 
         const footerParts = [`${gio}`, tenKhach ? `KH:${tenKhach.slice(0, 12)}` : null].filter(Boolean).join(' | ');
@@ -300,7 +354,7 @@ function buildCupLabelsTspl({
             Buffer.from(
                 [
                     `BARCODE 10,136,"128",34,0,0,1,2,"${barcodeVal}"`,
-                    `TEXT 10,180,"1",0,1,1,"${footerParts.slice(0, 32)}"`,
+                    `TEXT 10,180,"1",0,1,1,"${escapeTsplSafe(footerParts).slice(0, 32)}"`,
                     'PRINT 1,1',
                     '',
                 ].join('\r\n'),
@@ -309,7 +363,7 @@ function buildCupLabelsTspl({
         );
 
         const cupBuffer = Buffer.concat(parts);
-        const preview = `[TEM ${widthMm}x${heightMm} #${cupIndex}/${total}${badge ? ' ' + badge : ''}] (${useBitmapVi ? 'BITMAP_VI' : 'ASCII'})\n${header}\n${titleVi}\n${detailVi}\n${footerParts}`;
+        const preview = `[TEM ${widthMm}x${heightMm} #${cupIndex}/${total}${badge ? ' ' + badge : ''}${hasSensitiveModifier ? ' [REVERSE]' : ''}] (${useBitmapVi ? 'BITMAP_VI' : 'ASCII'})\n${header}\n${titleViLines.join('\n')}\n${detailViRaw}\n${footerParts}`;
 
         cups.push({
             cupIndex,
@@ -318,6 +372,8 @@ function buildCupLabelsTspl({
             maCTHD: cup.maCTHD,
             tenMon: cup.tenMon,
             badge,
+            hasSensitiveModifier,
+            titleLines: useBitmapVi ? titleViLines : titleAsciiLines,
             renderMode: useBitmapVi ? 'BITMAP_VI' : 'ASCII_FALLBACK',
             buffer: cupBuffer,
             previewText: preview,
@@ -336,6 +392,10 @@ function buildCupLabelsTspl({
 }
 
 module.exports = {
+    escapeTsplSafe,
+    escapeTspl,
+    SENSITIVE_MODIFIER_RE,
+    wrapTsplLines,
     buildCupLabelsTspl,
     buildTsplVietnameseBitmapCommand,
 };

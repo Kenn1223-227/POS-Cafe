@@ -2,6 +2,101 @@
 
 const ESC = 0x1b;
 const GS = 0x1d;
+const RASTER_BAND_HEIGHT = 256;
+
+/**
+ * [Wave 2 — P0-08] Chuyển dữ liệu ảnh 1-bit hoặc RGBA thành lệnh ESC/POS Raster GS v 0
+ * (0x1D 0x76 0x30 0x00 xL xH yL yH <data>), tự động cắt băng theo BAND_HEIGHT = 256px
+ * để chống tràn bộ đệm RAM của máy in nhiệt Xprinter/Zywell.
+ */
+function encodeBitmapToEscPosGsV0(
+    pixelData,
+    width,
+    height,
+    { bandHeight = RASTER_BAND_HEIGHT, threshold = 160, isAlready1Bit = false } = {}
+) {
+    const w = Math.max(1, Math.floor(Number(width) || 0));
+    const h = Math.max(1, Math.floor(Number(height) || 0));
+    const maxBand = Math.max(1, Math.min(256, Math.floor(Number(bandHeight) || RASTER_BAND_HEIGHT)));
+    const widthBytes = Math.ceil(w / 8);
+
+    let monoBytes;
+    if (isAlready1Bit) {
+        monoBytes = Buffer.isBuffer(pixelData) ? pixelData : Buffer.from(pixelData || []);
+    } else {
+        monoBytes = Buffer.alloc(widthBytes * h, 0x00);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const idx = (y * w + x) * 4;
+                const r = pixelData[idx] ?? 255;
+                const g = pixelData[idx + 1] ?? 255;
+                const b = pixelData[idx + 2] ?? 255;
+                const a = pixelData[idx + 3] ?? 255;
+                // Alpha thấp coi như nền trắng; độ sáng < threshold thì chấm mực đen (bit = 1)
+                const lum = a < 128 ? 255 : 0.299 * r + 0.587 * g + 0.114 * b;
+                if (lum < threshold) {
+                    const byteIdx = y * widthBytes + (x >> 3);
+                    monoBytes[byteIdx] |= 0x80 >> (x & 7);
+                }
+            }
+        }
+    }
+
+    const chunks = [];
+    const xL = widthBytes & 0xff;
+    const xH = (widthBytes >> 8) & 0xff;
+
+    for (let yStart = 0; yStart < h; yStart += maxBand) {
+        const bandH = Math.min(maxBand, h - yStart);
+        const yL = bandH & 0xff;
+        const yH = (bandH >> 8) & 0xff;
+        const header = Buffer.from([GS, 0x76, 0x30, 0x00, xL, xH, yL, yH]);
+        const sliceStart = yStart * widthBytes;
+        const sliceEnd = sliceStart + bandH * widthBytes;
+        const bandData = Buffer.alloc(bandH * widthBytes, 0x00);
+        monoBytes.copy(bandData, 0, sliceStart, Math.min(sliceEnd, monoBytes.length));
+        chunks.push(header, bandData);
+    }
+
+    return Buffer.concat(chunks);
+}
+
+/**
+ * Đóng gói buffer ESC/POS hoàn chỉnh từ ảnh Raster tiếng Việt có dấu (nhận từ Frontend Canvas)
+ */
+function buildRasterReceiptBuffer({
+    rasterBase64 = null,
+    rasterBytes = null,
+    rgbaData = null,
+    width = 576,
+    height = 0,
+    bandHeight = RASTER_BAND_HEIGHT,
+    kickDrawer = false,
+    autoCut = true,
+} = {}) {
+    const chunks = [Buffer.from([ESC, 0x40])]; // ESC @ Init
+    if (kickDrawer) {
+        chunks.push(buildCashDrawerKickBuffer());
+    }
+    chunks.push(Buffer.from([ESC, 0x61, 0x01])); // Center align
+
+    if (rasterBase64) {
+        chunks.push(Buffer.from(String(rasterBase64), 'base64'));
+    } else if (rasterBytes) {
+        chunks.push(Buffer.isBuffer(rasterBytes) ? rasterBytes : Buffer.from(rasterBytes));
+    } else if (rgbaData && width > 0 && height > 0) {
+        chunks.push(encodeBitmapToEscPosGsV0(rgbaData, width, height, { bandHeight }));
+    }
+
+    chunks.push(Buffer.from('\n\n\n', 'ascii'));
+    if (autoCut) {
+        chunks.push(Buffer.from([GS, 0x56, 0x42, 0x00]));
+    }
+    return {
+        buffer: Buffer.concat(chunks),
+        kickDrawer: Boolean(kickDrawer),
+    };
+}
 
 // Chuyển tiếng Việt có dấu sang ASCII sạch để mọi máy in nhiệt giá rẻ (Xprinter/Zywell) không bị lỗi font/ô vuông
 function boDauTiengViet(str) {
@@ -65,6 +160,16 @@ function buildEscPosQrCodeBuffer(data, moduleSize = 4) {
         dataBuf,
         Buffer.from([GS, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x51, 0x30]),       // Print QR
     ]);
+}
+
+function maskPhoneForReceipt(sdt) {
+    const raw = String(sdt || '').trim();
+    if (!raw) return '';
+    if (raw.length < 7) {
+        if (raw.length <= 2) return '***';
+        return `${raw.slice(0, 1)}***${raw.slice(-1)}`;
+    }
+    return `${raw.slice(0, 4)}***${raw.slice(-3)}`;
 }
 
 // Dựng Buffer nhị phân ESC/POS + bản xem trước dạng text cho Bill K80
@@ -147,10 +252,6 @@ function buildReceiptK80({
         pushBytes(ESC, 0x45, 0x01);
         pushLine('*** PHIEU TAM TINH (CHUA THANH TOAN) ***');
         pushBytes(ESC, 0x45, 0x00);
-    } else if (laBanSao) {
-        pushBytes(ESC, 0x45, 0x01);
-        pushLine(`*** BAN SAO - REPRINT (LAN ${Number(soLanIn)}) ***`);
-        pushBytes(ESC, 0x45, 0x00);
     }
 
     // Align left cho chi tiết đơn
@@ -159,7 +260,8 @@ function buildReceiptK80({
     pushLine(`Gio: ${gio}`);
     if (thuNgan) pushLine(`Thu ngan: ${thuNgan}`);
     if (hoaDon?.khachHang) {
-        pushLine(`KH: ${hoaDon.khachHang.tenKH} (${hoaDon.khachHang.soDienThoai || ''})`);
+        const maskedPhone = maskPhoneForReceipt(hoaDon.khachHang.soDienThoai);
+        pushLine(`KH: ${hoaDon.khachHang.tenKH}${maskedPhone ? ` (${maskedPhone})` : ''}`);
     }
     pushLine(LINE);
     pushBytes(ESC, 0x45, 0x01);
@@ -184,7 +286,12 @@ function buildReceiptK80({
     const tienGiamKM = Number(hoaDon?.tienGiamKM || 0);
     const tienGiamDiem = Number(hoaDon?.tienGiamDiem || 0);
     const diemSuDung = Number(hoaDon?.diemSuDung || 0);
-    if (tienGiamKM > 0 || tienGiamDiem > 0) {
+    const phiPhucVu = Number(hoaDon?.phiPhucVu ?? hoaDon?.tienPhiPhucVu ?? 0);
+    const thueVAT = Number(hoaDon?.thueVAT ?? hoaDon?.tienThueVAT ?? hoaDon?.tienVat ?? 0);
+    const taxBreakdown = Array.isArray(hoaDon?.taxBreakdown || hoaDon?.tax_breakdown_json)
+        ? hoaDon.taxBreakdown || hoaDon.tax_breakdown_json
+        : [];
+    if (tienGiamKM > 0 || tienGiamDiem > 0 || phiPhucVu > 0 || thueVAT > 0 || taxBreakdown.length > 0) {
         pushLine(padTwoCols('Tam tinh:', dinhDangTien(hoaDon?.tongTamTinh ?? 0)));
         if (tienGiamKM > 0) {
             const labelKm = hoaDon?.maKhuyenMai ? `Giam KM (${hoaDon.maKhuyenMai}):` : 'Giam khuyen mai:';
@@ -192,6 +299,26 @@ function buildReceiptK80({
         }
         if (tienGiamDiem > 0) {
             pushLine(padTwoCols(`Doi diem (${diemSuDung} diem):`, '-' + dinhDangTien(tienGiamDiem)));
+        }
+        if (phiPhucVu > 0) {
+            const pctSrv = Number(hoaDon?.tyLePhiPhucVu || 0);
+            const srvLabel = pctSrv > 0 ? `Phi phuc vu (${pctSrv}%):` : 'Phi phuc vu:';
+            pushLine(padTwoCols(srvLabel, '+' + dinhDangTien(phiPhucVu)));
+        }
+        if (taxBreakdown.length > 0) {
+            for (const b of taxBreakdown) {
+                const rateLbl = b.isKct ? 'KCT (0%)' : `VAT ${Number(b.vatRate || 0)}%`;
+                pushLine(
+                    padTwoCols(
+                        `  ${rateLbl} (DT ${dinhDangTien(b.taxableBase || 0)}):`,
+                        dinhDangTien(b.vatAmount || 0)
+                    )
+                );
+            }
+        } else if (thueVAT > 0) {
+            const pctVat = Number(hoaDon?.tyLeThueVAT || 0);
+            const vatLabel = pctVat > 0 ? `Thue VAT (${pctVat}%):` : 'Thue VAT:';
+            pushLine(padTwoCols(vatLabel, '+' + dinhDangTien(thueVAT)));
         }
     }
     const tongCong = hoaDon?.tongTienThanhToan ?? hoaDon?.tongSauGiam ?? hoaDon?.tongTamTinh ?? 0;
@@ -215,6 +342,19 @@ function buildReceiptK80({
     pushLine(`MA DOI CHIEU: #${maDoiChieu} | GIO IN: ${gioIn}`);
     pushBytes(ESC, 0x45, 0x00);
     pushLine('Quy khach vui long kiem tra DUNG GIO IN & STT');
+    const einvoiceCode = String(hoaDon?.einvoiceLookupCode || hoaDon?.einvoice_lookup_code || '').trim();
+    if (einvoiceCode && !laTamTinh) {
+        const einvoiceUrl = String(
+            hoaDon?.einvoiceLookupUrl || `https://einvoice.cafepos.vn/lookup/${einvoiceCode}`
+        ).trim();
+        pushLine(LINE);
+        pushBytes(ESC, 0x45, 0x01);
+        pushLine(`XUAT HOA DON VAT (MTT) - MA: ${einvoiceCode}`);
+        pushBytes(ESC, 0x45, 0x00);
+        pushLine('Quet QR trong ngay de xuat hoa don dien tu:');
+        chunks.push(buildEscPosQrCodeBuffer(einvoiceUrl, 4));
+        previewLines.push(`[QR E-INVOICE: ${einvoiceCode}]`);
+    }
     pushLine('Cam on Quy khach & Hen gap lai!');
     if (showPlgWatermark) {
         const refUrl = String(plgReferralUrl || 'https://cafepos.vn/onboarding').trim();
@@ -399,8 +539,12 @@ function buildZReportK80({
 }
 
 module.exports = {
+    RASTER_BAND_HEIGHT,
     boDauTiengViet,
     buildCashDrawerKickBuffer,
+    buildEscPosQrCodeBuffer,
+    encodeBitmapToEscPosGsV0,
+    buildRasterReceiptBuffer,
     buildReceiptK80,
     buildZReportK80,
 };

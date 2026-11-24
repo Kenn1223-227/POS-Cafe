@@ -4,6 +4,7 @@ import { caService } from '../../services/caService'
 import { useAuthStore } from '../../store/authStore'
 import FeatureLockedCard from '../../components/FeatureLockedCard'
 import FraudAlertConfigPanel from './components/FraudAlertConfigPanel'
+import ConfirmPinModal from '../../components/ConfirmPinModal'
 import { hasFeatureFlag } from '../../utils/featureFlags'
 import { formatVND, formatDateTime, getTodayISO } from '../../utils/format'
 import { printZReportK80 } from '../../utils/printHelper'
@@ -156,7 +157,9 @@ export default function CaLamViec() {
     }
   }
 
-  const handleDongCa = async () => {
+  const [confirmCloseOpen, setConfirmCloseOpen] = useState(false)
+
+  const handleDongCa = () => {
     if (!selectedCa || tienThucTeInput === '') {
       toast.error('Vui lòng nhập kiểm đếm mệnh giá / số tiền thực tế trước khi chốt ca!')
       return
@@ -165,8 +168,11 @@ export default function CaLamViec() {
       toast.error('Vui lòng nhập lý do giải trình chênh lệch tối thiểu 10 ký tự để xác nhận lần 2!')
       return
     }
-    if (!window.confirm(`Xác nhận chốt ca #${selectedCa.maCaThuNgan}? Sau khi chốt sẽ đóng băng Z-Report bất biến.`)) return
+    setConfirmCloseOpen(true)
+  }
 
+  const executeDongCa = async () => {
+    setConfirmCloseOpen(false)
     setLoadingAction(true)
     try {
       const res = await caService.dongCa(Number(tienThucTeInput), {
@@ -750,6 +756,16 @@ export default function CaLamViec() {
         </div>
         )}
       </div>
+      <ConfirmPinModal
+        open={confirmCloseOpen}
+        mode="confirm"
+        danger
+        title="Xác nhận chốt ca & đóng băng Z-Report"
+        message={selectedCa ? `Xác nhận chốt ca #${selectedCa.maCaThuNgan}? Sau khi chốt sẽ đóng băng Z-Report bất biến.` : ''}
+        confirmText="Chốt ca ngay"
+        onConfirm={executeDongCa}
+        onCancel={() => setConfirmCloseOpen(false)}
+      />
     </div>
   )
 }
