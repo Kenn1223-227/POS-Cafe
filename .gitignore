@@ -12,6 +12,7 @@ frontend/.env.*
 
 # Build & đóng gói
 frontend/dist/
+uploads/
 *.zip
 
 # Runtime Print Bridge (chứa token & hàng đợi cục bộ)
