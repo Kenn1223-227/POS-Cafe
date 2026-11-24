@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'fix/**'
+      - 'feat/**'
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gate:
+    name: Quality Gate & Test Suite
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test_owner_password
+          POSTGRES_DB: cafe_pos_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install backend dependencies
+        run: npm ci
+
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Generate .env.test
+        run: |
+          cat << 'EOF' > .env.test
+          NODE_ENV=test
+          MIGRATION_DATABASE_URL=postgres://postgres:test_owner_password@127.0.0.1:5433/cafe_pos_test
+          TEST_APP_RUNTIME_URL=postgres://app_runtime:app_runtime_test_pass@127.0.0.1:5433/cafe_pos_test
+          TEST_REDIS_URL=redis://127.0.0.1:6380
+          JWT_SECRET=test_jwt_secret_minimum_64_chars_for_automated_wave1_wave4_test_suite_0001
+          SEPAY_API_KEY=test_sepay_webhook_key_wave1
+          FRONTEND_URL=http://localhost:5173
+          SKIP_AUTO_DDL=true
+          EOF
+
+      - name: Initialize role app_runtime (NOBYPASSRLS)
+        run: |
+          if [ -f scripts/init-test-role.js ]; then
+            node scripts/init-test-role.js
+          else
+            node -e "
+              const { Client } = require('pg');
+              (async () => {
+                const client = new Client({ connectionString: 'postgres://postgres:test_owner_password@127.0.0.1:5433/cafe_pos_test' });
+                await client.connect();
+                await client.query(\`
+                  DO \\$\\$
+                  BEGIN
+                      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_runtime') THEN
+                          CREATE ROLE app_runtime LOGIN PASSWORD 'app_runtime_test_pass' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+                      ELSE
+                          ALTER ROLE app_runtime LOGIN PASSWORD 'app_runtime_test_pass' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+                      END IF;
+                  END \\$\\$;
+                  GRANT USAGE ON SCHEMA public TO app_runtime;
+                  ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime;
+                  ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO app_runtime;
+                  ALTER ROLE app_runtime SET statement_timeout = '15s';
+                \`);
+                console.log('Role app_runtime initialized successfully');
+                await client.end();
+              })().catch(e => { console.error(e); process.exit(1); });
+            "
+          fi
+        env:
+          MIGRATION_DATABASE_URL: postgres://postgres:test_owner_password@127.0.0.1:5433/cafe_pos_test
+
+      - name: Syntax check server.js
+        run: node --check server.js
+
+      - name: Run DB migrations (initial run 001 -> 034)
+        run: npm run db:migrate:test
+
+      - name: Verify DB migrations idempotency (second run)
+        run: npm run db:migrate:test
+
+      - name: Run Test Wave 1 (Core & RLS Guard)
+        run: npm run test:wave1
+
+      - name: Run Test Wave 2 (Ops & Idempotency)
+        run: npm run test:wave2
+
+      - name: Run Test Wave 3a (Tax, E-Invoice & Multi-branch)
+        run: npm run test:wave3a
+
+      - name: Run Test Wave 3b (UX, HR & SaaS)
+        run: npm run test:wave3b
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm run build
