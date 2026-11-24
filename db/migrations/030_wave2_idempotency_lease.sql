@@ -28,6 +28,10 @@ ALTER TABLE public.donhang_idempotency
     ALTER COLUMN tenantid SET NOT NULL;
 
 ALTER TABLE public.donhang_idempotency
+    ADD COLUMN IF NOT EXISTS manv                VARCHAR(64),
+    ADD COLUMN IF NOT EXISTS dauvantay           VARCHAR(64),
+    ADD COLUMN IF NOT EXISTS lahoadonmoi         BOOLEAN,
+    ADD COLUMN IF NOT EXISTS dsmacthd            JSONB,
     ADD COLUMN IF NOT EXISTS lease_expires_at    TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '60 seconds'),
     ADD COLUMN IF NOT EXISTS request_fingerprint VARCHAR(64);
 

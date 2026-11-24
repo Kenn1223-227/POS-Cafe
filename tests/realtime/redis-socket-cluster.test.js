@@ -1,10 +1,20 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
 const http = require('http');
+const dotenv = require('dotenv');
 const { Server } = require('socket.io');
 const Redis = require('ioredis');
 const { createAdapter } = require('@socket.io/redis-adapter');
 const { ATOMIC_INCR_PEXPIRE_LUA } = require('../../modules/redisCluster');
+
+const envTestPath = path.join(__dirname, '..', '..', '.env.test');
+if (fs.existsSync(envTestPath)) {
+    dotenv.config({ path: envTestPath, quiet: true });
+} else {
+    dotenv.config({ quiet: true });
+}
 
 const REDIS_URL = String(process.env.TEST_REDIS_URL || process.env.REDIS_URL || '').trim();
 

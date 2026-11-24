@@ -9,14 +9,24 @@ const includeBase = args.includes('--base');
 const forceRun = args.includes('--force');
 const positionalArgs = args.filter((a) => !a.startsWith('--'));
 
-// Nạp .env.test nếu chạy test, fallback sang .env
-const envPath = useEnvTest
-    ? path.join(__dirname, '..', '.env.test')
-    : path.join(__dirname, '..', '.env');
-if (fs.existsSync(envPath)) {
-    dotenv.config({ path: envPath, quiet: true });
+// Khóa an toàn: khi có --env-test, BẮT BUỘC chỉ đọc .env.test, từ chối chạy nếu thiếu .env.test
+if (useEnvTest) {
+    const testEnvPath = path.join(__dirname, '..', '.env.test');
+    if (!fs.existsSync(testEnvPath)) {
+        console.error('❌ [AN TOÀN] Cờ --env-test được bật nhưng không tìm thấy file .env.test!');
+        console.error('   Vui lòng copy .env.test.example thành .env.test và cấu hình trước khi chạy.');
+        process.exit(1);
+    }
+    // Xóa DATABASE_URL khỏi process.env để triệt để không fallback sang DB thật
+    delete process.env.DATABASE_URL;
+    dotenv.config({ path: testEnvPath, override: true });
 } else {
-    dotenv.config({ quiet: true });
+    const defaultEnvPath = path.join(__dirname, '..', '.env');
+    if (fs.existsSync(defaultEnvPath)) {
+        dotenv.config({ path: defaultEnvPath });
+    } else {
+        dotenv.config();
+    }
 }
 
 function extractVersion(filename) {
@@ -35,10 +45,19 @@ async function ensureSchemaMigrationsTable(pool) {
 }
 
 async function main() {
-    const connStr = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
-    if (!connStr) {
-        console.error('❌ Thiếu biến môi trường MIGRATION_DATABASE_URL hoặc DATABASE_URL');
-        process.exit(1);
+    let connStr;
+    if (useEnvTest) {
+        connStr = process.env.MIGRATION_DATABASE_URL;
+        if (!connStr) {
+            console.error('❌ [AN TOÀN] Cờ --env-test yêu cầu biến MIGRATION_DATABASE_URL trong .env.test. Tuyệt đối KHÔNG fallback sang DATABASE_URL.');
+            process.exit(1);
+        }
+    } else {
+        connStr = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
+        if (!connStr) {
+            console.error('❌ Thiếu biến môi trường MIGRATION_DATABASE_URL hoặc DATABASE_URL');
+            process.exit(1);
+        }
     }
 
     const migrationsDir = path.join(__dirname, '..', 'db', 'migrations');

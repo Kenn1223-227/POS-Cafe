@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS public.Ban (
 CREATE TABLE IF NOT EXISTS public.SanPham (
     MaMon          VARCHAR(64) PRIMARY KEY,
     TenMon         VARCHAR(150) NOT NULL,
-    DanhMuc        VARCHAR(100) NOT NULL DEFAULT 'Ca phe',
+    NhomMon        VARCHAR(100) NOT NULL DEFAULT 'Ca phe',
+    DanhMuc        VARCHAR(100) DEFAULT 'Ca phe',
     MoTa           TEXT,
     HinhAnh        TEXT,
     DangKinhDoanh  BOOLEAN NOT NULL DEFAULT TRUE,
@@ -58,7 +59,9 @@ CREATE TABLE IF NOT EXISTS public.NguyenLieu (
     MaNL           VARCHAR(64) PRIMARY KEY,
     TenNL          VARCHAR(150) NOT NULL,
     DonViTinh      VARCHAR(32) NOT NULL DEFAULT 'g',
+    SoLuongTon     NUMERIC(15, 3) NOT NULL DEFAULT 0,
     TonKhoHienTai  NUMERIC(15, 3) NOT NULL DEFAULT 0,
+    HanMucCanhBao  NUMERIC(15, 3) NOT NULL DEFAULT 0,
     NguongCanhBao  NUMERIC(15, 3) NOT NULL DEFAULT 0,
     GiaVonDonVi    NUMERIC(15, 4) NOT NULL DEFAULT 0,
     DaXoa          BOOLEAN NOT NULL DEFAULT FALSE
@@ -87,13 +90,15 @@ CREATE TABLE IF NOT EXISTS public.CaThuNgan (
     MaNV             VARCHAR(64) NOT NULL,
     ThoiGianMoCa     TIMESTAMPTZ NOT NULL DEFAULT now(),
     ThoiGianDongCa   TIMESTAMPTZ,
+    TienMatDauCa     NUMERIC(15, 2) NOT NULL DEFAULT 0,
+    TienMatThucTe    NUMERIC(15, 2),
     TienDauCa        NUMERIC(15, 2) NOT NULL DEFAULT 0,
     TienCuoiCaThucTe NUMERIC(15, 2),
     TrangThaiCa      INT NOT NULL DEFAULT 1 -- 1=DangMo, 0=DaDong
 );
 
 CREATE TABLE IF NOT EXISTS public.HoaDon (
-    MaHoaDon          VARCHAR(64) PRIMARY KEY,
+    MaHoaDon          VARCHAR(64) PRIMARY KEY DEFAULT ('HD' || to_char(now(), 'YYYYMMDD') || '_' || substr(md5(random()::text), 1, 8)),
     MaNV              VARCHAR(64),
     MaKH              VARCHAR(64),
     MaCaThuNgan       BIGINT,
@@ -137,35 +142,37 @@ CREATE TABLE IF NOT EXISTS public.ChiTietHoaDon_Topping (
 );
 
 CREATE TABLE IF NOT EXISTS public.PhieuGiaoDichKho (
-    MaGD        BIGSERIAL PRIMARY KEY,
-    LoaiGD      INT NOT NULL DEFAULT 1, -- 1=Nhap, 2=XuatBan, 3=KiemKe, 4=HuyHaoHut, 9=DaoPhieuNhap
-    MaNV        VARCHAR(64),
-    GhiChu      TEXT,
-    TongGiaTri  NUMERIC(15, 2) NOT NULL DEFAULT 0,
-    ThoiGianGD  TIMESTAMPTZ NOT NULL DEFAULT now()
+    MaGiaoDich   BIGSERIAL PRIMARY KEY,
+    LoaiGD       INT NOT NULL DEFAULT 1, -- 1=Nhap, 2=XuatBan, 3=KiemKe, 4=HuyHaoHut, 9=DaoPhieuNhap
+    MaNV         VARCHAR(64),
+    GhiChu       TEXT,
+    TongGiaTri   NUMERIC(15, 2) NOT NULL DEFAULT 0,
+    ThoiGianTao  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS public.ChiTietGiaoDichKho (
-    Id          BIGSERIAL PRIMARY KEY,
-    MaGD        BIGINT NOT NULL REFERENCES public.PhieuGiaoDichKho(MaGD) ON DELETE CASCADE,
-    MaNL        VARCHAR(64) NOT NULL,
-    SoLuong     NUMERIC(15, 3) NOT NULL DEFAULT 0,
-    DonGia      NUMERIC(15, 4) NOT NULL DEFAULT 0,
-    GiaVonSau   NUMERIC(15, 4) NOT NULL DEFAULT 0
+    Id           BIGSERIAL PRIMARY KEY,
+    MaGiaoDich   BIGINT NOT NULL REFERENCES public.PhieuGiaoDichKho(MaGiaoDich) ON DELETE CASCADE,
+    MaNL         VARCHAR(64) NOT NULL,
+    SoLuong      NUMERIC(15, 3) NOT NULL DEFAULT 0,
+    DonGiaNhap   NUMERIC(15, 4) NOT NULL DEFAULT 0,
+    DonGia       NUMERIC(15, 4) NOT NULL DEFAULT 0,
+    GiaVonSau    NUMERIC(15, 4) NOT NULL DEFAULT 0,
+    TinhTrang    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS public.PhieuThuChiLatVat (
     Id           BIGSERIAL PRIMARY KEY,
     MaCaThuNgan  BIGINT,
     MaNV         VARCHAR(64),
-    LoaiPhieu    VARCHAR(16) NOT NULL, -- THU | CHI
+    LoaiPhieu    INT NOT NULL DEFAULT 1, -- 1=THU, 2=CHI, 3=RUT_KET, 4=THOI_CK_DU
     SoTien       NUMERIC(15, 2) NOT NULL DEFAULT 0,
     LyDo         TEXT,
     ThoiGianTao  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS public.CaLamViec (
-    MaCaLam     VARCHAR(64) PRIMARY KEY,
+    MaCa        VARCHAR(64) PRIMARY KEY,
     TenCa       VARCHAR(100) NOT NULL,
     GioBatDau   TIME NOT NULL,
     GioKetThuc  TIME NOT NULL
@@ -174,59 +181,30 @@ CREATE TABLE IF NOT EXISTS public.CaLamViec (
 CREATE TABLE IF NOT EXISTS public.PhanCa (
     MaPhanCa    BIGSERIAL PRIMARY KEY,
     MaNV        VARCHAR(64) NOT NULL,
-    MaCaLam     VARCHAR(64) NOT NULL,
-    NgayLam     DATE NOT NULL
+    MaCa        VARCHAR(64) NOT NULL,
+    NgayLam     DATE NOT NULL,
+    TrangThai   INT NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS public.ChamCong (
-    MaChamCong   BIGSERIAL PRIMARY KEY,
-    MaPhanCa     BIGINT REFERENCES public.PhanCa(MaPhanCa) ON DELETE CASCADE,
-    MaNV         VARCHAR(64) NOT NULL,
-    GioVaoThucTe TIMESTAMPTZ,
-    GioRaThucTe  TIMESTAMPTZ,
-    GhiChu       TEXT
-);
-
-CREATE TABLE IF NOT EXISTS public.KhuyenMai (
-    MaKM          VARCHAR(64) PRIMARY KEY,
-    TenKM         VARCHAR(150) NOT NULL,
-    LoaiGiam      VARCHAR(24) NOT NULL DEFAULT 'PERCENT',
-    GiaTriGiam    NUMERIC(15, 2) NOT NULL DEFAULT 0,
-    DonToiThieu   NUMERIC(15, 2) NOT NULL DEFAULT 0,
-    GiamToiDa     NUMERIC(15, 2),
-    NgayBatDau    TIMESTAMPTZ,
-    NgayKetThuc   TIMESTAMPTZ,
-    DangHoatDong  BOOLEAN NOT NULL DEFAULT TRUE
+    MaChamCong        BIGSERIAL PRIMARY KEY,
+    MaPhanCa          BIGINT REFERENCES public.PhanCa(MaPhanCa) ON DELETE CASCADE,
+    MaNV              VARCHAR(64),
+    ThoiGianCheckIn   TIMESTAMPTZ,
+    ThoiGianCheckOut  TIMESTAMPTZ,
+    GioVaoThucTe      TIMESTAMPTZ,
+    GioRaThucTe       TIMESTAMPTZ,
+    GhiChu            TEXT
 );
 
 CREATE TABLE IF NOT EXISTS public.DonHang_Idempotency (
     KhoaIdem     VARCHAR(128) PRIMARY KEY,
+    MaNV         VARCHAR(64),
+    DauVanTay    VARCHAR(64),
     MaHoaDon     VARCHAR(64),
+    LaHoaDonMoi  BOOLEAN,
+    DsMaCTHD     JSONB,
     TrangThai    VARCHAR(24) NOT NULL DEFAULT 'PROCESSING',
     KetQuaJson   JSONB,
     ThoiGianTao  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS public.Order_Payments (
-    Id              BIGSERIAL PRIMARY KEY,
-    MaHoaDon        VARCHAR(64) NOT NULL,
-    MaCaThuNgan     BIGINT,
-    PhuongThuc      VARCHAR(32) NOT NULL,
-    SoTien          NUMERIC(15, 2) NOT NULL,
-    TrangThai       VARCHAR(32) NOT NULL DEFAULT 'SUCCESS',
-    MaGiaoDichNgoai VARCHAR(128),
-    GhiChu          TEXT,
-    ThoiGianTao     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS public.VietQR_Webhook_Events (
-    Id              BIGSERIAL PRIMARY KEY,
-    NhaCungCap      VARCHAR(32) NOT NULL DEFAULT 'SEPAY',
-    MaGiaoDichNgoai VARCHAR(128) NOT NULL UNIQUE,
-    SoTien          NUMERIC(15, 2) NOT NULL DEFAULT 0,
-    NoiDungCK       TEXT,
-    TrangThaiXuLy   VARCHAR(32) NOT NULL DEFAULT 'PROCESSING',
-    MaHoaDonKhop    VARCHAR(64),
-    PayloadGoc      JSONB NOT NULL DEFAULT '{}'::jsonb,
-    ThoiGianNhan    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
