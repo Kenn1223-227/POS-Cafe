@@ -44,7 +44,7 @@
 | **Wave 4A** | **035** | `035_wave4a_b2b_handover_ap_vietqr_ttl.sql` | `house_accounts`, `house_account_ledger`, `vietqr_payment_attempts` (TTL 5p), `shift_handovers` (Dual-PIN), `aggregator_settlements`, `supplier_ap_invoices`, `supplier_ap_payments` (`FORCE RLS`). |
 | **Wave 4A** | **036** | `036_wave4a_pricebooks_zns_bida_qr.sql` | `price_books`, `price_book_items`, mở rộng `zalo_zns_outbox` (Worker thật NĐ 13/2023), `bida_sessions` (`FORCE RLS`). |
 | **Wave 4A** | **037** | `037_wave4a_tip_pool_ot_labor_analytics.sql` | `tip_pool_entries`, `tip_pool_distributions`, `payroll_ot_logs` (`FORCE RLS`). |
-| **Wave 4B** | **038** | `038_business_day_cutoff_and_reporting_summary.sql` | `business_day_cutoff_hour` (04:00), `hoadon.business_date`, composite indexes, `daily_branch_financial_summary`. |
+| **Wave 4B** | **038** | `038_wave4b_business_day_summary_replica.sql` | `business_day_cutoff_hour` (04:00), `timezone`, `fn_compute_business_date`, `hoadon.business_date`, composite indexes, `daily_branch_financial_summary` (`FORCE RLS`). |
 
 ---
 

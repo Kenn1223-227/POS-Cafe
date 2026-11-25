@@ -17,6 +17,8 @@
     "test:wave3a": "node --test tests/unit/taxCalculator.test.js tests/unit/kdsRoutingAndPrivacy.test.js tests/integration/wave3a-tax-einvoice-nd13.test.js tests/realtime/isolation-3tier-86.test.js tests/realtime/kds-delta-sync.test.js",
     "test:wave3b": "node --test tests/unit/kioskQrToken.test.js tests/unit/viSearchAndMigration.test.js tests/integration/wave3b-hr3-storage-awaiting.test.js tests/e2e/pos-ergonomics-cfd-barcode.spec.js",
     "test:wave4a": "node --test tests/unit/wave4aEngines.test.js tests/integration/wave4a-chain-ops-hr.test.js tests/e2e/wave4a-qr-modifiers-labor-chart.spec.js",
+    "test:wave4b": "node --test tests/unit/wave4bScaleGuards.test.js tests/integration/wave4b-businessday-replica-rls.test.js tests/e2e/wave4b-architecture-ci.spec.js",
+    "test:load:k6": "k6 run tests/load/k6-pos-25tps.js",
     "test:phanhe7": "node scripts/test-phanhe7-unit.js",
     "test:phanhe1": "node scripts/test-phanhe1-unit.js",
     "test:phanhe1:integration": "node scripts/test-phanhe1-integration.js",

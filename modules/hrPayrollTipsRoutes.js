@@ -20,6 +20,7 @@ function sendHrError(res, err, fallbackMessage) {
 function registerHrPayrollTipsRoutes(app, deps) {
     const {
         chayGiaoDich,
+        chayTruyVanBaoCao,
         kiemTraToken,
         choPhepVaiTro,
         layTenantId,
@@ -134,15 +135,17 @@ function registerHrPayrollTipsRoutes(app, deps) {
     app.get('/api/analytics/hourly-sales-vs-labor', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
         const tenantId = layTenantId(req);
         try {
-            const analytics = await chayGiaoDich(
-                (client) =>
-                    getHourlySalesVsLabor(client, {
-                        tenantId,
-                        branchId: req.query.branchId || null,
-                        fromDate: req.query.fromDate || req.query.tuNgay || null,
-                        toDate: req.query.toDate || req.query.denNgay || null,
-                    }),
-                tenantId
+            const runReadOnly = (fn) =>
+                typeof chayTruyVanBaoCao === 'function'
+                    ? chayTruyVanBaoCao(tenantId, fn)
+                    : chayGiaoDich(fn, tenantId);
+            const analytics = await runReadOnly((client) =>
+                getHourlySalesVsLabor(client, {
+                    tenantId,
+                    branchId: req.query.branchId || null,
+                    fromDate: req.query.fromDate || req.query.tuNgay || null,
+                    toDate: req.query.toDate || req.query.denNgay || null,
+                })
             );
             return res.json(analytics);
         } catch (err) {

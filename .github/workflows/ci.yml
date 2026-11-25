@@ -108,13 +108,16 @@ jobs:
         env:
           MIGRATION_DATABASE_URL: postgres://postgres:test_owner_password@127.0.0.1:5433/cafe_pos_test
 
-      - name: Syntax check server.js
-        run: node --check server.js
+      - name: Syntax check server.js, src/core/ and src/domains/
+        run: |
+          node --check server.js
+          node --check db.js
+          find src/core src/domains -type f -name '*.js' -print0 | xargs -0 -n1 node --check
 
-      - name: Run DB migrations (initial run 001 -> 034)
+      - name: Run DB migrations (initial run 001 -> 038)
         run: npm run db:migrate:test
 
-      - name: Verify DB migrations idempotency (second run)
+      - name: Verify DB migrations idempotency (second run 001 -> 038)
         run: npm run db:migrate:test
 
       - name: Run Test Wave 1 (Core & RLS Guard)
@@ -128,6 +131,12 @@ jobs:
 
       - name: Run Test Wave 3b (UX, HR & SaaS)
         run: npm run test:wave3b
+
+      - name: Run Test Wave 4a (Ecosystem, Chain Ops & HR)
+        run: npm run test:wave4a
+
+      - name: Run Test Wave 4b (Scale 500, Business Day, Replica & Monolith Guard)
+        run: npm run test:wave4b
 
       - name: Build frontend
         run: |
