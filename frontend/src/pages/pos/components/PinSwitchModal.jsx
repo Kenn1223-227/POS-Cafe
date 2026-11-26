@@ -5,6 +5,7 @@ import { authService } from '../../../services/authService'
 import { useAuthStore } from '../../../store/authStore'
 import { disconnectSocket } from '../../../socket/socketClient'
 import { ROLE_LABEL, ROLE_HOME } from '../../../constants/roles'
+import { parseStaffQuickList } from '../../../utils/staffQuickList'
 
 const KEYPAD = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', '⌫']
 
@@ -21,7 +22,7 @@ export default function PinSwitchModal({ isOpen, onClose, onSwitched }) {
     setLoading(true)
     try {
       const data = await authService.getStaffQuickList()
-      const list = Array.isArray(data) ? data : []
+      const list = parseStaffQuickList(data)
       setStaffList(list)
       const firstOther = list.find((s) => s.daDatPin && s.maNV !== user?.maNV) || list.find((s) => s.daDatPin) || list[0]
       setSelectedMaNV(firstOther?.maNV || '')

@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import toast from 'react-hot-toast'
+import axiosClient from '../../../api/axiosClient'
 import { caService } from '../../../services/caService'
 import { formatVND } from '../../../utils/format'
 
@@ -69,7 +70,46 @@ export default function ThuChiModal({ isOpen, onClose, onSuccess }) {
   const [managerPin, setManagerPin] = useState('')
   const [recentList, setRecentList] = useState([])
   const [previewImg, setPreviewImg] = useState(null)
+  const previewBlobRef = useRef(null)
   const [loading, setLoading] = useState(false)
+
+  const closePreview = useCallback(() => {
+    if (previewBlobRef.current) {
+      URL.revokeObjectURL(previewBlobRef.current)
+      previewBlobRef.current = null
+    }
+    setPreviewImg(null)
+  }, [])
+
+  const openPreview = useCallback(async (url) => {
+    if (!url) return
+    if (previewBlobRef.current) {
+      URL.revokeObjectURL(previewBlobRef.current)
+      previewBlobRef.current = null
+    }
+    if (url.startsWith('/api/')) {
+      try {
+        const apiPath = url.replace(/^\/api(?=\/)/, '')
+        const blob = await axiosClient.get(apiPath, { responseType: 'blob' })
+        const objUrl = URL.createObjectURL(blob)
+        previewBlobRef.current = objUrl
+        setPreviewImg(objUrl)
+      } catch {
+        toast.error('Không thể tải ảnh chứng từ!')
+      }
+      return
+    }
+    setPreviewImg(url)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (previewBlobRef.current) {
+        URL.revokeObjectURL(previewBlobRef.current)
+        previewBlobRef.current = null
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (!isOpen) return undefined
@@ -370,7 +410,7 @@ export default function ThuChiModal({ isOpen, onClose, onSuccess }) {
                   {p.anhChungTuUrl && (
                     <button
                       type="button"
-                      onClick={() => setPreviewImg(p.anhChungTuUrl)}
+                      onClick={() => void openPreview(p.anhChungTuUrl)}
                       className="px-2 py-1 rounded bg-amber-100 text-amber-900 font-bold text-[10px] shrink-0 cursor-pointer"
                     >
                       🖼️ Xem ảnh
@@ -384,7 +424,7 @@ export default function ThuChiModal({ isOpen, onClose, onSuccess }) {
 
         {previewImg && (
           <div
-            onClick={() => setPreviewImg(null)}
+            onClick={closePreview}
             className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
           >
             <img

@@ -32,9 +32,8 @@ const SPOOL_PATH = process.env.PRINT_SPOOL_PATH || path.join(__dirname, 'spool-q
 
 const LOCAL_LOOPBACK_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 
-// Danh sách Origin production mặc định (chỉ mở cho HTTPS Vercel & domain chính thức; luôn chặn origin lạ)
+// Danh sách Origin production mặc định (chỉ mở cho domain chính thức; luôn chặn origin lạ & wildcard vercel.app)
 const DEFAULT_ALLOWED_ORIGINS = [
-    'https://*.vercel.app',
     'https://cafepos.vn',
     'https://*.cafepos.vn',
 ];
@@ -1051,9 +1050,14 @@ async function handleBridgeRequest(req, res) {
             // Trả HTTP 202 ngay lập tức & phát loa nền (chỉ kích hoạt Windows SAPI khi chạy thực ngoài test simulator)
             if (process.platform === 'win32' && body.simulateOnly !== true && process.env.NODE_ENV !== 'test') {
                 const { execFile } = require('child_process');
-                const safeText = text.replace(/['"`$]/g, ' ');
-                const psCmd = `Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('${safeText}');`;
-                execFile('powershell.exe', ['-NoProfile', '-Command', psCmd], { timeout: 8000 }, () => {});
+                const psScript = 'Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; if ($env:POS_SPEAK_TEXT) { $s.Speak($env:POS_SPEAK_TEXT) }';
+                const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+                execFile(
+                    'powershell.exe',
+                    ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+                    { timeout: 8000, env: { ...process.env, POS_SPEAK_TEXT: text } },
+                    () => {}
+                );
             }
             broadcastLanEvent('*', 'SOUNDBOX_SPOKEN', spokenRecord);
             return respond(202, spokenRecord);

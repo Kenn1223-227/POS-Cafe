@@ -8,6 +8,7 @@
     "shareName": "XP-80C",
     "autoCut": true,
     "kickDrawerOnCash": true,
+    "sensorProbeEnabled": false,
     "fallbackPrinterId": null
   },
   "labelPrinter": {
@@ -19,6 +20,7 @@
     "widthMm": 50,
     "heightMm": 30,
     "renderMode": "BITMAP_VI",
+    "sensorProbeEnabled": false,
     "fallbackPrinterId": null
   },
   "fallbackPrinter": {

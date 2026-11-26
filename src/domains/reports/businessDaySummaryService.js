@@ -148,6 +148,7 @@ async function refreshDailyBranchFinancialSummary(
                 COALESCE(NULLIF(to_jsonb(hd)->>'giamgia', '')::numeric, 0)
                     + COALESCE(NULLIF(to_jsonb(hd)->>'tiengiamkm', '')::numeric, 0)
                     + COALESCE(NULLIF(to_jsonb(hd)->>'tiengiamdiem', '')::numeric, 0) AS discount_amount,
+                -- [P0-4] TongTienThanhToan đã được orders/index.js trừ sẵn khi hoàn 1 phần; không trừ SoTienHoan lần thứ 2
                 GREATEST(
                     0,
                     COALESCE(
@@ -155,7 +156,7 @@ async function refreshDailyBranchFinancialSummary(
                         NULLIF(to_jsonb(hd)->>'thanhtien', '')::numeric,
                         NULLIF(to_jsonb(hd)->>'tongtien', '')::numeric,
                         0
-                    ) - COALESCE(NULLIF(to_jsonb(hd)->>'sotienhoan', '')::numeric, 0)
+                    )
                 ) AS net_amount,
                 COALESCE(NULLIF(to_jsonb(hd)->>'tienthuevat', '')::numeric, 0) AS tax_amount,
                 COALESCE(NULLIF(to_jsonb(hd)->>'tienphiphucvu', '')::numeric, 0) AS service_charge_amount,

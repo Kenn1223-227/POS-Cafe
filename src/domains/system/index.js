@@ -46,7 +46,7 @@ function layPrintRelayState(tenantId) {
     const key = String(tenantId || 'DEFAULT');
     let st = printRelayTenants.get(key);
     if (!st) {
-        st = { seq: 1, lastHeartbeatAt: null, jobs: [] };
+        st = { seq: 1, lastHeartbeatAt: null, jobs: [], usedPrintTokens: new Set() };
         printRelayTenants.set(key, st);
     }
     return st;
@@ -103,6 +103,69 @@ app.post('/api/print-relay/dispatch', kiemTraToken, choPhepVaiTro(1, 2, 3, 4), a
     }
 
     const st = layPrintRelayState(tenantId);
+
+    // [P0-3] Khi kind === 'RECEIPT', bắt buộc xác thực printToken hợp lệ (khớp hóa đơn/tenant & chống tái sử dụng lách REPRINT)
+    if (cleanKind === 'RECEIPT') {
+        const printToken = String(req.body?.printToken || payload?.printToken || '').trim();
+        const match = printToken.match(/^PRT-(.+)-(\d+)-(\d+)$/);
+        if (!match) {
+            return res.status(403).json({
+                ok: false,
+                code: 'PRINT_TOKEN_REQUIRED',
+                message: 'In hóa đơn qua Print Relay bắt buộc phải có printToken hợp lệ từ /print-token!',
+            });
+        }
+        const [, tokenMaHoaDon, tokenSoLanInStr] = match;
+        const tokenSoLanIn = Number(tokenSoLanInStr);
+        const payloadMaHoaDon = String(payload?.maHoaDon || payload?.hoaDon?.maHoaDon || req.body?.maHoaDon || '').trim();
+        if (payloadMaHoaDon && payloadMaHoaDon !== tokenMaHoaDon) {
+            return res.status(403).json({
+                ok: false,
+                code: 'PRINT_TOKEN_MISMATCH',
+                message: 'printToken không khớp với mã hóa đơn cần in!',
+            });
+        }
+        if (st.usedPrintTokens.has(printToken)) {
+            return res.status(403).json({
+                ok: false,
+                code: 'PRINT_TOKEN_ALREADY_USED',
+                message: 'printToken đã được sử dụng — vui lòng xin cấp lại lệnh in mới để đảm bảo watermark REPRINT!',
+            });
+        }
+        try {
+            const verifyHd = async (client) =>
+                client.query(
+                    `SELECT MaHoaDon, COALESCE(SoLanIn, 0) AS SoLanIn
+                       FROM HoaDon
+                      WHERE MaHoaDon = $1 AND COALESCE(TenantId, 'DEFAULT') = $2`,
+                    [tokenMaHoaDon, tenantId]
+                );
+            const hdRes = typeof pool?.withTenant === 'function' ? await pool.withTenant(tenantId, verifyHd) : await verifyHd(pool);
+            if (!hdRes || hdRes.rows.length === 0) {
+                return res.status(403).json({
+                    ok: false,
+                    code: 'PRINT_TOKEN_INVALID_INVOICE',
+                    message: 'Hóa đơn của printToken không tồn tại trong quán hiện tại!',
+                });
+            }
+            const currentSoLanIn = Number(hdRes.rows[0].solanin || 0);
+            if (currentSoLanIn < 1 || tokenSoLanIn !== currentSoLanIn) {
+                return res.status(403).json({
+                    ok: false,
+                    code: 'PRINT_TOKEN_STALE',
+                    message: 'printToken không khớp số lần in hiện tại của hóa đơn (chống lách watermark REPRINT)!',
+                });
+            }
+            st.usedPrintTokens.add(printToken);
+            if (st.usedPrintTokens.size > 500) {
+                const first = st.usedPrintTokens.values().next().value;
+                st.usedPrintTokens.delete(first);
+            }
+        } catch (error) {
+            return guiLoi(res, error, 'Lỗi xác thực printToken khi đẩy lệnh in Print Relay:');
+        }
+    }
+
     const sanitizedPayload = sanitizePrintRelayPayloadPii(payload);
     const createdAt = new Date().toISOString();
     const jobId = st.seq++;
@@ -257,9 +320,12 @@ function soSanhHangThoiGian(a, b) {
     return crypto.timingSafeEqual(ba, bb);
 }
 
-// Xác thực SePay: Header "Authorization: Apikey <SEPAY_API_KEY>" (ưu tiên khóa riêng của từng Tenant, fallback khóa hệ thống)
-function xacThucSePay(req, expectedKeyOverride = null) {
-    const expected = expectedKeyOverride || process.env.SEPAY_API_KEY;
+// Xác thực SePay: Header "Authorization: Apikey <SEPAY_API_KEY>" (nếu có :tenantSlug thì bắt buộc khóa riêng của quán, không fallback global)
+function xacThucSePay(req, expectedKeyOverride = null, { allowGlobalFallback = true } = {}) {
+    if (!allowGlobalFallback && !expectedKeyOverride) {
+        return { ok: false, status: 401, message: 'Quán chưa cấu hình SEPAY_API_KEY riêng!' };
+    }
+    const expected = expectedKeyOverride || (allowGlobalFallback ? process.env.SEPAY_API_KEY : null);
     if (!expected) return { ok: false, status: 503, message: 'Chưa cấu hình SEPAY_API_KEY cho quán hoặc trên máy chủ!' };
     const auth = String(req.headers['authorization'] || '').trim();
     const match = auth.match(/^(?:Apikey|Bearer)\s+(.+)$/i);
@@ -269,9 +335,12 @@ function xacThucSePay(req, expectedKeyOverride = null) {
     return { ok: true };
 }
 
-// Xác thực PayOS: HMAC-SHA256 của các trường data sắp xếp alphabet (ưu tiên khóa riêng của từng Tenant, fallback khóa hệ thống)
-function xacThucPayOS(body, checksumKeyOverride = null) {
-    const checksumKey = checksumKeyOverride || process.env.PAYOS_CHECKSUM_KEY;
+// Xác thực PayOS: HMAC-SHA256 của các trường data sắp xếp alphabet (nếu có :tenantSlug thì bắt buộc khóa riêng của quán, không fallback global)
+function xacThucPayOS(body, checksumKeyOverride = null, { allowGlobalFallback = true } = {}) {
+    if (!allowGlobalFallback && !checksumKeyOverride) {
+        return { ok: false, status: 401, message: 'Quán chưa cấu hình PAYOS_CHECKSUM_KEY riêng!' };
+    }
+    const checksumKey = checksumKeyOverride || (allowGlobalFallback ? process.env.PAYOS_CHECKSUM_KEY : null);
     if (!checksumKey) return { ok: false, status: 503, message: 'Chưa cấu hình PAYOS_CHECKSUM_KEY cho quán hoặc trên máy chủ!' };
     if (!body || typeof body.data !== 'object' || !body.data || typeof body.signature !== 'string') {
         return { ok: false, status: 400, message: 'Thiếu data hoặc signature PayOS!' };
@@ -733,7 +802,7 @@ async function xuLyBienDongSoDuVietQR({
             );
         }
 
-        const ca = await layCaDangMo(client, 'SHARE', hdTenantId);
+        const ca = await layCaDangMo(client, 'SHARE', hdTenantId, { branchId: hdBranchId });
 
         let ttRes;
         await client.query('SAVEPOINT sp_vietqr_settle');
@@ -760,7 +829,7 @@ async function xuLyBienDongSoDuVietQR({
         } catch (settleErr) {
             await client.query('ROLLBACK TO SAVEPOINT sp_vietqr_settle').catch(() => {});
             // Bắt mọi lỗi nghiệp vụ (400/404/409) & DB để COMMIT dòng vietqr_webhook_events với PENDING_ACTION + cảnh báo đỏ POS!
-            const isAlreadyPaid = settleErr instanceof LoiNghiepVu && settleErr.details?.code === 'ALREADY_PAID';
+            const isAlreadyPaid = settleErr instanceof LoiNghiepVu && (settleErr.chiTiet?.code ?? settleErr.details?.code) === 'ALREADY_PAID';
             return handlePendingAction(
                 isAlreadyPaid ? 'ALREADY_PAID' : 'PENDING_ACTION',
                 settleErr?.message || `Lỗi đối soát tự động HĐ #${maHoaDon}`
@@ -927,7 +996,9 @@ app.post(['/api/webhooks/sepay', '/api/webhooks/sepay/:tenantSlug'], async (req,
         }
     }
 
-    const auth = xacThucSePay(req, tenantCfg?.sepayApiKey || null);
+    const auth = xacThucSePay(req, tenantCfg?.sepayApiKey || null, {
+        allowGlobalFallback: !req.params.tenantSlug,
+    });
     if (!auth.ok) return res.status(auth.status).json({ success: false, message: auth.message });
 
     const body = req.body || {};
@@ -970,7 +1041,9 @@ app.post(['/api/webhooks/payos', '/api/webhooks/payos/:tenantSlug'], async (req,
         }
     }
 
-    const auth = xacThucPayOS(body, tenantCfg?.payosChecksumKey || null);
+    const auth = xacThucPayOS(body, tenantCfg?.payosChecksumKey || null, {
+        allowGlobalFallback: !req.params.tenantSlug,
+    });
     if (!auth.ok) return res.status(auth.status).json({ success: false, message: auth.message });
     if (body.code !== '00' || body.success === false) {
         return res.status(200).json({ success: true, ignored: true });

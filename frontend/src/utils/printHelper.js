@@ -315,12 +315,22 @@ export async function printReceiptK80(
   const rows = (hoaDon.danhSachMon || [])
     .filter((m) => !m.daHuy && m.trangThaiPhaChe !== 'DaHuy')
     .map((m) => {
+      const mods = Array.isArray(m.modifiersSnapshot) ? m.modifiersSnapshot : Array.isArray(m.modifiers) ? m.modifiers : []
+      const modStr = mods
+        .map((mod) => {
+          const lbl = mod.tenInNgan || mod.tenOption || ''
+          const mQty = Number(mod.qty ?? mod.soLuong ?? 1)
+          return lbl ? (mQty > 1 ? `${escapeHtml(lbl)} x${mQty}` : escapeHtml(lbl)) : ''
+        })
+        .filter(Boolean)
+        .join(', ')
+      const modText = modStr ? `<br/><small>• ${modStr}</small>` : ''
       const tpText = m.toppings?.length
         ? `<br/><small>+ ${m.toppings.map((t) => `${escapeHtml(t.tenTopping)} x${Number(t.soLuong)}`).join(', ')}</small>`
         : ''
       const noteText = m.ghiChu ? `<br/><small><i>(${escapeHtml(m.ghiChu)})</i></small>` : ''
       return `<tr>
-        <td style="padding:4px 0"><b>${escapeHtml(m.tenMon)} (${escapeHtml(m.kichThuoc)})</b>${tpText}${noteText}</td>
+        <td style="padding:4px 0"><b>${escapeHtml(m.tenMon)} (${escapeHtml(m.kichThuoc)})</b>${modText}${tpText}${noteText}</td>
         <td align="center" style="vertical-align:top;padding:4px 2px">${Number(m.soLuong)}</td>
         <td align="right" style="vertical-align:top;padding:4px 0">${escapeHtml(formatVND(m.thanhTien))}</td>
       </tr>`
@@ -408,8 +418,8 @@ export async function printCupLabels50x30(
   if (!hoaDon) return { mode: 'NONE' }
 
   const bridgeSettings = getBridgeClientSettings()
-  const labelPayload = { hoaDon, onlyCupIndex }
-  if (bridgeSettings.enabled && Number(startFromCup) <= 1) {
+  const labelPayload = { hoaDon, onlyCupIndex, startFromCup }
+  if (bridgeSettings.enabled) {
     try {
       const res = await bridgePrintLabels(labelPayload)
       if (res?.ok) return { mode: res.mode || 'BRIDGE', job: res.job }

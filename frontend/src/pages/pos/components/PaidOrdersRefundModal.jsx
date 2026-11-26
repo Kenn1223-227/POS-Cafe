@@ -4,6 +4,7 @@ import { orderService } from '../../../services/orderService'
 import { sanPhamService } from '../../../services/sanPhamService'
 import { authService } from '../../../services/authService'
 import { formatVND, formatDateTime, getTodayISO } from '../../../utils/format'
+import { parseStaffQuickList } from '../../../utils/staffQuickList'
 
 const REFUND_METHODS = [
   { value: 'TIEN_MAT', label: '💵 Tiền mặt (cộng/trừ quỹ két)' },
@@ -58,7 +59,7 @@ export default function PaidOrdersRefundModal({ isOpen, onClose, isManager, onRe
       authService
         .getStaffQuickList()
         .then((res) => {
-          const list = (res?.danhSachNV || []).filter((s) => s.coQuyenDuyetPin && s.daDatPin)
+          const list = parseStaffQuickList(res).filter((s) => s.coQuyenDuyetPin && s.daDatPin)
           setApprovers(list)
           if (list.length > 0) setMaNVDuyet((prev) => prev || list[0].maNV)
         })

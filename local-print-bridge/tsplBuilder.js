@@ -193,7 +193,8 @@ function formatModifiersAndToppings(cup) {
     if (Array.isArray(cup.modifiersSnapshot)) {
         for (const m of cup.modifiersSnapshot) {
             const name = m.tenInNgan || m.tenOption || '';
-            if (name) modParts.push(m.soLuong > 1 ? `${name} x${m.soLuong}` : name);
+            const mQty = Number(m.qty ?? m.soLuong ?? 1);
+            if (name) modParts.push(mQty > 1 ? `${name} x${mQty}` : name);
         }
     }
     const tpParts = [];

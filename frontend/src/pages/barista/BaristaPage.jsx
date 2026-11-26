@@ -665,20 +665,6 @@ export default function BaristaPage() {
   // Dữ liệu cho Chế độ Gom món (Batch Summary / All-Day View — nhóm theo MaMon, KichThuoc + gom phụ theo Mức đường đá / Ghi chú)
   const batchSummary = Object.values(
     filteredQueue.reduce((acc, item) => {
-      const key = `${item.maMon}|${item.kichThuoc}`
-      if (!acc[key]) {
-        acc[key] = {
-          key,
-          tenMon: item.tenMon,
-          kichThuoc: item.kichThuoc,
-          tramCheBien: item.tramCheBien || 'BAR_CHINH',
-          tongLy: 0,
-          nhomGhiChuMap: {},
-          chiTiet: [],
-        }
-      }
-      const sl = Number(item.soLuong || 1)
-      acc[key].tongLy += sl
       const modLabel =
         Array.isArray(item.modifiersSnapshot) && item.modifiersSnapshot.length > 0
           ? item.modifiersSnapshot
@@ -688,8 +674,24 @@ export default function BaristaPage() {
                 return mQty > 1 ? `${lbl} x${mQty}` : lbl
               })
               .filter(Boolean)
+              .sort()
               .join(', ')
           : ''
+      const key = `${item.maMon}|${item.kichThuoc}|${modLabel}`
+      if (!acc[key]) {
+        acc[key] = {
+          key,
+          tenMon: item.tenMon,
+          kichThuoc: item.kichThuoc,
+          modLabel,
+          tramCheBien: item.tramCheBien || 'BAR_CHINH',
+          tongLy: 0,
+          nhomGhiChuMap: {},
+          chiTiet: [],
+        }
+      }
+      const sl = Number(item.soLuong || 1)
+      acc[key].tongLy += sl
       const tpLabel = item.toppings?.length
         ? ` (+${item.toppings.map((t) => t.tenTopping).join(', ')})`
         : ''
@@ -709,9 +711,14 @@ export default function BaristaPage() {
           maHoaDon: item.maHoaDon,
           soThuTuNgay: item.soThuTuNgay,
           tenBan: item.tenBan || '🛍️ Mang đi',
+          soTheRung: item.soTheRung || null,
+          tenKhachVangLai: item.tenKhachVangLai || null,
           thoiGianGoi: item.thoiGianGoi,
           items: [],
         }
+      } else {
+        if (!acc[item.maHoaDon].soTheRung && item.soTheRung) acc[item.maHoaDon].soTheRung = item.soTheRung
+        if (!acc[item.maHoaDon].tenKhachVangLai && item.tenKhachVangLai) acc[item.maHoaDon].tenKhachVangLai = item.tenKhachVangLai
       }
       acc[item.maHoaDon].items.push(item)
       return acc
@@ -1280,6 +1287,16 @@ export default function BaristaPage() {
                       )}
                       <span className="font-extrabold text-amber-400 text-base">{tk.tenBan}</span>
                       <span className="text-xs text-stone-400">#{tk.maHoaDon}</span>
+                      {tk.soTheRung && (
+                        <span className="px-2 py-0.5 rounded-md bg-purple-600 text-white font-black text-xs">
+                          📟 Thẻ #{tk.soTheRung}
+                        </span>
+                      )}
+                      {tk.tenKhachVangLai && (
+                        <span className="px-2 py-0.5 rounded-md bg-sky-700 text-white font-bold text-xs">
+                          👤 {tk.tenKhachVangLai}
+                        </span>
+                      )}
                     </div>
                     <span className={`px-2.5 py-1 rounded-lg text-xs font-extrabold shrink-0 ${sla.badge}`}>
                       ⏱ {mins} phút
@@ -1317,6 +1334,25 @@ export default function BaristaPage() {
                                 {item.tenMon} ({item.kichThuoc}) × {item.soLuong}
                               </p>
                             </div>
+                            {Array.isArray(item.modifiersSnapshot) && item.modifiersSnapshot.length > 0 && (
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {item.modifiersSnapshot.map((m, idx) => {
+                                  const mQty = Number(m.qty ?? m.soLuong ?? 1)
+                                  const lbl = m.tenInNgan || m.tenOption || ''
+                                  if (!lbl) return null
+                                  return (
+                                    <span
+                                      key={`${m.optionId || idx}`}
+                                      className="px-1.5 py-0.5 rounded bg-sky-800/90 border border-sky-500/50 text-sky-100 font-bold text-[11px]"
+                                    >
+                                      {m.tenNhom ? `${m.tenNhom}: ` : ''}
+                                      {lbl}
+                                      {mQty > 1 ? ` ×${mQty}` : ''}
+                                    </span>
+                                  )
+                                })}
+                              </div>
+                            )}
                             {item.toppings?.length > 0 && (
                               <p className="text-xs text-amber-200">
                                 + {item.toppings.map((t) => `${t.tenTopping} x${t.soLuong}`).join(', ')}

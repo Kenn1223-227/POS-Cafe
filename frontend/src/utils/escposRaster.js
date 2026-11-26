@@ -341,6 +341,25 @@ export function renderVietnameseReceiptToCanvas(
   for (const m of items) {
     const title = `${m.tenMon}${m.kichThuoc ? ` (${m.kichThuoc})` : ''} x${m.soLuong}`
     drawRow(title, formatVndVi(m.thanhTien), 20, true)
+    const mods = Array.isArray(m.modifiersSnapshot) ? m.modifiersSnapshot : Array.isArray(m.modifiers) ? m.modifiers : []
+    if (mods.length > 0) {
+      const modStr = mods
+        .map((mod) => {
+          const lbl = mod.tenInNgan || mod.tenOption || ''
+          const mQty = Number(mod.qty ?? mod.soLuong ?? 1)
+          return lbl ? (mQty > 1 ? `${lbl} x${mQty}` : lbl) : ''
+        })
+        .filter(Boolean)
+        .join(', ')
+      if (modStr) {
+        ctx.font = `${px(17)}px ${fontFamily}`
+        ctx.textAlign = 'left'
+        for (const line of wrapCanvasText(ctx, `• ${modStr}`, targetWidth - pad * 2 - 14)) {
+          ctx.fillText(line, pad + 14, y)
+          y += Math.round(px(17) * 1.32)
+        }
+      }
+    }
     if (m.toppings?.length) {
       const tpStr = `+ ${m.toppings.map((t) => `${t.tenTopping} x${t.soLuong}`).join(', ')}`
       ctx.font = `${px(17)}px ${fontFamily}`

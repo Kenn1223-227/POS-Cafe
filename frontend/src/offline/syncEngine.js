@@ -225,12 +225,8 @@ export async function checkServerClockDrift() {
     return { drifted: false, driftMs: 0, warning: null }
   }
   try {
-    const resp = await axiosClient.get('/ready', {
-      timeout: 3000,
-      silent: true,
-      transformResponse: [(d) => d],
-    })
-    const serverDateHeader = resp?.headers?.date || resp?.headers?.Date
+    const res = await fetch('/api/ready', { method: 'GET', cache: 'no-store' })
+    const serverDateHeader = res?.headers?.get('date')
     if (!serverDateHeader) return { drifted: false, driftMs: 0, warning: null }
     const serverMs = Date.parse(serverDateHeader)
     if (!Number.isFinite(serverMs)) return { drifted: false, driftMs: 0, warning: null }

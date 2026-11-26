@@ -374,6 +374,8 @@ function registerPromotionAndPinRoutes(
         layHoaDonChiTiet,
         kiemTraToken,
         choPhepVaiTro,
+        coQuyenHan = null,
+        xacThucPinQuanLy = null,
         verifyPassword,
         jwt,
         JWT_VERIFY_OPTIONS = { algorithms: ['HS256'] },
@@ -605,6 +607,9 @@ function registerPromotionAndPinRoutes(
             maKH = null,
             tuDongHappyHour = true,
             goBo = false,
+            managerPin = null,
+            maNVDuyet = null,
+            lyDo = null,
         } = req.body || {};
         const tenantId = layTenantId(req);
 
@@ -615,6 +620,7 @@ function registerPromotionAndPinRoutes(
                 try {
                     const r = await client.query(
                         `SELECT MaHoaDon, TrangThaiTT, MaKH, MaKhuyenMai, TenKhuyenMai,
+                                COALESCE(DaInTamTinh, FALSE) AS DaInTamTinh,
                                 COALESCE(TienGiamKM, 0) AS TienGiamKM,
                                 COALESCE(DiemSuDung, 0) AS DiemSuDung,
                                 COALESCE(TienGiamDiem, 0) AS TienGiamDiem
@@ -640,6 +646,31 @@ function registerPromotionAndPinRoutes(
                 }
                 if (chiTiet.daThanhToan > 0) {
                     throw new LoiNghiepVu(409, 'Hóa đơn đã ghi nhận thanh toán 1 phần, không thể thay đổi ưu đãi!');
+                }
+
+                // [P0-3] Chặn lách Pre-bill: nếu đã in tạm tính (DaInTamTinh = TRUE), bắt buộc quyền Quản lý hoặc managerPin
+                const daInTamTinh = Boolean(hdRow.daintamtinh);
+                let prebillApprover = null;
+                if (daInTamTinh) {
+                    const hasPerm =
+                        Number(req.user?.vaiTro) === 1 ||
+                        (typeof coQuyenHan === 'function' && coQuyenHan(req.user, 'order.discount.apply'));
+                    if (hasPerm) {
+                        prebillApprover = req.user.maNV;
+                    } else {
+                        const mgr =
+                            managerPin && typeof xacThucPinQuanLy === 'function'
+                                ? await xacThucPinQuanLy(client, tenantId, managerPin, req.ip, maNVDuyet, 'order.discount.apply')
+                                : null;
+                        if (!mgr) {
+                            throw new LoiNghiepVu(
+                                403,
+                                'Hóa đơn đã in tạm tính (Pre-bill)! Cần quyền Quản lý hoặc mã PIN Quản lý hợp lệ để áp/gỡ ưu đãi.',
+                                { maLoi: 'CAN_PIN_QUAN_LY', code: 'PREBILL_DISCOUNT_FORBIDDEN' }
+                            );
+                        }
+                        prebillApprover = mgr.maNV;
+                    }
                 }
 
                 // 1. Hoàn tác ưu đãi cũ (nếu hóa đơn đã từng lưu trước đó) trước khi áp mới hoặc gỡ bỏ
@@ -669,6 +700,21 @@ function registerPromotionAndPinRoutes(
                           WHERE MaHoaDon = $1`,
                         [maHoaDon]
                     );
+                    if (daInTamTinh && typeof ghiAuditLog === 'function') {
+                        await ghiAuditLog(client, {
+                            tenantId,
+                            maNV: req.user.maNV,
+                            vaiTro: req.user.vaiTro,
+                            nguoiDuyet: prebillApprover,
+                            hanhDong: 'PREBILL_PROMO_REMOVED',
+                            doiTuong: 'HOADON',
+                            maDoiTuong: maHoaDon,
+                            giaTriMoi: { goBo: true },
+                            lyDo: lyDo ? String(lyDo).trim().slice(0, 255) : 'Gỡ ưu đãi sau khi in tạm tính',
+                            ip: req.ip,
+                            batBuoc: true,
+                        });
+                    }
                     return {
                         goBo: true,
                         uuDai: null,
@@ -713,6 +759,27 @@ function registerPromotionAndPinRoutes(
                         uuDai.tienGiamDiem,
                     ]
                 );
+
+                if (daInTamTinh && typeof ghiAuditLog === 'function') {
+                    await ghiAuditLog(client, {
+                        tenantId,
+                        maNV: req.user.maNV,
+                        vaiTro: req.user.vaiTro,
+                        nguoiDuyet: prebillApprover,
+                        hanhDong: 'PREBILL_PROMO_APPLIED',
+                        doiTuong: 'HOADON',
+                        maDoiTuong: maHoaDon,
+                        giaTriMoi: {
+                            maKhuyenMai: uuDai.maKhuyenMai,
+                            tienGiamKM: uuDai.tienGiamKM,
+                            diemSuDung: uuDai.diemSuDung,
+                            tienGiamDiem: uuDai.tienGiamDiem,
+                        },
+                        lyDo: lyDo ? String(lyDo).trim().slice(0, 255) : 'Áp ưu đãi sau khi in tạm tính',
+                        ip: req.ip,
+                        batBuoc: true,
+                    });
+                }
 
                 return {
                     goBo: false,

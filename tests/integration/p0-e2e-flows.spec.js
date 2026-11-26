@@ -63,6 +63,7 @@ try {
 const { createMigrationPool, assertAppRuntimeNoBypassRls } = require('../helpers/dbHarness');
 const { hashPassword } = require('../../password');
 const { PLAN_FEATURES } = require('../../modules/industryTemplates');
+const { maHoaKhoaWebhook } = require('../../modules/saasRoutes');
 const serverMod = require('../../server');
 
 const { server, io, pool, runStartupBootstrap } = serverMod;
@@ -195,6 +196,7 @@ async function seedTestData(ownerPool) {
         bankId: '970422',
         accountNo: BANK_ACC_A,
         accountName: 'CAFE E2E A',
+        sepay_api_key_enc: maHoaKhoaWebhook(process.env.SEPAY_API_KEY),
     });
 
     const client = await ownerPool.connect();

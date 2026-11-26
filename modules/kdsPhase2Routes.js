@@ -23,6 +23,7 @@ const {
 } = require('./kdsPhase2Engine');
 
 const { danhGiaModifiersChoMon, tinhGiaToppingBacThang, tinhBomMotLySauSubstitution } = require('./fohEngineService');
+const { normalizeInventoryBranch } = require('./inventoryCogsPhase4Engine');
 const { emitToBranch, emitToTenant } = require('../src/core/socketRooms');
 
 const LOAI_GD_BAN_HANG = 6;
@@ -464,14 +465,16 @@ function registerKdsPhase2Routes(app, deps) {
                 });
 
                 if (laBanSao && typeof ghiCanhBaoGianLan === 'function') {
-                    await ghiCanhBaoGianLan(client, {
+                    await ghiCanhBaoGianLan(pool, {
                         tenantId,
-                        loaiCanhBao: 'RECEIPT_REPRINT',
-                        mucDo: soLanIn >= 3 ? 'HIGH' : 'MEDIUM',
+                        hanhDong: 'RECEIPT_REPRINT',
+                        doiTuong: 'HOADON',
                         maNV: req.user.maNV,
+                        vaiTro: req.user.vaiTro,
+                        nguoiDuyet,
                         maDoiTuong: maHoaDon,
-                        moTa: `Nhân viên ${req.user.maNV} in lại hóa đơn #${maHoaDon} (Lần ${soLanIn})`,
-                        duLieu: { maHoaDon, soLanIn, nguoiDuyet, lyDo: lyDo || null },
+                        lyDo: `Nhân viên ${req.user.maNV} in lại hóa đơn #${maHoaDon} (Lần ${soLanIn})`,
+                        giaTriMoi: { maHoaDon, soLanIn, nguoiDuyet, lyDo: lyDo || null },
                     }).catch(() => {});
                 }
 
@@ -716,7 +719,7 @@ function registerKdsPhase2Routes(app, deps) {
                 const hoanKhoMonCu =
                     oldItem.trangthaiphache !== 'DaPhucVu' &&
                     (!daBatDauPha || Boolean(oldItem.lahangdonggoicu));
-                const bIdStock = normalizeBranchId(oldItem.branchid || req.user?.branchId || 'DEFAULT');
+                const invBranchId = normalizeInventoryBranch(tenantId, oldItem.branchid || req.user?.branchId || 'DEFAULT');
                 const adjustBranchStock = async (maNL, deltaQty) => {
                     await client.query('SAVEPOINT sp_swap_branch_stock');
                     try {
@@ -726,7 +729,7 @@ function registerKdsPhase2Routes(app, deps) {
                                     capnhatluc = now()
                               WHERE tenantid = $2 AND branchid = $3 AND manl = $4
                               RETURNING soluongton`,
-                            [deltaQty, tenantId, bIdStock, maNL]
+                            [deltaQty, tenantId, invBranchId, maNL]
                         );
                         if (tkUpd.rows.length === 0) {
                             await client.query(
@@ -735,7 +738,7 @@ function registerKdsPhase2Routes(app, deps) {
                                  ON CONFLICT (branchid, manl) DO UPDATE
                                      SET soluongton = COALESCE(public.tonkhochinhanh.soluongton, 0) + $4,
                                          capnhatluc = now()`,
-                                [tenantId, bIdStock, maNL, deltaQty]
+                                [tenantId, invBranchId, maNL, deltaQty]
                             );
                         }
                         await client.query('RELEASE SAVEPOINT sp_swap_branch_stock');
@@ -825,7 +828,7 @@ function registerKdsPhase2Routes(app, deps) {
                 }
 
                 // 6. Xử lý 3 nhánh Tài chính (bù tiền / hoàn tiền / ngang giá) nếu hóa đơn đã thanh toán
-                const ca = await layCaDangMo(client, tenantId).catch(() => null);
+                const ca = await layCaDangMo(client, 'SHARE', tenantId, { branchId: invBranchId }).catch(() => null);
                 const maCa = ca?.macathungan || oldItem.macathungan || null;
                 let financialAction = 'EVEN';
                 let refundRecordId = null;
@@ -840,7 +843,7 @@ function registerKdsPhase2Routes(app, deps) {
                             [
                                 String(oldItem.mahoadon),
                                 maCa ? String(maCa) : null,
-                                cleanPhuongThuc === 'VI_KHACH' ? 'TIEN_MAT' : cleanPhuongThuc,
+                                cleanPhuongThuc,
                                 chenhLech,
                                 String(req.user.maNV),
                                 tenantId,

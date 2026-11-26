@@ -388,7 +388,7 @@ export default function ToppingModal({
                                     e.stopPropagation()
                                     changeModifierQty(grp, opt, -1)
                                   }}
-                                  className="w-6 h-6 rounded bg-white/20 hover:bg-white/30 font-extrabold text-white cursor-pointer"
+                                  className="w-11 h-11 rounded bg-white/20 hover:bg-white/30 font-extrabold text-white cursor-pointer"
                                 >
                                   −
                                 </button>
@@ -400,7 +400,7 @@ export default function ToppingModal({
                                     e.stopPropagation()
                                     changeModifierQty(grp, opt, 1)
                                   }}
-                                  className="w-6 h-6 rounded bg-white/20 hover:bg-white/30 font-extrabold text-white cursor-pointer disabled:opacity-40"
+                                  className="w-11 h-11 rounded bg-white/20 hover:bg-white/30 font-extrabold text-white cursor-pointer disabled:opacity-40"
                                 >
                                   +
                                 </button>

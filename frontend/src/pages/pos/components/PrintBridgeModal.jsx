@@ -61,6 +61,7 @@ export default function PrintBridgeModal({ isOpen, onClose, user, onStatusChange
   const [persistentJobs, setPersistentJobs] = useState([])
   const [expandedJobId, setExpandedJobId] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [noSaleModalOpen, setNoSaleModalOpen] = useState(false)
 
   const currentTenantId = String(user?.tenantId || 'DEFAULT')
 
@@ -235,8 +236,6 @@ export default function PrintBridgeModal({ isOpen, onClose, user, onStatusChange
       setLoading(false)
     }
   }
-
-  const [noSaleModalOpen, setNoSaleModalOpen] = useState(false)
 
   const handleNoSaleKick = () => {
     setNoSaleModalOpen(true)

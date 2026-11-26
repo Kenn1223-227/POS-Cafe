@@ -146,7 +146,7 @@ CREATE TABLE IF NOT EXISTS public.ChiTietHoaDon_Topping (
 );
 
 CREATE TABLE IF NOT EXISTS public.PhieuGiaoDichKho (
-    MaGiaoDich   BIGSERIAL PRIMARY KEY,
+    MaGiaoDich   VARCHAR(64) PRIMARY KEY DEFAULT ('GD-' || substr(md5(random()::text || clock_timestamp()::text), 1, 16)),
     LoaiGD       INT NOT NULL DEFAULT 1, -- 1=Nhap, 2=XuatBan, 3=KiemKe, 4=HuyHaoHut, 9=DaoPhieuNhap
     MaNV         VARCHAR(64),
     GhiChu       TEXT,
@@ -156,7 +156,7 @@ CREATE TABLE IF NOT EXISTS public.PhieuGiaoDichKho (
 
 CREATE TABLE IF NOT EXISTS public.ChiTietGiaoDichKho (
     Id           BIGSERIAL PRIMARY KEY,
-    MaGiaoDich   BIGINT NOT NULL REFERENCES public.PhieuGiaoDichKho(MaGiaoDich) ON DELETE CASCADE,
+    MaGiaoDich   VARCHAR(64) NOT NULL REFERENCES public.PhieuGiaoDichKho(MaGiaoDich) ON DELETE CASCADE,
     MaNL         VARCHAR(64) NOT NULL,
     SoLuong      NUMERIC(15, 3) NOT NULL DEFAULT 0,
     DonGiaNhap   NUMERIC(15, 4) NOT NULL DEFAULT 0,
@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS public.ChiTietGiaoDichKho (
 );
 
 CREATE TABLE IF NOT EXISTS public.PhieuThuChiLatVat (
-    Id           BIGSERIAL PRIMARY KEY,
+    MaPhieuTC    BIGSERIAL PRIMARY KEY,
     MaCaThuNgan  BIGINT,
     MaNV         VARCHAR(64),
     LoaiPhieu    INT NOT NULL DEFAULT 1, -- 1=THU, 2=CHI, 3=RUT_KET, 4=THOI_CK_DU

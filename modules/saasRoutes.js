@@ -1,6 +1,30 @@
 const crypto = require('crypto');
 const { PLAN_FEATURES, INDUSTRY_TEMPLATES } = require('./industryTemplates');
 const { parseMenuUniversal, chuanHoaDanhSachMon } = require('./aiMenuImporter');
+const { createRateLimitStore } = require('./redisCluster');
+
+const REGISTER_RATE_LIMIT_MAX = 5;
+const REGISTER_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 giờ
+
+function createRegisterRateLimiter(store = createRateLimitStore('saas_register'), max = REGISTER_RATE_LIMIT_MAX, windowMs = REGISTER_RATE_LIMIT_WINDOW_MS) {
+    return async (req, res, next) => {
+        const ip = String(req.ip || req.socket?.remoteAddress || 'unknown').trim();
+        try {
+            const { dem, hetHan } = await store.increment(ip, windowMs);
+            if (dem > max) {
+                const retryAfterSec = Math.max(1, Math.ceil((hetHan - Date.now()) / 1000));
+                res.set('Retry-After', String(retryAfterSec));
+                return res.status(429).json({
+                    code: 'REGISTER_RATE_LIMITED',
+                    message: 'Bạn đã gửi quá nhiều yêu cầu đăng ký quán mới từ IP này. Vui lòng thử lại sau 1 giờ!',
+                });
+            }
+        } catch {
+            // Fail-open nếu store lỗi đột ngột
+        }
+        next();
+    };
+}
 
 const TRIAL_DAYS = 30;
 const GRACE_DAYS = 5; // 5 ngày ân hạn (Grace Period) sau khi hết hạn: vẫn cho bán hàng kèm banner nhắc gia hạn, tránh cắt ngang giờ cao điểm!
@@ -252,6 +276,12 @@ async function khoiTaoMultiTenantSaaS(pool) {
     }
 }
 
+async function kiemTraMultiTenantSanSang(pool) {
+    const chk = await pool.query("SELECT to_regclass('public.tenants') IS NOT NULL AS ok");
+    multiTenantSanSang = chk.rows[0]?.ok === true;
+    return multiTenantSanSang;
+}
+
 // Middleware chặn bán hàng khi bản dùng thử 30 ngày đã hết hạn (hoặc gói trả phí đã hết hạn)
 function taoMiddlewareKiemTraHanSuDung(pool) {
     return async (req, res, next) => {
@@ -360,9 +390,11 @@ function registerSaasRoutes(
         });
     });
 
+    const gioiHanDangKySaas = createRegisterRateLimiter();
+
     // 2. Đăng ký Quán mới: hỗ trợ Gói FREE vĩnh viễn (350 đơn/tháng) hoặc Dùng thử 30 ngày (STARTER/PRO)
     //    + Tách định danh đăng nhập: Chủ quán dùng Email/SĐT toàn hệ thống, nhân viên dùng /login?shop=<slug>
-    app.post('/api/saas/register', gioiHanDangNhap, async (req, res) => {
+    app.post('/api/saas/register', gioiHanDangKySaas, async (req, res) => {
         const {
             tenQuan,
             moHinh = 'CAFE_TAKEAWAY',
@@ -1818,9 +1850,11 @@ module.exports = {
     tinhTienGoi,
     danhGiaTrangThaiGoi,
     khoiTaoMultiTenantSaaS,
+    kiemTraMultiTenantSanSang,
     taoMiddlewareKiemTraHanSuDung,
     xuLyThanhToanGoiTuWebhook,
     registerSaasRoutes,
+    createRegisterRateLimiter,
     maHoaKhoaWebhook,
     giaiMaKhoaWebhook,
     timTenantWebhookConfig,

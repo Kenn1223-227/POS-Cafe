@@ -51,7 +51,15 @@ export function DenominationCounterGrid({ counts = {}, onChange, totalLabel = 'T
 }
 
 // [P0/P1] Đối soát MÙ thực sự (Blind Cash Reconciliation) + Bảng đếm mệnh giá + Tiền giữ lại két + In Z-Report K80
-export default function DongCaModal({ isOpen, onClose, currentShift, preCloseWarning = null, onShiftClosed }) {
+export default function DongCaModal({
+  isOpen,
+  onClose,
+  currentShift,
+  preCloseWarning = null,
+  preCloseCheck = null,
+  outboxPendingCount = 0,
+  onShiftClosed,
+}) {
   const { user } = useAuthStore()
   const [useCounter, setUseCounter] = useState(true)
   const [counts, setCounts] = useState({})
@@ -62,8 +70,28 @@ export default function DongCaModal({ isOpen, onClose, currentShift, preCloseWar
   const [submitting, setSubmitting] = useState(false)
   const [printing, setPrinting] = useState(false)
   const [ketQuaChot, setKetQuaChot] = useState(null)
+  const [confirmDongCaOpen, setConfirmDongCaOpen] = useState(false)
 
   if (!isOpen || (!currentShift && !ketQuaChot)) return null
+
+  const preCheck = preCloseWarning || preCloseCheck || null
+  const openOrdersCount = Number(
+    preCheck?.soHoaDonDangMo ??
+      (Array.isArray(preCheck?.openOrders) ? preCheck.openOrders.length : preCheck?.openOrders) ??
+      0
+  )
+  const parkedCount = Number(preCheck?.soDonLuuTam ?? preCheck?.parkedOrdersCount ?? 0)
+  const effectiveOutboxPending = Number(outboxPendingCount || preCheck?.outboxPendingCount || 0)
+  const preCheckWarnings = [
+    ...(Array.isArray(preCheck?.warnings) ? preCheck.warnings : []),
+    ...(Array.isArray(preCheck?.blockingReasons) ? preCheck.blockingReasons : []),
+  ]
+  const hasPreCloseAlert =
+    openOrdersCount > 0 ||
+    parkedCount > 0 ||
+    Number(preCheck?.soBanChuaDong || 0) > 0 ||
+    effectiveOutboxPending > 0 ||
+    preCheckWarnings.length > 0
 
   const maCaHienThi = currentShift?.maCaThuNgan || ketQuaChot?.doiSoat?.maCaThuNgan
   const tongTuMenhGia = calcDenominationTotal(counts)
@@ -96,10 +124,12 @@ export default function DongCaModal({ isOpen, onClose, currentShift, preCloseWar
     }
   }
 
-  const [confirmDongCaOpen, setConfirmDongCaOpen] = useState(false)
-
   const handleDongCa = (e) => {
     e.preventDefault()
+    if (outboxPendingCount > 0) {
+      toast.error(`Còn ${outboxPendingCount} đơn Offline chưa đồng bộ lên server! Vui lòng đồng bộ trước khi đóng ca.`)
+      return
+    }
     if (tienThucTeNum === null || Number.isNaN(tienThucTeNum) || tienThucTeNum < 0) {
       toast.error('Vui lòng kiểm đếm và nhập số tiền mặt thực tế (>= 0)!')
       return
@@ -122,6 +152,7 @@ export default function DongCaModal({ isOpen, onClose, currentShift, preCloseWar
         chiTietMenhGia: chiTietMenhGia && Object.keys(chiTietMenhGia).length > 0 ? chiTietMenhGia : undefined,
         tienGiuLaiKet: Math.max(0, Number(tienGiuLaiKet || 0)),
         confirmRecount: recountNeeded,
+        outboxPendingCount,
       })
       toast.success(res.message || 'Đã chốt ca thành công!')
       setRecountNeeded(false)
@@ -245,17 +276,21 @@ export default function DongCaModal({ isOpen, onClose, currentShift, preCloseWar
           </div>
         ) : (
           <form onSubmit={handleDongCa} className="space-y-4">
-            {preCloseWarning && (preCloseWarning.soHoaDonDangMo > 0 || preCloseWarning.soDonLuuTam > 0 || preCloseWarning.soBanChuaDong > 0 || (preCloseWarning.warnings || []).length > 0) && (
+            {hasPreCloseAlert && (
               <div className="p-3 rounded-xl bg-rose-50 border border-rose-300 text-xs text-rose-900 space-y-1">
                 <p className="font-extrabold">⚠️ Cảnh báo trước khi đóng ca (Pre-Close Check):</p>
-                {Number(preCloseWarning.soHoaDonDangMo || 0) > 0 && (
-                  <p>• Còn {preCloseWarning.soHoaDonDangMo} hóa đơn/bàn đang mở chưa thanh toán.</p>
+                {openOrdersCount > 0 && (
+                  <p>• Còn {openOrdersCount} hóa đơn/bàn đang mở chưa thanh toán.</p>
                 )}
-                {Number(preCloseWarning.soDonLuuTam || 0) > 0 && (
-                  <p>• Còn {preCloseWarning.soDonLuuTam} đơn lưu tạm chưa xử lý.</p>
+                {parkedCount > 0 && (
+                  <p>• Còn {parkedCount} đơn lưu tạm chưa xử lý.</p>
                 )}
-                {Array.isArray(preCloseWarning.warnings) &&
-                  preCloseWarning.warnings.map((w, idx) => <p key={idx}>• {typeof w === 'string' ? w : w.message || JSON.stringify(w)}</p>)}
+                {effectiveOutboxPending > 0 && (
+                  <p>• Còn {effectiveOutboxPending} đơn offline (Outbox) chưa đồng bộ lên máy chủ.</p>
+                )}
+                {preCheckWarnings.map((w, idx) => (
+                  <p key={idx}>• {typeof w === 'string' ? w : w.message || JSON.stringify(w)}</p>
+                ))}
               </div>
             )}
 
@@ -354,7 +389,7 @@ export default function DongCaModal({ isOpen, onClose, currentShift, preCloseWar
               </button>
               <button
                 type="submit"
-                disabled={submitting}
+                disabled={submitting || outboxPendingCount > 0}
                 className="flex-1 min-h-12 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-extrabold shadow cursor-pointer disabled:opacity-50"
               >
                 {submitting ? 'Đang chốt & đối chiếu...' : 'Xác nhận Chốt Ca'}

@@ -342,6 +342,9 @@ async function handleCreateOrAppendOrder(req, res) {
                 danhSachMon,
                 combos,
                 ip: req.ip,
+                user: req.user,
+                managerPin: req.body?.managerPin || null,
+                maNVDuyet: req.body?.maNVDuyet || null,
             });
 
             const {
@@ -671,6 +674,9 @@ app.post('/api/order/quick-checkout', kiemTraToken, choPhepVaiTro(1, 4), kiemTra
                 danhSachMon,
                 combos,
                 ip: req.ip,
+                user: req.user,
+                managerPin: req.body?.managerPin || null,
+                maNVDuyet: req.body?.maNVDuyet || null,
             });
 
             // [P0 FIX] Lưu vết mã hóa đơn Offline (#OFF-HHMMSS) lên HoaDon
@@ -1550,28 +1556,71 @@ app.post('/api/order/:maHoaDon/hoan-tien', kiemTraToken, choPhepVaiTro(1, 4), as
 
             const thucHienHoanKho = Boolean(hoanKho);
             const giaVonRefundMap = await layMapGiaVonNguyenLieu(client, tenantId, [...tieuHaoMon.keys()]);
+            const refundBranchId = normalizeInventoryBranch(
+                tenantId,
+                hd.branchid || ca?.branchid || req.user?.branchId || 'DEFAULT'
+            );
+            const maCaRefund = ca?.macathungan ? String(ca.macathungan) : null;
             if (thucHienHoanKho && tieuHaoMon.size > 0) {
+                const dsNL = [...tieuHaoMon.keys()];
+                const { branchId: lockedBranchId, stockMap } = await lockBranchStockOrdered(
+                    client,
+                    tenantId,
+                    refundBranchId,
+                    dsNL
+                );
                 const phieu = await client.query(
-                    'INSERT INTO PhieuGiaoDichKho (MaNV, LoaiGD, GhiChu, TenantId) VALUES ($1, $2, $3, $4) RETURNING MaGiaoDich',
-                    [req.user.maNV, LOAI_GD_HOAN_KHO, `Hoàn kho hoàn tiền HĐ ${maHoaDon}: ${cleanLyDo}`, tenantId]
+                    `INSERT INTO PhieuGiaoDichKho (MaNV, LoaiGD, GhiChu, TenantId, BranchId, MaCaThuNgan)
+                     VALUES ($1, $2, $3, $4, $5, $6) RETURNING MaGiaoDich`,
+                    [
+                        req.user.maNV,
+                        LOAI_GD_HOAN_KHO,
+                        `Hoàn kho hoàn tiền HĐ ${maHoaDon}: ${cleanLyDo}`,
+                        tenantId,
+                        lockedBranchId,
+                        maCaRefund,
+                    ]
                 );
                 const maGD = phieu.rows[0].magiaodich;
                 for (const [maNL, sl] of [...tieuHaoMon].sort((a, b) => a[0].localeCompare(b[0]))) {
                     const qty = lam3(sl);
-                    await client.query(
-                        `INSERT INTO ChiTietGiaoDichKho (MaGiaoDich, MaNL, SoLuong, DonGiaNhap, TinhTrang)
-                         VALUES ($1, $2, $3, $4, 'Hoàn kho sau hoàn tiền')`,
-                        [maGD, maNL, qty, giaVonRefundMap.get(maNL) || 0]
-                    );
-                    await client.query(
-                        "UPDATE NguyenLieu SET SoLuongTon = SoLuongTon + $1 WHERE MaNL = $2 AND COALESCE(TenantId, 'DEFAULT') = $3",
-                        [qty, maNL, tenantId]
-                    );
+                    const st = stockMap.get(maNL);
+                    const tonTruoc = st ? st.soLuongTon : 0;
+                    const tonSau = lam3(tonTruoc + qty);
+                    const giaVon = st ? st.giaVonDonVi : giaVonRefundMap.get(maNL) || 0;
+                    await insertLedgerLine(client, {
+                        maGiaoDich: maGD,
+                        maNL,
+                        soLuong: qty,
+                        donGiaNhap: giaVon,
+                        tinhTrang: 'Hoàn kho sau hoàn tiền',
+                        tonTruoc,
+                        tonSau,
+                        giaVonTruoc: giaVon,
+                        giaVonSau: giaVon,
+                    });
+                    if (st) {
+                        await updateBranchStockRow(client, {
+                            tenantId,
+                            branchId: lockedBranchId,
+                            maNL,
+                            nextQty: tonSau,
+                            nextWac: giaVon,
+                        });
+                    }
                 }
             } else if (!thucHienHoanKho && tieuHaoMon.size > 0) {
                 const phieuWaste = await client.query(
-                    'INSERT INTO PhieuGiaoDichKho (MaNV, LoaiGD, GhiChu, TenantId) VALUES ($1, $2, $3, $4) RETURNING MaGiaoDich',
-                    [req.user.maNV, LOAI_GD_HAO_HUT_HUY_MON, `Hao hụt hoàn tiền HĐ ${maHoaDon}: ${cleanLyDo}`, tenantId]
+                    `INSERT INTO PhieuGiaoDichKho (MaNV, LoaiGD, GhiChu, TenantId, BranchId, MaCaThuNgan)
+                     VALUES ($1, $2, $3, $4, $5, $6) RETURNING MaGiaoDich`,
+                    [
+                        req.user.maNV,
+                        LOAI_GD_HAO_HUT_HUY_MON,
+                        `Hao hụt hoàn tiền HĐ ${maHoaDon}: ${cleanLyDo}`,
+                        tenantId,
+                        refundBranchId,
+                        maCaRefund,
+                    ]
                 );
                 const maGDW = phieuWaste.rows[0].magiaodich;
                 for (const [maNL, sl] of [...tieuHaoMon].sort((a, b) => a[0].localeCompare(b[0]))) {

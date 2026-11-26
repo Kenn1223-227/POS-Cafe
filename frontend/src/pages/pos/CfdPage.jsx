@@ -91,6 +91,19 @@ export default function CfdPage() {
                     <p className="text-base font-bold text-white">
                       {m.tenMon} ({m.kichThuoc}) × {m.soLuong}
                     </p>
+                    {(m.modifiersSnapshot?.length > 0 || m.modifiers?.length > 0) && (
+                      <p className="text-xs text-sky-300">
+                        •{' '}
+                        {(m.modifiersSnapshot || m.modifiers)
+                          .map((mod) => {
+                            const lbl = mod.tenInNgan || mod.tenOption || ''
+                            const mQty = Number(mod.qty ?? mod.soLuong ?? 1)
+                            return lbl ? (mQty > 1 ? `${lbl} x${mQty}` : lbl) : ''
+                          })
+                          .filter(Boolean)
+                          .join(', ')}
+                      </p>
+                    )}
                     {m.toppings?.length > 0 && (
                       <p className="text-xs text-amber-300">
                         + {m.toppings.map((t) => t.tenTopping).join(', ')}
@@ -144,7 +157,7 @@ export default function CfdPage() {
         </div>
 
         <div className="md:col-span-5 bg-stone-900 rounded-3xl p-6 border border-stone-800 flex flex-col items-center justify-center text-center space-y-4">
-          {state.vietQrUrl && amountDue > 0 ? (
+          {state.vietQrUrl && state.activeInvoice?.maHoaDon && amountDue > 0 ? (
             <>
               <span className="px-4 py-1.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold text-xs">
                 📱 QUÉT MÃ VIETQR — TỰ ĐỘNG XÁC NHẬN

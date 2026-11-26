@@ -273,6 +273,20 @@ function buildReceiptK80({
     for (const m of items) {
         const title = `${m.tenMon} (${m.kichThuoc}) x${m.soLuong}`;
         pushLine(padTwoCols(title, dinhDangTien(m.thanhTien)));
+        const mods = Array.isArray(m.modifiersSnapshot) ? m.modifiersSnapshot : Array.isArray(m.modifiers) ? m.modifiers : [];
+        if (mods.length > 0) {
+            const modStr = mods
+                .map((mod) => {
+                    const lbl = mod.tenInNgan || mod.tenOption || '';
+                    const mQty = Number(mod.qty ?? mod.soLuong ?? 1);
+                    return lbl ? (mQty > 1 ? `${lbl} x${mQty}` : lbl) : '';
+                })
+                .filter(Boolean)
+                .join(', ');
+            if (modStr) {
+                for (const l of wrapText(`* ${modStr}`, 46)) pushLine('  ' + l);
+            }
+        }
         if (m.toppings?.length) {
             const tpStr = '+ ' + m.toppings.map((t) => `${t.tenTopping} x${t.soLuong}`).join(', ');
             for (const l of wrapText(tpStr, 46)) pushLine('  ' + l);

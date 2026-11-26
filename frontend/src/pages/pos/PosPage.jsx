@@ -16,6 +16,7 @@ import { useSocketEvents } from '../../socket/useSocketEvents'
 import { getSocket } from '../../socket/socketClient'
 import { useBarcodeScanner } from '../../hooks/useBarcodeScanner'
 import { ROLES } from '../../constants/roles'
+import { parseStaffQuickList } from '../../utils/staffQuickList'
 import TableMap from './components/TableMap'
 import MenuGrid from './components/MenuGrid'
 import ToppingModal from './components/ToppingModal'
@@ -413,7 +414,7 @@ export default function PosPage() {
     // Quét định kỳ 30s nếu còn đơn Pending khi có mạng
     const syncTimer = setInterval(() => {
       if (navigator.onLine) {
-        void getAllOutboxJobs().then((jobs) => {
+        void getAllOutboxJobs(currentTenantId).then((jobs) => {
           setOutboxJobs(jobs)
           if (jobs.some((j) => j.status === 'PENDING')) {
             void triggerOutboxSync(false)
@@ -430,7 +431,7 @@ export default function PosPage() {
       window.removeEventListener('pos:print-queue-changed', onPrintQueueChanged)
       navigator.serviceWorker?.removeEventListener('message', onSwMessage)
     }
-  }, [loadPosData, refreshOutboxList, refreshFailedPrintCount, triggerOutboxSync])
+  }, [currentTenantId, loadPosData, refreshOutboxList, refreshFailedPrintCount, triggerOutboxSync])
 
   const [reprintPrompt, setReprintPrompt] = useState(null) // { step: 'pin'|'reason', hoaDon, extraOpts, pin }
   const [combos, setCombos] = useState([])
@@ -476,7 +477,8 @@ export default function PosPage() {
             : activeInvoice.conLaiCanThu ?? Math.max(0, total - paidAmount)
         )
       : total
-    const transferMemo = activeInvoice ? `POSHD${activeInvoice.maHoaDon}` : 'POSCAFE'
+    const hasInvoice = Boolean(activeInvoice?.maHoaDon)
+    const transferMemo = hasInvoice ? `POSHD${activeInvoice.maHoaDon}` : ''
 
     postCfdMessage({
       type: 'CFD_UPDATE',
@@ -490,7 +492,7 @@ export default function PosPage() {
       paidAmount,
       remainingAmount,
       transferMemo,
-      vietQrUrl: remainingAmount > 0 ? buildVietQrUrl({ amount: remainingAmount, addInfo: transferMemo }) : null,
+      vietQrUrl: hasInvoice && remainingAmount > 0 ? buildVietQrUrl({ amount: remainingAmount, addInfo: transferMemo }) : null,
     })
   }, [cart, activeInvoice, selectedTable, customer, promoPreview, postCfdMessage])
 
@@ -698,11 +700,13 @@ export default function PosPage() {
     setPreCloseWarning(null)
     if (typeof navigator === 'undefined' || navigator.onLine) {
       try {
-        const check = await caService.preCloseCheck()
+        const check = await caService.preCloseCheck({ outboxPendingCount: outboxJobs.length })
         if (check) {
           setPreCloseWarning(check)
-          const openCount = Number(check.soHoaDonDangMo || 0)
-          const heldCount = Number(check.soDonLuuTam || 0)
+          const openCount = Array.isArray(check.openOrders)
+            ? check.openOrders.length
+            : Number(check.soHoaDonDangMo || 0)
+          const heldCount = Number(check.parkedOrdersCount ?? check.soDonLuuTam ?? 0)
           if (openCount > 0 || heldCount > 0) {
             toast(`⚠️ Còn ${openCount} bàn/đơn đang mở và ${heldCount} đơn lưu tạm chưa chốt!`, {
               icon: '⚠️',
@@ -970,7 +974,15 @@ export default function PosPage() {
         setPromoPreview(null)
         setCustomer(null)
         setActiveInvoice(null)
-        printReceiptK80(job.localInvoice, { laDonOffline: true, thuNgan: user?.tenNV || '', tenQuan: user?.tenQuan || '' })
+        printReceiptK80(job.localInvoice, {
+          laDonOffline: true,
+          isCashPayment: phuongThucTT === 'TIEN_MAT',
+          thuNgan: user?.tenNV || '',
+          tenQuan: user?.tenQuan || '',
+        })
+        if (autoPrintLabelsOnCheckout) {
+          void printCupLabels50x30(job.localInvoice)
+        }
       }
 
       try {
@@ -996,6 +1008,9 @@ export default function PosPage() {
         setActiveInvoice(null)
         if (res.hoaDon) {
           void handlePrintInvoice(res.hoaDon, { isCashPayment: phuongThucTT === 'TIEN_MAT' })
+          if (autoPrintLabelsOnCheckout) {
+            void printCupLabels50x30(res.hoaDon)
+          }
         }
         await loadPosData()
       } catch (err) {
@@ -1028,6 +1043,7 @@ export default function PosPage() {
       user?.tenNV,
       user?.tenQuan,
       handlePrintInvoice,
+      autoPrintLabelsOnCheckout,
       loadPosData,
     ]
   )
@@ -1287,7 +1303,7 @@ export default function PosPage() {
       authService
         .getStaffQuickList()
         .then((res) => {
-          const list = (res?.danhSachNV || []).filter((s) => s.coQuyenDuyetPin && s.daDatPin)
+          const list = parseStaffQuickList(res).filter((s) => s.coQuyenDuyetPin && s.daDatPin)
           setPinApprovers(list)
           if (list.length > 0) setVoidApproverId((prev) => prev || list[0].maNV)
         })
@@ -2160,7 +2176,7 @@ export default function PosPage() {
         </div>
       </div>
 
-      <PosErrorBoundary section="Hộp thoại nghiệp vụ (Modals)">
+      <PosErrorBoundary section="Chọn món & Topping (ToppingModal)">
       <ToppingModal
         key={editingCartTarget ? `edit-${editingCartTarget.idx}-${editingCartTarget.item.cartKey}` : pickingProduct?.maMon || 'none'}
         product={editingCartTarget?.product || pickingProduct}
@@ -2180,13 +2196,17 @@ export default function PosPage() {
           }
         }}
       />
+      </PosErrorBoundary>
 
+      <PosErrorBoundary section="Phiếu Thu/Chi (ThuChiModal)">
       <ThuChiModal
         isOpen={showThuChiModal}
         onClose={() => setShowThuChiModal(false)}
         onSuccess={loadPosData}
       />
+      </PosErrorBoundary>
 
+      <PosErrorBoundary section="Đóng ca thu ngân (DongCaModal)">
       <DongCaModal
         isOpen={showDongCaModal}
         onClose={() => {
@@ -2195,12 +2215,16 @@ export default function PosPage() {
         }}
         currentShift={currentShift}
         preCloseWarning={preCloseWarning}
+        outboxPendingCount={outboxJobs.length}
         onShiftClosed={() => {
           setCurrentShift(null)
           setPreCloseWarning(null)
           loadPosData()
         }}
       />
+      </PosErrorBoundary>
+
+      <PosErrorBoundary section="Mở ca thu ngân (OpenShiftModal)">
 
       {showOpenShiftModal && (
         <div role="dialog" aria-modal="true" data-pos-modal="true" className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
@@ -2249,20 +2273,26 @@ export default function PosPage() {
           </div>
         </div>
       )}
+      </PosErrorBoundary>
 
+      <PosErrorBoundary section="Hoàn tiền & Đổi món (PaidOrdersRefundModal)">
       <PaidOrdersRefundModal
         isOpen={showPaidHistoryModal}
         onClose={() => setShowPaidHistoryModal(false)}
         isManager={canApproveVoidOrRefund}
         onRefundSuccess={() => void loadLiveOperations()}
       />
+      </PosErrorBoundary>
 
+      <PosErrorBoundary section="Chuyển ca nhanh (PinSwitchModal)">
       <PinSwitchModal
         isOpen={showPinSwitchModal}
         onClose={() => setShowPinSwitchModal(false)}
         onSwitched={() => void loadPosData()}
       />
+      </PosErrorBoundary>
 
+      <PosErrorBoundary section="Hàng đợi Offline (OfflineQueueModal)">
       <OfflineQueueModal
         isOpen={showOfflineModal}
         onClose={() => setShowOfflineModal(false)}
@@ -2278,6 +2308,9 @@ export default function PosPage() {
         }}
         thuNgan={user?.tenNV || ''}
       />
+      </PosErrorBoundary>
+
+      <PosErrorBoundary section="Hóa đơn đang mở (OpenOrdersModal)">
 
       {/* Modal Danh sách Hóa đơn chưa thanh toán (chống Đơn Mang đi mồ côi) */}
       {showOpenOrdersModal && (
@@ -2333,7 +2366,9 @@ export default function PosPage() {
           </div>
         </div>
       )}
+      </PosErrorBoundary>
 
+      <PosErrorBoundary section="Hủy món & Tách hóa đơn (Void/Split)">
       {/* Modal Hủy món chuẩn hóa + Manager/Ca trưởng Override PIN O(1) (Bọc React.memo) */}
       <VoidItemModal
         voidTarget={voidTarget}
@@ -2392,14 +2427,18 @@ export default function PosPage() {
           }
         }}
       />
+      </PosErrorBoundary>
 
+      <PosErrorBoundary section="Máy in nhiệt & Két tiền (PrintBridgeModal)">
       <PrintBridgeModal
         isOpen={showPrintModal}
         onClose={() => setShowPrintModal(false)}
         user={user}
         onStatusChange={setBridgeOnline}
       />
+      </PosErrorBoundary>
 
+      <PosErrorBoundary section="Hệ sinh thái & Xác nhận (Drawer/Confirm)">
       <EcosystemPosDrawer
         isOpen={showEcosystemDrawer}
         initialTab={ecosystemDrawerTab}

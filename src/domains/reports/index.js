@@ -1037,15 +1037,28 @@ app.get('/api/baocao/dashboard', kiemTraToken, choPhepVaiTro(1), async (req, res
                                     0
                                 ) AS TienTopping,
                                 COALESCE(MAX(hd.TienGiamKM), 0) + COALESCE(MAX(hd.TienGiamDiem), 0) AS TienGiamHD,
-                                COALESCE(SUM(cthd.SoLuong * COALESCE(cthd.GiaVonSnapshot, 0)), 0) AS GiaVon
+                                COALESCE(SUM(CASE WHEN cthd.TrangThaiPhaChe <> 'DaHuy' THEN cthd.SoLuong * COALESCE(cthd.GiaVonSnapshot, 0) ELSE 0 END), 0) AS GiaVon
                             FROM HoaDon hd
-                            JOIN ChiTietHoaDon cthd ON hd.MaHoaDon = cthd.MaHoaDon AND cthd.TrangThaiPhaChe <> 'DaHuy'
+                            JOIN ChiTietHoaDon cthd
+                              ON hd.MaHoaDon = cthd.MaHoaDon
+                             AND (cthd.TrangThaiPhaChe <> 'DaHuy' OR COALESCE(cthd.LyDoHuy, '') LIKE '[Hoàn tiền%')
                             LEFT JOIN (
                                 SELECT MaCTHD, SUM(SoLuong * DonGia) AS TienTopping
                                 FROM ChiTietHoaDon_Topping
                                 GROUP BY MaCTHD
                             ) tp ON cthd.MaCTHD = tp.MaCTHD
-                            WHERE hd.TrangThaiTT = 1
+                            WHERE (
+                                  hd.TrangThaiTT = 1
+                                  OR (
+                                      hd.TrangThaiTT = 2
+                                      AND EXISTS (
+                                          SELECT 1
+                                            FROM public.order_refunds r
+                                           WHERE r.mahoadon = hd.MaHoaDon::text
+                                             AND COALESCE(r.tenantid, 'DEFAULT') = COALESCE(hd.TenantId, 'DEFAULT')
+                                      )
+                                  )
+                              )
                               AND COALESCE(hd.TenantId, 'DEFAULT') = $3
                               AND hd.ThoiGianThanhToan >= ($1::timestamp AT TIME ZONE '${VN_TZ}')
                               AND hd.ThoiGianThanhToan < (($2::date + 1)::timestamp AT TIME ZONE '${VN_TZ}')
@@ -1071,15 +1084,28 @@ app.get('/api/baocao/dashboard', kiemTraToken, choPhepVaiTro(1), async (req, res
                                 TO_CHAR(hd.ThoiGianThanhToan::timestamptz AT TIME ZONE '${VN_TZ}', 'YYYY-MM-DD') AS Ngay,
                                 SUM(cthd.SoLuong * cthd.DonGia - COALESCE(cthd.GiaGiam, 0)) AS TienMon,
                                 COALESCE(SUM(tp.TienTopping), 0) AS TienTopping,
-                                COALESCE(SUM(cthd.SoLuong * COALESCE(cthd.GiaVonSnapshot, 0)), 0) AS GiaVon
+                                COALESCE(SUM(CASE WHEN cthd.TrangThaiPhaChe <> 'DaHuy' THEN cthd.SoLuong * COALESCE(cthd.GiaVonSnapshot, 0) ELSE 0 END), 0) AS GiaVon
                             FROM HoaDon hd
-                            JOIN ChiTietHoaDon cthd ON hd.MaHoaDon = cthd.MaHoaDon AND cthd.TrangThaiPhaChe <> 'DaHuy'
+                            JOIN ChiTietHoaDon cthd
+                              ON hd.MaHoaDon = cthd.MaHoaDon
+                             AND (cthd.TrangThaiPhaChe <> 'DaHuy' OR COALESCE(to_jsonb(cthd)->>'lydohuy', '') LIKE '[Hoàn tiền%')
                             LEFT JOIN (
                                 SELECT MaCTHD, SUM(SoLuong * DonGia) AS TienTopping
                                 FROM ChiTietHoaDon_Topping
                                 GROUP BY MaCTHD
                             ) tp ON cthd.MaCTHD = tp.MaCTHD
-                            WHERE hd.TrangThaiTT = 1
+                            WHERE (
+                                  hd.TrangThaiTT = 1
+                                  OR (
+                                      hd.TrangThaiTT = 2
+                                      AND EXISTS (
+                                          SELECT 1
+                                            FROM public.order_refunds r
+                                           WHERE r.mahoadon = hd.MaHoaDon::text
+                                             AND COALESCE(r.tenantid, 'DEFAULT') = COALESCE(hd.TenantId, 'DEFAULT')
+                                      )
+                                  )
+                              )
                               AND COALESCE(hd.TenantId, 'DEFAULT') = $3
                               AND hd.ThoiGianThanhToan >= ($1::timestamp AT TIME ZONE '${VN_TZ}')
                               AND hd.ThoiGianThanhToan < (($2::date + 1)::timestamp AT TIME ZONE '${VN_TZ}')
@@ -1251,9 +1277,9 @@ app.get('/api/baocao/dashboard', kiemTraToken, choPhepVaiTro(1), async (req, res
         const bieuDoDoanhThu = [...allDates].sort().map((ngay) => {
             const row = revRowByDate.get(ngay);
             const soDon = row ? parseInt(row.sodon, 10) : 0;
-            const doanhThuTruocHoan = row ? parseFloat(row.doanhthu || 0) : 0;
+            const doanhThuGop = row ? parseFloat(row.doanhthu || 0) : 0;
             const hoanTien = refundByDate.get(ngay) || 0;
-            const doanhThu = Math.max(0, Math.round((doanhThuTruocHoan - hoanTien) * 100) / 100);
+            const doanhThu = Math.max(0, Math.round((doanhThuGop - hoanTien) * 100) / 100);
             const cogsAdj = cogsAdjByDate.get(ngay) || 0;
             const giaVon = Math.round(((row ? parseFloat(row.giavon || 0) : 0) + cogsAdj) * 100) / 100;
             const giamGia = row ? parseFloat(row.tonggiamgia || 0) : 0;

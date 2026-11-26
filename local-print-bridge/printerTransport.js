@@ -120,6 +120,9 @@ async function queryEscPosStatus(printerConfig) {
     if (mode !== 'LAN_TCP') {
         return { ready: true, statusCode: 0x00, label: 'READY', message: 'Bỏ qua sensor cho Windows Share' };
     }
+    if (printerConfig?.sensorProbeEnabled !== true) {
+        return { ready: true, statusCode: 0x00, label: 'READY', message: 'Bỏ qua sensor probe LAN (sensorProbeEnabled=false)' };
+    }
     try {
         const bPaper = await querySingleByteOverTcp(Buffer.from([0x10, 0x04, 0x04]), printerConfig);
         if ((bPaper & 0x60) === 0x60) {
@@ -169,6 +172,9 @@ async function queryTsplStatus(printerConfig, { cupIndex = null } = {}) {
     if (mode !== 'LAN_TCP') {
         return { ready: true, statusCode: 0x00, label: 'READY', message: 'Bỏ qua sensor cho Windows Share' };
     }
+    if (printerConfig?.sensorProbeEnabled !== true) {
+        return { ready: true, statusCode: 0x00, label: 'READY', message: 'Bỏ qua sensor probe LAN (sensorProbeEnabled=false)' };
+    }
     try {
         const statusByte = await querySingleByteOverTcp(Buffer.from([0x1b, 0x21, 0x3f]), printerConfig);
         const ready = statusByte === 0x00;
@@ -190,8 +196,15 @@ function sendViaWindowsShare(buffer, { shareName }) {
         if (process.platform !== 'win32') {
             return reject(new Error('Chế độ WINDOWS_SHARE chỉ chạy trên Windows!'));
         }
-        const safeShare = String(shareName).replace(/[^a-zA-Z0-9._\-\s\\]/g, '').trim();
-        const uncPath = safeShare.startsWith('\\\\') ? safeShare : `\\\\localhost\\${safeShare}`;
+        const rawShare = String(shareName).trim();
+        if (rawShare.startsWith('\\\\') || rawShare.startsWith('//') || rawShare.includes('\\') || rawShare.includes('/')) {
+            return reject(new Error('Tên chia sẻ máy in Windows (shareName) không hợp lệ — từ chối đường dẫn UNC từ xa!'));
+        }
+        const safeShare = rawShare.replace(/[^a-zA-Z0-9._\-\s]/g, '').trim();
+        if (!safeShare) {
+            return reject(new Error('Tên chia sẻ máy in Windows (shareName) không hợp lệ!'));
+        }
+        const uncPath = `\\\\localhost\\${safeShare}`;
         const tmpFile = path.join(os.tmpdir(), `pos-print-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.bin`);
 
         fs.writeFile(tmpFile, buffer, (writeErr) => {

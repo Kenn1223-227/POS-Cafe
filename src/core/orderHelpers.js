@@ -116,6 +116,8 @@ function createOrderHelpers(deps) {
         ghiAuditLog,
         dispatchFraudAlertFromAudit,
         kiemTraCanhBaoTanSuatGianLan,
+        xacThucPinQuanLy = null,
+        coQuyenHan = null,
     } = deps;
 
 // [P0 Trap #1 FIX] Chặn gọi thêm món / hủy món / tách đơn / gộp bàn khi hóa đơn đang khóa Khuyến mãi hoặc Đổi điểm
@@ -559,6 +561,7 @@ async function layHoaDonChiTiet(db, maHoaDon, options = {}) {
         thueVATPhanTram: Number(hd.thuevatphantram || 0),
     });
 
+    const taxMode = String(hd.cachtinhthue || 'INCLUDED').toUpperCase();
     const taxBreakdown = Array.isArray(hd.taxbreakdownjson) ? hd.taxbreakdownjson : null;
     const hasMixedTaxBreakdown = Array.isArray(taxBreakdown) && taxBreakdown.length > 0;
     const tienThueVAT = hasMixedTaxBreakdown ? Number(hd.tienthuevat || 0) : keToan.tienThueVAT;
@@ -566,7 +569,10 @@ async function layHoaDonChiTiet(db, maHoaDon, options = {}) {
     const tongTamTinh = keToan.tamTinhMon;
     const tongGiamGia = keToan.tongGiamGia;
     const tongSauGiam = keToan.sauGiamGia;
-    const tongPhaiTra = keToan.tongPhaiTra;
+    const tongPhaiTra =
+        taxMode === 'EXCLUDED' && hasMixedTaxBreakdown
+            ? Math.round((keToan.coSoTinhThue + tienThueVAT + keToan.tienLamTron) * 100) / 100
+            : keToan.tongPhaiTra;
 
     const tongDaThuTuBang = danhSachThanhToan.reduce((s, p) => s + p.soTien, 0);
     const daThanhToan =
@@ -1007,6 +1013,9 @@ async function taoOrderTrongGiaoDich(
         combos = [],
         allowNegativeStock = ALLOW_NEGATIVE_STOCK,
         ip = null,
+        user = null,
+        managerPin = null,
+        maNVDuyet = null,
     }
 ) {
     const laAwaitingPayment =
@@ -1607,6 +1616,14 @@ async function taoOrderTrongGiaoDich(
         const courseNo = Math.max(1, Math.floor(Number(mon.courseNo || 1)));
         const laMonTang = Boolean(mon.laMonTang);
         const chietKhauMon = Math.max(0, Number(mon.chietKhauMon || 0));
+        const toppingPerCup = toppings.reduce(
+            (sum, tp) => sum + Number(tp.donGia || 0) * Number(tp.soLuongMoiLy || 1),
+            0
+        );
+        const lineGross = Math.max(
+            0,
+            Math.round((Number(donGiaServer || 0) + Number(modEval.giaModifiers || 0) + toppingPerCup) * Number(mon.soLuong || 1))
+        );
 
         return {
             maMon: mon.maMon,
@@ -1623,7 +1640,10 @@ async function taoOrderTrongGiaoDich(
             bomSnapshotJson: lineBomSnapshot,
             chietKhauMon,
             laMonTang,
-            lyDoTang: laMonTang && mon.lyDoTang ? String(mon.lyDoTang).trim().slice(0, 255) : null,
+            lineGross,
+            lyDoTang: (laMonTang || chietKhauMon > 0) && (mon.lyDoTang || mon.lyDo)
+                ? String(mon.lyDoTang || mon.lyDo).trim().slice(0, 255)
+                : null,
             trongLuongGram,
             comboGroupUid: mon.comboGroupUid || null,
             maCombo: mon.maCombo || null,
@@ -1635,6 +1655,54 @@ async function taoOrderTrongGiaoDich(
             toppings,
         };
     });
+
+    // [P0-3] Chặn gian lận tặng món (laMonTang) / chiết khấu dòng món (chietKhauMon) + chặn vượt lineGross
+    const compDiscountAuditRows = [];
+    let compDiscountApprover = null;
+    const coDongGiamHoacTang = dongMon.some((d) => d.laMonTang || d.chietKhauMon > 0);
+    if (coDongGiamHoacTang) {
+        const hasPerm =
+            Number(vaiTro) === 1 ||
+            (typeof coQuyenHan === 'function' && coQuyenHan(user || { vaiTro }, 'order.discount.apply'));
+        if (hasPerm) {
+            compDiscountApprover = maNV;
+        } else {
+            const mgr =
+                managerPin && typeof xacThucPinQuanLy === 'function'
+                    ? await xacThucPinQuanLy(client, tenantId, managerPin, ip, maNVDuyet, 'order.discount.apply')
+                    : null;
+            if (!mgr) {
+                throw new LoiNghiepVu(
+                    403,
+                    'Tặng món hoặc chiết khấu dòng món yêu cầu quyền Quản lý (order.discount.apply) hoặc mã PIN Quản lý hợp lệ!',
+                    { maLoi: 'CAN_PIN_QUAN_LY', code: 'COMP_DISCOUNT_FORBIDDEN' }
+                );
+            }
+            compDiscountApprover = mgr.maNV;
+        }
+
+        for (const d of dongMon) {
+            if (!d.laMonTang && !(d.chietKhauMon > 0)) continue;
+            if (d.chietKhauMon > d.lineGross) {
+                throw new LoiNghiepVu(
+                    400,
+                    `Chiết khấu món "${d.tenMonSnapshot}" (${d.chietKhauMon.toLocaleString('vi-VN')}đ) không được vượt quá giá trị dòng món (${d.lineGross.toLocaleString('vi-VN')}đ)!`,
+                    { code: 'ITEM_DISCOUNT_EXCEEDS_LINE_TOTAL', maMon: d.maMon }
+                );
+            }
+            compDiscountAuditRows.push({
+                hanhDong: d.laMonTang ? 'ITEM_COMP_APPLIED' : 'ITEM_LINE_DISCOUNT',
+                maMon: d.maMon,
+                tenMon: d.tenMonSnapshot,
+                soLuong: d.soLuong,
+                laMonTang: d.laMonTang,
+                chietKhauMon: d.chietKhauMon,
+                soTienGiam: d.laMonTang ? d.lineGross : d.chietKhauMon,
+                lyDo: d.lyDoTang || null,
+                nguoiDuyet: compDiscountApprover,
+            });
+        }
+    }
 
     if (maKH) {
         const kh = await client.query(
@@ -2065,6 +2133,38 @@ async function taoOrderTrongGiaoDich(
                 ip,
                 batBuoc: true,
             });
+        }
+    }
+
+    // [P0-3] Ghi Audit_Logs bắt buộc cho tặng món (ITEM_COMP_APPLIED) / chiết khấu dòng món (ITEM_LINE_DISCOUNT)
+    if (compDiscountAuditRows.length > 0) {
+        for (const cd of compDiscountAuditRows) {
+            await ghiAuditLog(client, {
+                tenantId,
+                maNV,
+                vaiTro,
+                nguoiDuyet: cd.nguoiDuyet,
+                hanhDong: cd.hanhDong,
+                doiTuong: 'HOADON',
+                maDoiTuong: maHoaDon,
+                giaTriMoi: cd,
+                lyDo: cd.lyDo,
+                ip,
+                batBuoc: true,
+            });
+            if (typeof dispatchFraudAlertFromAudit === 'function') {
+                void dispatchFraudAlertFromAudit(pool, {
+                    tenantId,
+                    maNV,
+                    vaiTro,
+                    nguoiDuyet: cd.nguoiDuyet,
+                    hanhDong: cd.hanhDong,
+                    doiTuong: 'HOADON',
+                    maDoiTuong: maHoaDon,
+                    giaTriMoi: cd,
+                    lyDo: cd.lyDo,
+                });
+            }
         }
     }
 
@@ -2577,7 +2677,20 @@ async function ghiNhanThanhToanTrongGiaoDich(
             : Array.isArray(chiTietTruoc.taxBreakdown) && chiTietTruoc.taxBreakdown.length > 0
               ? Number(chiTietTruoc.tienThueVAT || 0)
               : keToanPay.tienThueVAT;
-    const tongTien = keToanPay.tongPhaiTra;
+    const taxModePay = String(chiTietTruoc.cachTinhThue || 'INCLUDED').toUpperCase();
+    const tongTien =
+        taxModePay === 'EXCLUDED' && mixedTaxPay !== null && mixedTaxPay !== undefined
+            ? Math.round(
+                  (Number(mixedTaxPay.grandTotal || 0) +
+                      Number(chiTietTruoc.phiDongGoi || 0) +
+                      Number(keToanPay.tienLamTron || 0)) *
+                      100
+              ) / 100
+            : taxModePay === 'EXCLUDED' &&
+                Array.isArray(chiTietTruoc.taxBreakdown) &&
+                chiTietTruoc.taxBreakdown.length > 0
+              ? Math.round((keToanPay.coSoTinhThue + tienThueVATFinal + keToanPay.tienLamTron) * 100) / 100
+              : keToanPay.tongPhaiTra;
     const daThuTruoc = chiTietTruoc.daThanhToan;
     const conLaiTruoc = Math.max(0, Math.round((tongTien - daThuTruoc) * 100) / 100);
     const mucThuMucTieu = chiaTienRow

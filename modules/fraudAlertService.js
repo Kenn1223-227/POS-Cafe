@@ -87,6 +87,36 @@ const ALERT_EVENT_META = [
         severity: 'HIGH',
         defaultEnabled: true,
     },
+    {
+        key: 'ITEM_COMP_APPLIED',
+        label: '🎁 Tặng món miễn phí trên đơn (Comp)',
+        severity: 'MEDIUM',
+        defaultEnabled: true,
+    },
+    {
+        key: 'ITEM_LINE_DISCOUNT',
+        label: '🏷️ Chiết khấu trực tiếp dòng món',
+        severity: 'MEDIUM',
+        defaultEnabled: true,
+    },
+    {
+        key: 'SHIFT_HANDOVER_VARIANCE',
+        label: '⚖️ Sai lệch bàn giao tiền mặt giữa 2 ca',
+        severity: 'HIGH',
+        defaultEnabled: true,
+    },
+    {
+        key: 'SAFE_DROP_DISPUTED',
+        label: '🚨 Chủ quán báo sai lệch phiếu rút két (Safe Drop)',
+        severity: 'HIGH',
+        defaultEnabled: true,
+    },
+    {
+        key: 'OFFLINE_QUEUE_ITEM_DELETED',
+        label: '🗑️ Xóa đơn khỏi hàng đợi Offline chưa đồng bộ',
+        severity: 'HIGH',
+        defaultEnabled: true,
+    },
 ];
 
 const DEFAULT_EVENTS = Object.fromEntries(ALERT_EVENT_META.map((e) => [e.key, e.defaultEnabled]));
@@ -704,9 +734,27 @@ async function kiemTraCanhBaoTanSuatGianLan(
                     const velRes = await client.query(
                         `SELECT
                             COUNT(*) FILTER (WHERE MaNV = $2)::int AS tong_don_nv,
-                            COUNT(*) FILTER (WHERE MaNV = $2 AND (COALESCE(TienGiamKM, 0) > 0 OR COALESCE(TienGiamDiem, 0) > 0))::int AS don_giam_nv,
+                            COUNT(*) FILTER (WHERE MaNV = $2 AND (
+                                COALESCE(TienGiamKM, 0) > 0
+                                OR COALESCE(TienGiamDiem, 0) > 0
+                                OR EXISTS (
+                                    SELECT 1 FROM ChiTietHoaDon ct
+                                     WHERE ct.MaHoaDon = HoaDon.MaHoaDon
+                                       AND ct.TrangThaiPhaChe <> 'DaHuy'
+                                       AND (COALESCE(ct.LaMonTang, FALSE) = TRUE OR COALESCE(ct.ChietKhauMon, 0) > 0)
+                                )
+                            ))::int AS don_giam_nv,
                             COUNT(*)::int AS tong_don_quan,
-                            COUNT(*) FILTER (WHERE COALESCE(TienGiamKM, 0) > 0 OR COALESCE(TienGiamDiem, 0) > 0)::int AS don_giam_quan
+                            COUNT(*) FILTER (WHERE
+                                COALESCE(TienGiamKM, 0) > 0
+                                OR COALESCE(TienGiamDiem, 0) > 0
+                                OR EXISTS (
+                                    SELECT 1 FROM ChiTietHoaDon ct
+                                     WHERE ct.MaHoaDon = HoaDon.MaHoaDon
+                                       AND ct.TrangThaiPhaChe <> 'DaHuy'
+                                       AND (COALESCE(ct.LaMonTang, FALSE) = TRUE OR COALESCE(ct.ChietKhauMon, 0) > 0)
+                                )
+                            )::int AS don_giam_quan
                            FROM HoaDon
                           WHERE COALESCE(TenantId, 'DEFAULT') = $1
                             AND TrangThaiTT = 1

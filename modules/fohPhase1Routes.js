@@ -34,6 +34,8 @@ function registerFohPhase1Routes(app, deps) {
         layTenantId,
         kiemTraToken,
         choPhepVaiTro,
+        coQuyenHan = null,
+        xacThucPinQuanLy = null,
         ghiAuditLog,
         guiLoi,
         LoiNghiepVu,
@@ -1468,6 +1470,9 @@ function registerFohPhase1Routes(app, deps) {
             expectedVersion = null,
             destExpectedVersion = null,
             toExpectedVersion = null,
+            managerPin = null,
+            maNVDuyet = null,
+            lyDo = null,
         } = req.body || {};
         const finalDestExpectedVersion = destExpectedVersion ?? toExpectedVersion ?? null;
 
@@ -1489,6 +1494,30 @@ function registerFohPhase1Routes(app, deps) {
                 if (srcHdRes.rows.length === 0) throw new LoiNghiepVu(404, 'Không tìm thấy hóa đơn nguồn!');
                 if (Number(srcHdRes.rows[0].trangthaitt) !== 0) {
                     throw new LoiNghiepVu(409, 'Chỉ có thể chuyển món từ hóa đơn đang mở!');
+                }
+
+                const srcDaInTamTinh = Boolean(srcHdRes.rows[0].daintamtinh);
+                let prebillApprover = null;
+                if (srcDaInTamTinh) {
+                    const hasPerm =
+                        Number(req.user.vaiTro) === 1 ||
+                        (typeof coQuyenHan === 'function' && coQuyenHan(req.user, 'order.item.void_approve'));
+                    if (hasPerm) {
+                        prebillApprover = req.user.maNV;
+                    } else {
+                        const mgr =
+                            managerPin && typeof xacThucPinQuanLy === 'function'
+                                ? await xacThucPinQuanLy(client, tenantId, managerPin, req.ip, maNVDuyet, 'order.item.void_approve')
+                                : null;
+                        if (!mgr) {
+                            throw new LoiNghiepVu(
+                                403,
+                                'Hóa đơn nguồn đã in tạm tính (Pre-bill)! Cần quyền Quản lý hoặc mã PIN Quản lý hợp lệ để chuyển món.',
+                                { maLoi: 'CAN_PIN_QUAN_LY', code: 'PREBILL_TRANSFER_FORBIDDEN' }
+                            );
+                        }
+                        prebillApprover = mgr.maNV;
+                    }
                 }
 
                 await kiemTraVaTangVersionHoaDon(client, {
@@ -1686,6 +1715,29 @@ function registerFohPhase1Routes(app, deps) {
                 }
 
                 if (movedCups === 0) throw new LoiNghiepVu(400, 'Không có món hợp lệ nào để chuyển!');
+
+                if (srcDaInTamTinh) {
+                    await client.query(`UPDATE HoaDon SET DaInTamTinh = TRUE WHERE MaHoaDon = $1`, [destMaHoaDon]);
+                    await ghiAuditLog(client, {
+                        tenantId,
+                        maNV: req.user.maNV,
+                        vaiTro: req.user.vaiTro,
+                        nguoiDuyet: prebillApprover,
+                        hanhDong: 'PREBILL_ITEM_TRANSFER',
+                        doiTuong: 'HOADON',
+                        maDoiTuong: fromMaHoaDon,
+                        giaTriMoi: {
+                            fromMaHoaDon,
+                            destMaHoaDon,
+                            movedCups,
+                            transferredIds,
+                            daInTamTinhCopied: true,
+                        },
+                        lyDo: lyDo ? String(lyDo).trim().slice(0, 255) : 'Chuyển món từ hóa đơn đã in tạm tính',
+                        ip: req.ip,
+                        batBuoc: true,
+                    });
+                }
 
                 // Tăng version hóa đơn đích & tính lại KM/Tổng tiền cả 2 hóa đơn
                 await kiemTraVaTangVersionHoaDon(client, {

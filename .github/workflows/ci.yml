@@ -125,6 +125,11 @@ jobs:
       - name: Run Unit Test Suite
         run: npm run test:unit
 
+      - name: Run Frontend Modal Render Smoke Test
+        run: |
+          cd frontend
+          npm run test:render
+
       - name: Run Test Wave 1 (Core & RLS Guard)
         run: npm run test:wave1
 
@@ -133,6 +138,9 @@ jobs:
 
       - name: Run P1 Pilot Ops Integration Suite (Blind Stocktake & Channel Packaging BOM)
         run: npm run test:p1-ops
+
+      - name: Run V3 P0 Gate E2E Suite (SaaS Lock, Anti-Fraud, P&L, Safe WAC, VAT & Webhook)
+        run: npm run test:v3-gate
 
       - name: Build frontend
         run: |

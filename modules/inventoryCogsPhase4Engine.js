@@ -81,8 +81,9 @@ function computeSafeWacOnStockIn({
     if (oldStock < 0) {
         const slBuAm = Math.min(Math.abs(oldStock), qty);
         const cogsAdjustment = lam2(slBuAm * (donGiaNhapThucTeRaw - oldCost));
+        const nextStock = oldStock + qty;
         return {
-            giaVonMoi: donGiaNhapThucTe,
+            giaVonMoi: nextStock < 0 ? lam4(oldCost) : donGiaNhapThucTe,
             donGiaNhapThucTe,
             cogsAdjustment,
         };

@@ -37,10 +37,22 @@ body,
   border-color: #44403c !important;
 }
 .pos-theme-dark .bg-gray-100,
-.pos-theme-dark .bg-gray-50 {
+.pos-theme-dark .bg-gray-50,
+.pos-theme-dark .bg-stone-100 {
   background-color: #292524 !important;
   color: #e7e5e4 !important;
   border-color: #44403c !important;
+}
+.pos-theme-dark .bg-orange-50,
+.pos-theme-dark .bg-amber-50,
+.pos-theme-dark .bg-purple-50,
+.pos-theme-dark .bg-blue-50,
+.pos-theme-dark .bg-emerald-50,
+.pos-theme-dark .bg-rose-50,
+.pos-theme-dark .bg-sky-50 {
+  background-color: #292524 !important;
+  color: #f5f5f4 !important;
+  border-color: #57534e !important;
 }
 .pos-theme-dark .text-gray-800,
 .pos-theme-dark .text-gray-900,
@@ -61,21 +73,28 @@ body,
   border-color: #57534e !important;
 }
 
-/* [PHÂN HỆ 6] Chế độ High-Contrast (Quầy Take-away ngoài trời nắng gắt) */
+/* [PHÂN HỆ 6] Chế độ High-Contrast (Quầy Take-away ngoài trời nắng gắt — không dùng CSS filter để giữ nguyên position: fixed) */
 .pos-theme-high-contrast {
   background-color: #ffffff;
   color: #000000;
-  filter: contrast(1.18) saturate(1.15);
 }
 .pos-theme-high-contrast .border,
 .pos-theme-high-contrast .border-gray-200,
-.pos-theme-high-contrast .border-gray-300 {
+.pos-theme-high-contrast .border-gray-300,
+.pos-theme-high-contrast .border-stone-200,
+.pos-theme-high-contrast .border-stone-300 {
   border-color: #000000 !important;
   border-width: 2px !important;
 }
 .pos-theme-high-contrast .text-gray-500,
 .pos-theme-high-contrast .text-gray-600,
-.pos-theme-high-contrast .text-stone-500 {
-  color: #111827 !important;
+.pos-theme-high-contrast .text-stone-500,
+.pos-theme-high-contrast .text-stone-600 {
+  color: #000000 !important;
   font-weight: 700 !important;
+}
+.pos-theme-high-contrast .bg-white,
+.pos-theme-high-contrast .bg-stone-50 {
+  background-color: #ffffff !important;
+  color: #000000 !important;
 }

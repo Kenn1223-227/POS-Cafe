@@ -315,7 +315,12 @@ describe('Batch 6 — Counter Anti-Fraud, HR IP Anti-Spoof, NĐ 13/2023 PII & Sa
 
     it('1c. print-relay/dispatch: bắt buộc ghi Audit Log khi mở két tiền (userId, branchId, reason, timestamp), chặn role 2/3 & che SĐT trên payload in', async () => {
         const auditLogs = [];
-        const mockPool = { withTenant: async (_t, fn) => fn({}) };
+        const mockPool = {
+            withTenant: async (_t, fn) =>
+                fn({
+                    query: async () => ({ rows: [{ mahoadon: '900', solanin: 1 }] }),
+                }),
+        };
         let currentRole = 4;
 
         const srv = createExpressHarness((app) => {
@@ -374,6 +379,7 @@ describe('Batch 6 — Counter Anti-Fraud, HR IP Anti-Spoof, NĐ 13/2023 PII & Sa
             method: 'POST',
             body: {
                 kind: 'RECEIPT',
+                printToken: 'PRT-900-1-1700000000000',
                 payload: {
                     hoaDon: {
                         maHoaDon: 900,

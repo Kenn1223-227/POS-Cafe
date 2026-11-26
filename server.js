@@ -18,6 +18,7 @@ const { kiemTraCauHinh } = require('./config');
 const { hashPassword, verifyPassword } = require('./password');
 const {
     khoiTaoMultiTenantSaaS,
+    kiemTraMultiTenantSanSang,
     registerSaasRoutes,
     danhGiaTrangThaiGoi,
     taoMiddlewareKiemTraHanSuDung,
@@ -210,7 +211,7 @@ app.use(cors({
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Token', 'Idempotency-Key', 'X-Offline-Sync', 'X-Request-Id', 'X-Device-Id', 'X-Branch-Id'],
-    exposedHeaders: ['X-Request-Id'],
+    exposedHeaders: ['X-Request-Id', 'Date'],
 }));
 // Chỉ mở body limit 8mb riêng cho /api/ai/parse-menu; toàn cục siết còn 512kb chống Memory DoS
 app.use('/api/ai/parse-menu', express.json({ limit: '8mb' }));
@@ -253,6 +254,8 @@ const orderHelpers = createOrderHelpers({
     ghiAuditLog,
     dispatchFraudAlertFromAudit,
     kiemTraCanhBaoTanSuatGianLan,
+    xacThucPinQuanLy,
+    coQuyenHan,
 });
 
 const layChiNhanhHienTai = (req) =>
@@ -355,6 +358,8 @@ registerPromotionAndPinRoutes(app, {
     layHoaDonChiTiet: orderHelpers.layHoaDonChiTiet,
     kiemTraToken,
     choPhepVaiTro,
+    coQuyenHan,
+    xacThucPinQuanLy,
     verifyPassword,
     jwt,
     JWT_VERIFY_OPTIONS,
@@ -392,6 +397,8 @@ registerFohPhase1Routes(app, {
     layTenantId,
     kiemTraToken,
     choPhepVaiTro,
+    coQuyenHan,
+    xacThucPinQuanLy,
     ghiAuditLog,
     guiLoi,
     LoiNghiepVu,
@@ -447,6 +454,7 @@ registerPaymentShiftPhase3Routes(app, {
     kiemTraToken,
     choPhepVaiTro,
     coQuyenHan,
+    kiemTraHanSuDung,
     ghiAuditLog,
     ghiCanhBaoGianLan: dispatchFraudAlertFromAudit,
     guiLoi,
@@ -645,13 +653,20 @@ const donDepRefreshTokens = () =>
 
 async function runStartupBootstrap() {
     attachSocketIoRedisAdapter(io).catch(() => {});
+    // Kiểm tra kết nối DB trước khi bootstrap (fail-fast nếu DB không phản hồi)
+    await pool.query('SELECT 1');
+
     if (!shouldRunAutoDdl()) {
         logger.info('Auto-DDL đã bị khóa (NODE_ENV=production hoặc SKIP_AUTO_DDL=true). Chỉ kiểm tra sự tồn tại của bảng.', {
             event: 'AUTO_DDL_DISABLED_IN_PRODUCTION',
             nodeEnv: process.env.NODE_ENV || null,
             skipAutoDdl: process.env.SKIP_AUTO_DDL || null,
         });
-        await Promise.all([khoiTaoMoRongSchema(), khoiTaoIdempotency()]);
+        await Promise.all([
+            khoiTaoMoRongSchema(),
+            khoiTaoIdempotency(),
+            kiemTraMultiTenantSanSang(pool),
+        ]);
         await donDepIdempotency();
     } else {
         await khoiTaoMoRongSchema()
@@ -661,23 +676,38 @@ async function runStartupBootstrap() {
             .then(() => khoiTaoPlatformAdmins(pool, hashPassword));
         await khoiTaoIdempotency().then(donDepIdempotency);
     }
+
+    if (!runtimeFlags.idemSanSang || !runtimeFlags.auditSanSang) {
+        throw new Error(
+            `Bootstrap bảng nền thất bại: idemSanSang=${runtimeFlags.idemSanSang}, auditSanSang=${runtimeFlags.auditSanSang}`
+        );
+    }
+
     setInterval(donDepIdempotency, 6 * 60 * 60 * 1000).unref();
     setInterval(donDepRefreshTokens, 12 * 60 * 60 * 1000).unref();
 }
 
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
-    server.listen(PORT, () => {
-        logger.info(`Server Backend & Socket.IO (Multi-Tenant SaaS v3.1) đang chạy tại http://localhost:${PORT}`, {
-            event: 'SERVER_STARTED',
-            port: PORT,
-            accessTokenTtl: ACCESS_TOKEN_TTL,
-            readReplicaConfigured: isReadReplicaConfigured,
-        });
-        runStartupBootstrap().catch((err) => {
-            logger.error('Lỗi khởi động bootstrap schema/cache', { event: 'BOOTSTRAP_ERROR', error: err.message });
-        });
-    });
+    (async () => {
+        try {
+            await runStartupBootstrap();
+            server.listen(PORT, () => {
+                logger.info(`Server Backend & Socket.IO (Multi-Tenant SaaS v3.1) đang chạy tại http://localhost:${PORT}`, {
+                    event: 'SERVER_STARTED',
+                    port: PORT,
+                    accessTokenTtl: ACCESS_TOKEN_TTL,
+                    readReplicaConfigured: isReadReplicaConfigured,
+                });
+            });
+        } catch (err) {
+            logger.error('Lỗi nghiêm trọng khi khởi động bootstrap schema/DB — dừng server (fail-fast)', {
+                event: 'BOOTSTRAP_ERROR',
+                error: err.message,
+            });
+            process.exit(1);
+        }
+    })();
 }
 
 // [Wave 2 — P0-06] Graceful Shutdown cho SIGTERM & SIGINT (Zero-downtime rolling deploy)

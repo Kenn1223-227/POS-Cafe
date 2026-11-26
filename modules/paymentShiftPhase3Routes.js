@@ -24,6 +24,7 @@ function registerPaymentShiftPhase3Routes(app, deps) {
         kiemTraToken,
         choPhepVaiTro,
         coQuyenHan,
+        kiemTraHanSuDung = (req, res, next) => next(),
         ghiAuditLog,
         ghiCanhBaoGianLan,
         guiLoi,
@@ -39,7 +40,7 @@ function registerPaymentShiftPhase3Routes(app, deps) {
 
     // Alias chuẩn theo đặc tả Phân hệ 3 (đảm bảo cả URL mới & URL cũ cùng chạy 1 handler thống nhất!)
     if (handlers.handleMoCa) {
-        app.post('/api/ca/mo-ca', kiemTraToken, choPhepVaiTro(1, 4), handlers.handleMoCa);
+        app.post('/api/ca/mo-ca', kiemTraToken, kiemTraHanSuDung, choPhepVaiTro(1, 4), handlers.handleMoCa);
     }
     if (handlers.handleDoiSoatCa) {
         app.get('/api/ca/doi-soat', kiemTraToken, choPhepVaiTro(1, 4), handlers.handleDoiSoatCa);
@@ -286,14 +287,16 @@ function registerPaymentShiftPhase3Routes(app, deps) {
                 });
 
                 if (status === 'DISPUTED' && typeof ghiCanhBaoGianLan === 'function') {
-                    await ghiCanhBaoGianLan(client, {
+                    await ghiCanhBaoGianLan(pool, {
                         tenantId,
-                        loaiCanhBao: 'SAFE_DROP_DISPUTED',
-                        mucDo: 'HIGH',
+                        hanhDong: 'SAFE_DROP_DISPUTED',
+                        doiTuong: 'CATHUNGAN',
                         maNV: req.user.maNV,
+                        vaiTro: req.user.vaiTro,
+                        nguoiDuyet: req.user.maNV,
                         maDoiTuong: maPhieuTC,
-                        moTa: `🚨 Chủ quán báo SAI LỆCH phiếu rút két #${maPhieuTC} (${Number(row.sotien).toLocaleString('vi-VN')}đ)!`,
-                        duLieu: { maPhieuTC, soTien: Number(row.sotien), ghiChu },
+                        lyDo: `🚨 Chủ quán báo SAI LỆCH phiếu rút két #${maPhieuTC} (${Number(row.sotien).toLocaleString('vi-VN')}đ)!`,
+                        giaTriMoi: { maPhieuTC, soTien: Number(row.sotien), ghiChu },
                     }).catch(() => {});
                 }
 

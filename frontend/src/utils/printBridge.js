@@ -195,6 +195,18 @@ export function buildBrowserEscPosReceiptBytes({
   const items = (hoaDon?.danhSachMon || []).filter((m) => !m.daHuy && m.trangThaiPhaChe !== 'DaHuy')
   for (const m of items) {
     pushLine(padTwoColsAscii(`${m.tenMon} (${m.kichThuoc}) x${m.soLuong}`, fmtMoneyAscii(m.thanhTien)))
+    const mods = Array.isArray(m.modifiersSnapshot) ? m.modifiersSnapshot : Array.isArray(m.modifiers) ? m.modifiers : []
+    if (mods.length > 0) {
+      const modStr = mods
+        .map((mod) => {
+          const lbl = mod.tenInNgan || mod.tenOption || ''
+          const mQty = Number(mod.qty ?? mod.soLuong ?? 1)
+          return lbl ? (mQty > 1 ? `${lbl} x${mQty}` : lbl) : ''
+        })
+        .filter(Boolean)
+        .join(', ')
+      if (modStr) pushLine('  * ' + modStr)
+    }
     if (m.toppings?.length) {
       pushLine('  + ' + m.toppings.map((t) => `${t.tenTopping} x${t.soLuong}`).join(', '))
     }
