@@ -9,6 +9,7 @@ const {
     getRuntimeConnectionString,
     createRuntimePool,
     createMigrationPool,
+    createPlatformPool,
     assertAppRuntimeNoBypassRls,
     withTenantTx,
 } = require('../helpers/dbHarness');
@@ -388,21 +389,27 @@ describe(
             fs.rmSync(tmpDir, { recursive: true, force: true });
 
             // 2. Chạy runDunningCheck 2 lần cho tenant còn 3 ngày hết hạn -> chỉ ghi đúng 1 dòng D-3 (idempotent)
-            const poolWithTenant = {
-                query: (...args) => runtimePool.query(...args),
-                withTenant: (tId, fn) => withTenantTx(runtimePool, tId, fn),
-            };
-            const run1 = await runDunningCheck(poolWithTenant);
-            const run2 = await runDunningCheck(poolWithTenant);
+            const platformPool = createPlatformPool();
+            try {
+                const poolWithTenant = {
+                    query: (...args) => runtimePool.query(...args),
+                    withTenant: (tId, fn) => withTenantTx(runtimePool, tId, fn),
+                    platformPool,
+                };
+                const run1 = await runDunningCheck(poolWithTenant);
+                const run2 = await runDunningCheck(poolWithTenant);
 
-            assert.ok(
-                run1.logged.some((l) => l.tenantId === tenantId && l.stage === 'D-3'),
-                'Lần chạy 1 phải ghi nhận mốc D-3 cho tenant còn 3 ngày hết hạn'
-            );
-            assert.ok(
-                !run2.logged.some((l) => l.tenantId === tenantId && l.stage === 'D-3'),
-                'Lần chạy 2 KHÔNG được ghi trùng mốc D-3 (idempotent)'
-            );
+                assert.ok(
+                    run1.logged.some((l) => l.tenantId === tenantId && l.stage === 'D-3'),
+                    'Lần chạy 1 phải ghi nhận mốc D-3 cho tenant còn 3 ngày hết hạn'
+                );
+                assert.ok(
+                    !run2.logged.some((l) => l.tenantId === tenantId && l.stage === 'D-3'),
+                    'Lần chạy 2 KHÔNG được ghi trùng mốc D-3 (idempotent)'
+                );
+            } finally {
+                await platformPool.end();
+            }
 
             const dunningCount = await withTenantTx(runtimePool, tenantId, async (client) => {
                 const r = await client.query(

@@ -1441,7 +1441,7 @@ function registerSaasRoutes(
     const authDunning = kiemTraPlatformAdmin || ((req, res) => res.status(403).json({ message: 'Chỉ Platform Super Admin mới có quyền chạy Dunning!' }));
     app.post('/api/saas/dunning/run', authDunning, async (req, res) => {
         try {
-            const report = await runDunningCheck(pool);
+            const report = await runDunningCheck(pool, { platformPool: pool.platformPool || pool });
             res.json(report);
         } catch (error) {
             guiLoi(res, error, 'Lỗi API Chạy Dunning Check:');
@@ -1738,8 +1738,9 @@ function parseMenuSheetRows({ rows = null, csvText = null } = {}) {
  * - Ghi nhận idempotent vào public.tenant_dunning_logs (UNIQUE (tenant_id, stage, subscription_ends_at))
  * - Gắn cờ rủi ro rời bỏ (churnRisk = true) khi số đơn 3 ngày giảm > 50% so với trung bình 3 ngày tuần trước
  */
-async function runDunningCheck(pool, { nowMs = Date.now() } = {}) {
-    const res = await pool.query('SELECT * FROM public.fn_platform_overview_tenants()');
+async function runDunningCheck(pool, { nowMs = Date.now(), platformPool = null } = {}) {
+    const adminPool = platformPool || pool.platformPool || pool;
+    const res = await adminPool.query('SELECT * FROM public.fn_platform_overview_tenants()');
     const tenants = res.rows || [];
     const logged = [];
     const skippedDuplicate = [];
