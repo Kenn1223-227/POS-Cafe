@@ -109,6 +109,13 @@ export default function AdminLayout() {
           >
             🛎️ Màn hình Phục vụ
           </NavLink>
+          <NavLink
+            to="/stocktake"
+            onClick={() => setDrawerOpen(false)}
+            className="flex items-center min-h-12 px-4 py-2.5 rounded-xl text-xs font-bold bg-stone-800/80 text-indigo-300 hover:bg-stone-700 transition"
+          >
+            🕵️ Kiểm kho mù 60s (Nhân viên ca)
+          </NavLink>
         </div>
       </nav>
 

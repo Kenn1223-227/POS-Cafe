@@ -365,7 +365,7 @@ const TableMap = memo(function TableMap({
 
       {/* Modal Chuyển bàn */}
       {showMoveModal && selectedTable && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" data-pos-modal="true" className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl space-y-4">
             <h3 className="font-extrabold text-base text-gray-800">
               🔄 Chuyển từ {selectedTable.tenBan} sang bàn trống
@@ -408,7 +408,7 @@ const TableMap = memo(function TableMap({
 
       {/* Modal Gộp bàn (Merge Table) */}
       {showMergeModal && selectedTable && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" data-pos-modal="true" className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl space-y-4">
             <h3 className="font-extrabold text-base text-gray-800">
               🔗 Gộp {selectedTable.tenBan} vào bàn khác
@@ -451,7 +451,7 @@ const TableMap = memo(function TableMap({
 
       {/* Modal Thêm Bàn mới dành cho Quản lý */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" data-pos-modal="true" className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl space-y-4">
             <h3 className="font-extrabold text-base text-gray-800">➕ Thêm Bàn Mới</h3>
             <form onSubmit={handleCreateBan} className="space-y-3">

@@ -25,7 +25,7 @@ const FEATURE_METADATA = {
     },
     multi_branch: {
         label: 'Quản trị Chuỗi đa chi nhánh',
-        requiredPlan: 'ENTERPRISE',
+        requiredPlan: 'CHAIN',
     },
     qr_order: {
         label: 'QR Order tại bàn cho khách',
@@ -47,6 +47,10 @@ const FEATURE_METADATA = {
         label: 'Dự báo nguyên liệu & Gợi ý Upsell AI',
         requiredPlan: 'PRO',
     },
+    einvoice: {
+        label: 'Hóa đơn điện tử Máy tính tiền (MTT)',
+        requiredPlan: 'PRO',
+    },
     receipt_watermark: {
         label: 'Watermark + QR dùng thử ở chân hóa đơn K80 (PLG Loop)',
         requiredPlan: 'FREE',
@@ -65,6 +69,7 @@ const TOGGLEABLE_BOOLEAN_FLAGS = [
     'aggregator_hub',
     'horizontal_fnb',
     'ai_forecast_upsell',
+    'einvoice',
     'receipt_watermark',
 ];
 
@@ -239,7 +244,7 @@ function tinhSucKhoeTenant(row, sub, flags) {
             upsellOpportunity = true;
             upsellTargetPlan = 'STARTER';
             reasons.push(`Đã dùng ${quotaUsagePct}% hạn mức FREE (${ordersMonth}/${maxOrders} đơn) → Sẵn sàng lên STARTER/PRO!`);
-            recommendedAction = '🔥 Gọi Upsell lên STARTER (149k) hoặc PRO (399k)!';
+            recommendedAction = '🔥 Gọi Upsell lên STARTER (169k) hoặc PRO (349k)!';
         } else if (row.goicuoc === 'STARTER' && (quotaUsagePct >= 80 || orders7d >= 100)) {
             upsellOpportunity = true;
             upsellTargetPlan = 'PRO';
@@ -394,7 +399,7 @@ function taoMiddlewareHanMucDonThang(pool) {
                     requiredPlan: targetPlan,
                     message:
                         ent.goiCuoc === 'FREE'
-                            ? `Quán đã đạt hạn mức ${limit.toLocaleString('vi-VN')} đơn/tháng của gói FREE (${used}/${limit}). Nâng cấp gói STARTER (chỉ 149.000đ/tháng — không giới hạn đơn POS) tại Bản quyền & Gói cước để bán tiếp ngay!`
+                            ? `Quán đã đạt hạn mức ${limit.toLocaleString('vi-VN')} đơn/tháng của gói FREE (${used}/${limit}). Nâng cấp gói STARTER (chỉ 169.000đ/tháng — không giới hạn đơn POS) tại Bản quyền & Gói cước để bán tiếp ngay!`
                             : `Quán đã đạt hạn mức ${limit.toLocaleString('vi-VN')} đơn/tháng của gói ${ent.goiCuoc} (${used}/${limit}). Vui lòng nâng cấp lên gói PRO (không giới hạn đơn) để tiếp tục bán hàng!`,
                 });
             }
@@ -796,7 +801,18 @@ function registerPlatformAdminRoutes(
             return res.status(400).json({ message: 'Thiếu mã TenantId!' });
         }
         if (goiCuoc && !PLAN_FEATURES[goiCuoc]) {
-            return res.status(400).json({ message: 'Gói cước không hợp lệ (FREE | STARTER | PRO | ENTERPRISE)!' });
+            return res.status(400).json({ message: 'Gói cước không hợp lệ (FREE | STARTER | PRO | CHAIN | ENTERPRISE)!' });
+        }
+        if ((goiCuoc === 'CHAIN' || goiCuoc === 'ENTERPRISE') && req.body?.branchCount !== undefined) {
+            const minBranches = Number(PLAN_FEATURES[goiCuoc]?.minBranches || 3);
+            const requestedBranches = Number(req.body.branchCount);
+            if (!Number.isInteger(requestedBranches) || requestedBranches < minBranches) {
+                return res.status(400).json({
+                    code: 'CHAIN_MIN_BRANCHES_REQUIRED',
+                    minBranches,
+                    message: `Gói ${goiCuoc} yêu cầu tối thiểu ${minBranches} chi nhánh!`,
+                });
+            }
         }
         const allowedStatuses = ['TRIAL', 'ACTIVE', 'SUSPENDED', 'EXPIRED'];
         if (trangThai && !allowedStatuses.includes(trangThai)) {
@@ -1182,6 +1198,7 @@ module.exports = {
     xoaCacheEntitlement,
     taoMiddlewareTinhNang,
     taoMiddlewareHanMucDonThang,
+    taoMiddlewarePlatformAdmin,
     khoiTaoPlatformAdmins,
     registerPlatformAdminRoutes,
 };

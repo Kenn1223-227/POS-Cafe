@@ -40,7 +40,7 @@ export default function TrialBanner() {
         subscriptionBanner = (
           <div className="bg-emerald-50 text-emerald-950 border-b border-emerald-200 px-4 py-1.5 text-xs font-semibold flex flex-wrap items-center justify-between gap-2">
             <span>
-              🆓 <b>Gói FREE Vĩnh viễn</b> (400 đơn/tháng • Báo cáo 7 ngày • Hóa đơn có chân trang QR). Nâng cấp <b>STARTER (149k/tháng)</b> để không giới hạn đơn &amp; tắt watermark!
+              🆓 <b>Gói FREE Vĩnh viễn</b> (350 đơn/tháng • Báo cáo 7 ngày • Hóa đơn có chân trang QR). Nâng cấp <b>STARTER (169k/tháng)</b> để không giới hạn đơn &amp; tắt watermark!
             </span>
             <Link
               to="/admin/saas"

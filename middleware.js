@@ -58,27 +58,32 @@ function getRefreshCookie(req) {
     return typeof token === 'string' && token.length >= 32 ? token : null;
 }
 
-function shouldUseSecureCookie(req) {
+function getCookieSameSite() {
+    const configured = String(process.env.COOKIE_SAMESITE || '').trim();
+    if (configured) {
+        if (/^none$/i.test(configured)) return 'None';
+        if (/^strict$/i.test(configured)) return 'Strict';
+        if (/^lax$/i.test(configured)) return 'Lax';
+        return configured;
+    }
+    // Production cross-domain frontend (Vercel) -> backend (Fly/Railway/Render) có thể cần SameSite=None; Secure; mặc định Lax an toàn
+    return 'Lax';
+}
+
+function shouldUseSecureCookie(req, sameSite) {
+    // Khi cấu hình SameSite=None, bắt buộc tự động ép Secure=true theo chuẩn RFC 6265bis
+    if (/^none$/i.test(sameSite || '')) {
+        return true;
+    }
     if (process.env.COOKIE_SECURE === 'true') return true;
     if (process.env.COOKIE_SECURE === 'false') return false;
     const proto = String(req?.headers?.['x-forwarded-proto'] || '').toLowerCase();
     return Boolean(req?.secure || proto === 'https' || process.env.NODE_ENV === 'production');
 }
 
-function getCookieSameSite(isSecure) {
-    const configured = String(process.env.COOKIE_SAMESITE || '').trim();
-    if (configured) {
-        // SameSite=None bắt buộc phải có Secure
-        if (/^none$/i.test(configured) && !isSecure) return 'Lax';
-        return configured;
-    }
-    // Production cross-domain frontend (Vercel) -> backend (Fly/Railway) có thể cần SameSite=None; Secure; mặc định Lax an toàn
-    return 'Lax';
-}
-
 function setRefreshCookie(res, req, rawToken, maxAgeSeconds) {
-    const isSecure = shouldUseSecureCookie(req);
-    const sameSite = getCookieSameSite(isSecure);
+    const sameSite = getCookieSameSite();
+    const isSecure = shouldUseSecureCookie(req, sameSite);
     const parts = [
         `${REFRESH_COOKIE_NAME}=${encodeURIComponent(rawToken)}`,
         'HttpOnly',
@@ -91,8 +96,8 @@ function setRefreshCookie(res, req, rawToken, maxAgeSeconds) {
 }
 
 function clearRefreshCookie(res, req) {
-    const isSecure = shouldUseSecureCookie(req);
-    const sameSite = getCookieSameSite(isSecure);
+    const sameSite = getCookieSameSite();
+    const isSecure = shouldUseSecureCookie(req, sameSite);
     const parts = [
         `${REFRESH_COOKIE_NAME}=`,
         'HttpOnly',

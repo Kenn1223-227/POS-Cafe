@@ -250,14 +250,19 @@ async function refreshDailyBranchFinancialSummary(
                                     COALESCE(cc.thoigiancheckout, cc.giorathucte)
                                     - COALESCE(cc.thoigiancheckin, cc.giovaothucte)
                                 )) / 3600.0
-                            ) * COALESCE((to_jsonb(nv)->>'mucluonggio')::numeric, 0)
+                            ) * COALESCE(
+                                NULLIF((to_jsonb(nv)->>'mucluongtheogio')::numeric, 0),
+                                NULLIF((to_jsonb(nv)->>'mucluonggio')::numeric, 0),
+                                0
+                            )
                         ),
                         0
                     ) AS base_labor
                FROM public.chamcong cc
-               JOIN public.nhanvien nv ON nv.manv = cc.manv
+               JOIN public.phanca pc ON pc.maphanca = cc.maphanca
+               JOIN public.nhanvien nv ON nv.manv = COALESCE(cc.manv, pc.manv)
                CROSS JOIN bounds b
-              WHERE COALESCE(NULLIF(BTRIM(to_jsonb(nv)->>'tenantid'), ''), 'DEFAULT') = $1
+              WHERE COALESCE(NULLIF(BTRIM(to_jsonb(pc)->>'tenantid'), ''), 'DEFAULT') = $1
                 AND COALESCE(NULLIF(BTRIM(to_jsonb(nv)->>'branchid'), ''), 'DEFAULT') = $2
                 AND COALESCE(cc.thoigiancheckin, cc.giovaothucte) >= b.win_start
                 AND COALESCE(cc.thoigiancheckin, cc.giovaothucte) < b.win_end

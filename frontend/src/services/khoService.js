@@ -54,7 +54,9 @@ export const khoService = {
 
   kiemKe: (body) => axiosClient.post('/kho/kiemke', body),
 
-  // [Phân hệ 4] Blind Stocktake 60s (Start -> Submit w/ In-Flight Sales Delta -> Approve)
+  // [Phân hệ 4] Blind Stocktake 60s (Items -> Start -> Submit w/ In-Flight Sales Delta -> Pending -> Approve)
+  getBlindStocktakeItems: (params = {}) => axiosClient.get('/kho/kiem-ke/items', { params }),
+  getPendingBlindStocktakes: (params = {}) => axiosClient.get('/kho/kiem-ke/pending', { params }),
   startBlindStocktake: (body = {}) => axiosClient.post('/kho/kiem-ke/start', body),
   submitBlindStocktake: (body) => axiosClient.post('/kho/kiem-ke/submit', body),
   approveBlindStocktake: (maGD, approve = true) =>

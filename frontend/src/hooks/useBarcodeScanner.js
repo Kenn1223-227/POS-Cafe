@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { hasDomOpenModal } from '../utils/posHotkeys'
 
 /**
  * Global HID Barcode Scanner Listener (<50ms/ký tự kết thúc bằng Enter)
@@ -23,6 +24,11 @@ export function useBarcodeScanner({ onScan, enabled = true, maxInterKeyMs = 50, 
 
     const onKeyDown = (e) => {
       if (e.ctrlKey || e.altKey || e.metaKey) return
+      if (hasDomOpenModal()) {
+        buffer = ''
+        fastIntervals = 0
+        return
+      }
 
       const now = performance.now()
       const delta = now - lastKeyTime

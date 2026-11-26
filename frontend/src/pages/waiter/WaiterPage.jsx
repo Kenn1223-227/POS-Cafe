@@ -129,9 +129,11 @@ export default function WaiterPage() {
 
   const handleToggleRush = async (item) => {
     try {
-      const isCurrentlyRush = Number(item.mucDoUuTien || 0) >= 2
+      const isItemRemake = Boolean(item.isRemake || item.remakeOfCTHD)
+      if (isItemRemake) return
+      const isCurrentlyRush = Boolean(item.isRush) || Number(item.mucDoUuTien || 0) >= 2
       await orderService.setOrderRush(item.maHoaDon, { rush: !isCurrentlyRush })
-      toast.success(!isCurrentlyRush ? `🔥 Đã đặt đơn #${item.maHoaDon} GẤP!` : `Đã gỡ cờ GẤP đơn #${item.maHoaDon}`)
+      toast.success(!isCurrentlyRush ? `🔥 Đã đặt đơn #${item.maHoaDon} GẤP / RUSH!` : `Đã gỡ cờ GẤP / RUSH đơn #${item.maHoaDon}`)
       dongBo()
     } catch {
       // interceptor handles error
@@ -245,17 +247,23 @@ export default function WaiterPage() {
                       <p className="text-xl font-extrabold text-emerald-700">
                         Số lượng: ×{item.soLuong}
                       </p>
-                      <button
-                        type="button"
-                        onClick={() => handleToggleRush(item)}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-extrabold cursor-pointer ${
-                          Number(item.mucDoUuTien || 0) >= 2
-                            ? 'bg-red-600 text-white'
-                            : 'bg-amber-100 text-amber-900 hover:bg-amber-200'
-                        }`}
-                      >
-                        🔥 {Number(item.mucDoUuTien || 0) >= 2 ? 'ĐANG GẤP' : 'GẤP'}
-                      </button>
+                      {Boolean(item.isRemake || item.remakeOfCTHD) ? (
+                        <span className="px-2.5 py-1 rounded-lg text-xs font-extrabold bg-fuchsia-600 text-white">
+                          ⚡ LÀM LẠI / REMAKE
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleToggleRush(item)}
+                          className={`px-2.5 py-1 rounded-lg text-xs font-extrabold cursor-pointer ${
+                            Boolean(item.isRush) || Number(item.mucDoUuTien || 0) >= 2
+                              ? 'bg-orange-600 text-white'
+                              : 'bg-amber-100 text-amber-900 hover:bg-amber-200'
+                          }`}
+                        >
+                          🔥 {Boolean(item.isRush) || Number(item.mucDoUuTien || 0) >= 2 ? 'ĐANG GẤP / RUSH' : 'GẤP'}
+                        </button>
+                      )}
                     </div>
 
                     {Array.isArray(item.modifiersSnapshot) && item.modifiersSnapshot.length > 0 && (

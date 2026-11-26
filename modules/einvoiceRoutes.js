@@ -10,9 +10,11 @@ function registerEInvoiceRoutes(app, deps) {
         chayGiaoDich,
         kiemTraToken,
         choPhepVaiTro,
+        yeuCauTinhNang,
         layTenantId,
         layChiNhanhHienTai,
     } = deps;
+    const gateEInvoice = typeof yeuCauTinhNang === 'function' ? yeuCauTinhNang('einvoice') : (_req, _res, next) => next();
 
     // 1. Danh mục nhóm thuế VAT của Tenant
     app.get('/api/tax/categories', kiemTraToken, async (req, res) => {
@@ -27,7 +29,7 @@ function registerEInvoiceRoutes(app, deps) {
                     [tenantId]
                 );
                 return r.rows;
-            });
+            }, tenantId);
             return res.json({
                 categories: rows.length > 0 ? rows : Object.values(DEFAULT_TAX_CATEGORIES),
                 defaults: Object.values(DEFAULT_TAX_CATEGORIES),
@@ -91,7 +93,7 @@ function registerEInvoiceRoutes(app, deps) {
                     ]
                 );
                 return ins.rows[0];
-            });
+            }, tenantId);
             return res.status(201).json({ message: 'Lưu nhóm thuế VAT thành công!', category: saved });
         } catch (err) {
             return res.status(500).json({ message: 'Lỗi lưu nhóm thuế VAT', error: err.message });
@@ -99,7 +101,7 @@ function registerEInvoiceRoutes(app, deps) {
     });
 
     // 2. Danh sách HĐĐT nội bộ
-    app.get('/api/einvoices', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {
+    app.get('/api/einvoices', kiemTraToken, choPhepVaiTro(1, 4), gateEInvoice, async (req, res) => {
         const tenantId = layTenantId(req);
         const status = req.query.status ? String(req.query.status).toUpperCase() : null;
         const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
@@ -115,7 +117,7 @@ function registerEInvoiceRoutes(app, deps) {
                     [tenantId, status, limit]
                 );
                 return r.rows;
-            });
+            }, tenantId);
             return res.json({ einvoices: rows });
         } catch (err) {
             return res.status(500).json({ message: 'Lỗi tải danh sách hóa đơn điện tử', error: err.message });
@@ -123,7 +125,7 @@ function registerEInvoiceRoutes(app, deps) {
     });
 
     // 3. Phát hành HĐĐT cho 1 hóa đơn POS
-    app.post('/api/einvoices/:maHoaDon/issue', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {
+    app.post('/api/einvoices/:maHoaDon/issue', kiemTraToken, choPhepVaiTro(1, 4), gateEInvoice, async (req, res) => {
         const tenantId = layTenantId(req);
         const branchId = typeof layChiNhanhHienTai === 'function' ? layChiNhanhHienTai(req) : 'CN01';
         const { maHoaDon } = req.params;
@@ -151,7 +153,7 @@ function registerEInvoiceRoutes(app, deps) {
                     provider,
                     immediate: Boolean(immediate),
                 });
-            });
+            }, tenantId);
             return res.json({ message: 'Đã xử lý phát hành hóa đơn điện tử!', einvoice });
         } catch (err) {
             return res.status(err.statusCode || 400).json({
@@ -161,7 +163,7 @@ function registerEInvoiceRoutes(app, deps) {
     });
 
     // 4. Chạy Outbox Worker xử lý hàng đợi phát hành / điều chỉnh HĐĐT
-    app.post('/api/einvoices/process-queue', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/einvoices/process-queue', kiemTraToken, choPhepVaiTro(1), gateEInvoice, async (req, res) => {
         const tenantId = layTenantId(req);
         const { limit = 20, provider = null } = req.body || {};
         try {
@@ -171,7 +173,7 @@ function registerEInvoiceRoutes(app, deps) {
                     limit,
                     providerOverride: provider,
                 });
-            });
+            }, tenantId);
             return res.json({
                 message: `Đã xử lý ${processed.length} hóa đơn điện tử trong hàng đợi`,
                 count: processed.length,

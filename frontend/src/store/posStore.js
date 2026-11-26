@@ -58,7 +58,18 @@ export function buildCartLineSignature(item) {
   const takeKey = item.isTakeaway ? 'TA' : 'DI'
   const courseKey = `C${item.courseNo || 1}_${item.fireStatus || 'FIRED'}`
   const comboKey = item.comboInstanceId || 'SINGLE'
-  return `${comboKey}__${item.maMon}__${item.kichThuoc}__${takeKey}__${courseKey}__${modsKey}__${tpKey}__${noteKey}`
+  const extraParts = []
+  if (item.trongLuongGram !== undefined && item.trongLuongGram !== null && Number(item.trongLuongGram) > 0) {
+    extraParts.push(`W${Number(item.trongLuongGram)}`)
+  }
+  if (item.donGiaTuyChinh !== undefined && item.donGiaTuyChinh !== null) {
+    extraParts.push(`P${Number(item.donGiaTuyChinh)}`)
+  }
+  if (item.tenMonTuyChinh && String(item.tenMonTuyChinh).trim()) {
+    extraParts.push(`N${String(item.tenMonTuyChinh).trim().toLowerCase()}`)
+  }
+  const extraKey = extraParts.length > 0 ? `__${extraParts.join('_')}` : ''
+  return `${comboKey}__${item.maMon}__${item.kichThuoc}__${takeKey}__${courseKey}__${modsKey}__${tpKey}__${noteKey}${extraKey}`
 }
 
 export const buildCartKey = buildCartLineSignature

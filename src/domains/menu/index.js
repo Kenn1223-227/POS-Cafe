@@ -7,8 +7,10 @@ const {
     guiLoi,
     choPhepVaiTro,
     layTenantId,
-    roomTen,
 } = require('../../core/auditAndSecurity');
+const {
+    emitToTenant,
+} = require('../../core/socketRooms');
 const {
     normalizeBranchId,
     roomBranchPos,
@@ -345,25 +347,34 @@ app.put('/api/topping/:maTopping/tamhet', kiemTraToken, choPhepVaiTro(1, 2), asy
 
 app.get('/api/topping', kiemTraToken, async (req, res) => {
     const tenantId = layTenantId(req);
+    const branchId = normalizeBranchId(req.query.branchId || req.headers['x-branch-id'] || req.user?.branchId || 'DEFAULT');
     try {
-        const result = await qTenant(
-            req,
-            `SELECT MaTopping, TenTopping, GiaTopping, COALESCE(TamHet, FALSE) AS TamHet,
-                    COALESCE((to_jsonb(Topping)->>'toidamoily')::int, 3) AS ToiDaMoiLy,
-                    to_jsonb(Topping)->'giabacthang' AS GiaBacThang
-               FROM Topping
-              WHERE DangKinhDoanh = TRUE AND COALESCE(TenantId, 'DEFAULT') = $1
-              ORDER BY TenTopping`,
-            [tenantId]
-        );
-        res.json(result.rows.map((r) => ({
-            maTopping: r.matopping,
-            tenTopping: r.tentopping,
-            giaTopping: Number(r.giatopping),
-            tamHet: Boolean(r.tamhet),
-            toiDaMoiLy: Number(r.toidamoily || 3),
-            giaBacThang: Array.isArray(r.giabacthang) ? r.giabacthang : null,
-        })));
+        const { rows, branch86 } = await pool.withTenant(tenantId, async (client) => {
+            const tpRes = await client.query(
+                `SELECT MaTopping, TenTopping, GiaTopping, COALESCE(TamHet, FALSE) AS TamHet,
+                        COALESCE((to_jsonb(Topping)->>'toidamoily')::int, 3) AS ToiDaMoiLy,
+                        to_jsonb(Topping)->'giabacthang' AS GiaBacThang
+                   FROM Topping
+                  WHERE DangKinhDoanh = TRUE AND COALESCE(TenantId, 'DEFAULT') = $1
+                  ORDER BY TenTopping`,
+                [tenantId]
+            );
+            const b86 = await loadBranchAvailability86Map(client, tenantId, branchId);
+            return { rows: tpRes.rows, branch86: b86 };
+        });
+        res.json(rows.map((r) => {
+            const bTp = branch86?.toppings?.get(String(r.matopping));
+            return {
+                maTopping: r.matopping,
+                tenTopping: r.tentopping,
+                giaTopping: Number(r.giatopping),
+                tamHet: bTp !== undefined ? Boolean(bTp.isSoldOut) : Boolean(r.tamhet),
+                tamHetTuDong: bTp !== undefined ? Boolean(bTp.isAutoCascaded) : false,
+                branchId,
+                toiDaMoiLy: Number(r.toidamoily || 3),
+                giaBacThang: Array.isArray(r.giabacthang) ? r.giabacthang : null,
+            };
+        }));
     } catch (error) {
         guiLoi(res, error, 'Lỗi API Topping:');
     }
@@ -481,10 +492,15 @@ app.post('/api/topping', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
                 Array.isArray(giaBacThang) ? JSON.stringify(giaBacThang) : null,
             ]
         );
-        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'barista')).emit('TOPPING_THAY_DOI', {
-            maTopping: ma,
-            tenTopping: ten,
-            tamHet: false,
+        emitToTenant(io, {
+            tenantId,
+            roles: ['POS', 'WAITER', 'KDS'],
+            event: 'TOPPING_THAY_DOI',
+            payload: {
+                maTopping: ma,
+                tenTopping: ten,
+                tamHet: false,
+            },
         });
         res.status(201).json({ message: `Đã thêm topping "${ten}" thành công!`, maTopping: ma });
     } catch (error) {

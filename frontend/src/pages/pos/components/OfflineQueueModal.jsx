@@ -1,7 +1,9 @@
 import { useState } from 'react'
+import toast from 'react-hot-toast'
 import { formatDateTime, formatVND } from '../../../utils/format'
 import { printCupLabels50x30, printReceiptK80 } from '../../../utils/printHelper'
 import { getOrCreatePosDeviceId } from '../../../offline/offlineDb'
+import { orderService } from '../../../services/orderService'
 import ConfirmPinModal from '../../../components/ConfirmPinModal'
 
 const STATUS_BADGE = {
@@ -28,7 +30,42 @@ export default function OfflineQueueModal({
   thuNgan = '',
 }) {
   const [deleteTarget, setDeleteTarget] = useState(null)
+  const [verifyingPin, setVerifyingPin] = useState(false)
   if (!isOpen) return null
+
+  const handleConfirmDeleteWithPin = async (pin) => {
+    if (!deleteTarget || verifyingPin) return
+    if (!isOnline) {
+      toast.error('Cần có kết nối mạng để xác thực mã PIN Quản lý & ghi Audit Log trước khi xóa đơn Offline!')
+      return
+    }
+    setVerifyingPin(true)
+    try {
+      const refCode = deleteTarget.payload?.offlineClientId || deleteTarget.localInvoice?.maHoaDon || String(deleteTarget.id)
+      const res = await orderService.verifyManagerPin({
+        managerPin: pin,
+        action: 'OFFLINE_QUEUE_ITEM_DELETED',
+        lyDo: `Xóa đơn Offline ${refCode} (${formatVND(deleteTarget.totalAmount)}) khỏi hàng đợi`,
+        details: {
+          jobId: deleteTarget.id,
+          offlineClientId: refCode,
+          jobType: deleteTarget.type,
+          totalAmount: Number(deleteTarget.totalAmount || 0),
+          deviceId: getOrCreatePosDeviceId(),
+        },
+      })
+      if (!res?.ok) {
+        toast.error('Mã PIN Quản lý không hợp lệ!')
+        return
+      }
+      await onDeleteJob(deleteTarget.id)
+      setDeleteTarget(null)
+    } catch {
+      // Interceptor hiển thị thông báo lỗi PIN sai / bị khóa rate-limit
+    } finally {
+      setVerifyingPin(false)
+    }
+  }
 
   const totalQueuedAmount = jobs.reduce((s, j) => s + Number(j.totalAmount || 0), 0)
   const deviceId = getOrCreatePosDeviceId()
@@ -152,20 +189,22 @@ export default function OfflineQueueModal({
       </div>
       <ConfirmPinModal
         open={Boolean(deleteTarget)}
-        mode="confirm"
+        mode="pin"
+        showKeypad
+        minLength={4}
         danger
-        title="Xóa đơn Offline khỏi hàng đợi"
+        title="🔐 Xác thực PIN Quản lý — Xóa đơn Offline"
         message={
           deleteTarget
-            ? `Xóa đơn offline ${deleteTarget.payload?.offlineClientId || deleteTarget.localInvoice?.maHoaDon} khỏi hàng đợi?`
+            ? `Nhập mã PIN Quản lý / Ca trưởng để xóa đơn offline ${deleteTarget.payload?.offlineClientId || deleteTarget.localInvoice?.maHoaDon} (${formatVND(deleteTarget.totalAmount)}) khỏi hàng đợi.\nThao tác sẽ được ghi vào Nhật ký Kiểm toán (Audit Log).`
             : ''
         }
-        confirmText="Xóa khỏi hàng đợi"
-        onConfirm={() => {
-          if (deleteTarget) onDeleteJob(deleteTarget.id)
-          setDeleteTarget(null)
+        placeholder="Nhập PIN Quản lý (4–6 số)"
+        confirmText={verifyingPin ? 'Đang xác thực PIN...' : 'Xác nhận PIN & Xóa'}
+        onConfirm={handleConfirmDeleteWithPin}
+        onCancel={() => {
+          if (!verifyingPin) setDeleteTarget(null)
         }}
-        onCancel={() => setDeleteTarget(null)}
       />
     </div>
   )

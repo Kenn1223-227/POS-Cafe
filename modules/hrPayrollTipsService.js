@@ -395,15 +395,20 @@ async function getHourlySalesVsLabor(client, {
     await client.query('SAVEPOINT sp_hourly_labor');
     try {
         const laborRes = await client.query(
-            `SELECT cc.manv,
+            `SELECT COALESCE(cc.manv, pc.manv) AS manv,
                     COALESCE(cc.giovaothucte, cc.thoigiancheckin) AS check_in,
                     COALESCE(cc.giorathucte, cc.thoigiancheckout, now()) AS check_out,
-                    COALESCE(nv.mucluonggio, 0)::numeric AS hourly_rate
+                    COALESCE(
+                        NULLIF((to_jsonb(nv)->>'mucluongtheogio')::numeric, 0),
+                        NULLIF((to_jsonb(nv)->>'mucluonggio')::numeric, 0),
+                        0
+                    ) AS hourly_rate
                FROM public.chamcong cc
+               JOIN public.phanca pc ON pc.maphanca = cc.maphanca
                LEFT JOIN public.nhanvien nv
-                 ON nv.manv = cc.manv
-                AND COALESCE(nv.tenantid, 'DEFAULT') = COALESCE(cc.tenantid, 'DEFAULT')
-              WHERE COALESCE(cc.tenantid, 'DEFAULT') = $1
+                 ON nv.manv = COALESCE(cc.manv, pc.manv)
+                AND COALESCE(nv.tenantid, 'DEFAULT') = COALESCE(pc.tenantid, 'DEFAULT')
+              WHERE COALESCE(pc.tenantid, 'DEFAULT') = $1
                 AND COALESCE(cc.giovaothucte, cc.thoigiancheckin) IS NOT NULL
                 AND COALESCE(cc.giovaothucte, cc.thoigiancheckin) <= $3::timestamptz
                 AND COALESCE(cc.giorathucte, cc.thoigiancheckout, now()) >= $2::timestamptz`,

@@ -46,7 +46,7 @@ function danhGiaTrangThaiGoi(row) {
         };
     }
 
-    // [PHÂN HỆ 9] Gói FREE Vĩnh viễn (Acquisition Wedge): Không bị khóa HTTP 402 theo thời gian, chỉ giới hạn 400 đơn/tháng & báo cáo 7 ngày
+    // [PHÂN HỆ 9] Gói FREE Vĩnh viễn (Acquisition Wedge): Không bị khóa HTTP 402 theo thời gian, chỉ giới hạn 350 đơn/tháng & báo cáo 7 ngày
     if (goiCuoc === 'FREE' && rawStatus === 'ACTIVE') {
         return {
             trangThai: 'ACTIVE',
@@ -269,7 +269,7 @@ function taoMiddlewareKiemTraHanSuDung(pool) {
                 return res.status(402).json({
                     code: sub.laDungThu ? 'TRIAL_EXPIRED' : 'SUBSCRIPTION_EXPIRED',
                     message: sub.laDungThu
-                        ? 'Bản dùng thử miễn phí 30 ngày đã kết thúc! Bạn có thể nâng cấp gói STARTER/PRO hoặc chuyển sang gói FREE vĩnh viễn (400 đơn/tháng) tại Quản trị → Bản quyền & Gói cước.'
+                        ? 'Bản dùng thử miễn phí 30 ngày đã kết thúc! Bạn có thể nâng cấp gói STARTER/PRO hoặc chuyển sang gói FREE vĩnh viễn (350 đơn/tháng) tại Quản trị → Bản quyền & Gói cước.'
                         : 'Gói bản quyền của quán đã hết hạn hoặc bị tạm khóa. Vui lòng gia hạn hoặc chuyển về gói FREE để tiếp tục sử dụng.',
                     subscription: sub,
                 });
@@ -293,21 +293,52 @@ const taoSlug = (text) => {
     return `${base}-${crypto.randomBytes(2).toString('hex')}`;
 };
 
-function tinhTienGoi(goiCuoc, soThang, extraBranches = 0) {
-    const plan = PLAN_FEATURES[goiCuoc];
+function tinhTienGoi(goiCuoc, soThang, extraBranches = 0, branchCount = null) {
+    const planKey = String(goiCuoc || '').trim().toUpperCase();
+    const plan = PLAN_FEATURES[planKey];
     if (!plan || Number(plan.priceVnd) <= 0) return null;
     const months = [1, 6, 12].includes(Number(soThang)) ? Number(soThang) : 1;
     const discount = BILLING_DISCOUNT[months] || 0;
-    const extra = goiCuoc === 'ENTERPRISE' ? Math.min(100, Math.max(0, parseInt(extraBranches, 10) || 0)) : 0;
-    const monthlyUnit = Number(plan.priceVnd) + extra * Number(plan.extraBranchPriceVnd || 0);
+    const isChainPlan = planKey === 'CHAIN' || planKey === 'ENTERPRISE';
+    const minBranches = isChainPlan ? Number(plan.minBranches || 3) : 1;
+
+    let totalBranches = 1;
+    let extra = 0;
+    if (isChainPlan) {
+        if (branchCount !== null && branchCount !== undefined && branchCount !== '') {
+            const parsedCount = Number(branchCount);
+            if (!Number.isInteger(parsedCount) || parsedCount < minBranches) {
+                return { error: 'CHAIN_MIN_BRANCHES_REQUIRED', minBranches };
+            }
+            totalBranches = Math.min(200, parsedCount);
+            extra = Math.max(0, totalBranches - minBranches);
+        } else {
+            extra = Math.min(100, Math.max(0, parseInt(extraBranches, 10) || 0));
+            totalBranches = minBranches + extra;
+        }
+    }
+
+    const monthlyUnit = isChainPlan
+        ? Number(plan.priceVnd) * totalBranches
+        : Number(plan.priceVnd);
     const goc = monthlyUnit * months;
     const soTien = Math.round(goc * (1 - discount));
-    return { months, discount, goc, soTien, extraBranches: extra, monthlyUnit };
+    return {
+        goiCuoc: planKey,
+        months,
+        discount,
+        goc,
+        soTien,
+        extraBranches: extra,
+        branchCount: totalBranches,
+        minBranches,
+        monthlyUnit,
+    };
 }
 
 function registerSaasRoutes(
     app,
-    { pool, chayGiaoDich, kiemTraToken, choPhepVaiTro, gioiHanDangNhap, hashPassword, jwt, ghiAuditLog, guiLoi, yeuCauTinhNang, xoaCacheEntitlement }
+    { pool, chayGiaoDich, kiemTraToken, choPhepVaiTro, kiemTraPlatformAdmin, gioiHanDangNhap, hashPassword, jwt, ghiAuditLog, guiLoi, yeuCauTinhNang, xoaCacheEntitlement }
 ) {
     const checkAiMenu = typeof yeuCauTinhNang === 'function' ? yeuCauTinhNang('ai_menu_importer') : (req, res, next) => next();
     // 1. Danh sách mô hình mẫu & gói cước (Public cho trang Đăng ký Dùng thử 30 ngày)
@@ -329,7 +360,7 @@ function registerSaasRoutes(
         });
     });
 
-    // 2. Đăng ký Quán mới: hỗ trợ Gói FREE vĩnh viễn (400 đơn/tháng) hoặc Dùng thử 30 ngày (STARTER/PRO)
+    // 2. Đăng ký Quán mới: hỗ trợ Gói FREE vĩnh viễn (350 đơn/tháng) hoặc Dùng thử 30 ngày (STARTER/PRO)
     //    + Tách định danh đăng nhập: Chủ quán dùng Email/SĐT toàn hệ thống, nhân viên dùng /login?shop=<slug>
     app.post('/api/saas/register', gioiHanDangNhap, async (req, res) => {
         const {
@@ -619,7 +650,7 @@ function registerSaasRoutes(
 
             res.status(201).json({
                 message: isFreePlan
-                    ? `Chào mừng "${cleanQuan}"! Gói FREE vĩnh viễn (400 đơn/tháng) đã sẵn sàng bán hàng ngay.`
+                    ? `Chào mừng "${cleanQuan}"! Gói FREE vĩnh viễn (350 đơn/tháng) đã sẵn sàng bán hàng ngay.`
                     : `Chào mừng "${cleanQuan}"! Bạn đang dùng thử miễn phí ${TRIAL_DAYS} ngày (đến ${new Date(trialEndsAt).toLocaleDateString('vi-VN')}).`,
                 token,
                 user: {
@@ -765,37 +796,50 @@ function registerSaasRoutes(
     // 4. Tạo đơn thanh toán VietQR nâng cấp từ Dùng thử 30 ngày / FREE -> Bản chính thức (hoặc gia hạn)
     app.post('/api/saas/billing/create-order', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
         const tenantId = req.user.tenantId || 'DEFAULT';
-        const { goiCuoc = 'PRO', soThang = 1, extraBranches = 0 } = req.body || {};
-        if (String(goiCuoc).toUpperCase() === 'FREE') {
+        const { goiCuoc = 'PRO', soThang = 1, extraBranches = 0, soChiNhanh, branchCount } = req.body || {};
+        const planKey = String(goiCuoc || '').trim().toUpperCase();
+        if (planKey === 'FREE') {
             return res.status(400).json({
                 message: 'Gói FREE (0đ/tháng) không cần thanh toán! Hãy dùng nút "Chuyển sang gói FREE vĩnh viễn".',
             });
         }
-        const calc = tinhTienGoi(goiCuoc, soThang, extraBranches);
+        const explicitBranchCount = soChiNhanh !== undefined ? soChiNhanh : branchCount;
+        const calc = tinhTienGoi(planKey, soThang, extraBranches, explicitBranchCount);
         if (!calc) {
-            return res.status(400).json({ message: 'Gói cước không hợp lệ (STARTER | PRO | ENTERPRISE)!' });
+            return res.status(400).json({ message: 'Gói cước không hợp lệ (STARTER | PRO | CHAIN | ENTERPRISE)!' });
+        }
+        if (calc.error === 'CHAIN_MIN_BRANCHES_REQUIRED') {
+            return res.status(400).json({
+                code: 'CHAIN_MIN_BRANCHES_REQUIRED',
+                minBranches: calc.minBranches,
+                message: `Gói ${planKey} yêu cầu đăng ký tối thiểu ${calc.minBranches} chi nhánh (499.000đ/điểm bán/tháng)!`,
+            });
         }
 
         try {
             const maDonThanhToan = `SUB${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-            const ghiChu = calc.extraBranches > 0 ? `+${calc.extraBranches} chi nhánh thêm` : null;
+            const ghiChu =
+                calc.branchCount > 1
+                    ? `${calc.branchCount} chi nhánh (${calc.extraBranches > 0 ? `+${calc.extraBranches} CN thêm` : `tối thiểu ${calc.minBranches} CN`})`
+                    : null;
             await pool.queryTenant(
                 tenantId,
                 `INSERT INTO Tenant_Billing_Orders (MaDonThanhToan, TenantId, GoiCuoc, SoThang, SoTien, TrangThai, PhuongThucTT, GhiChu)
                  VALUES ($1, $2, $3, $4, $5, 'PENDING', 'VIETQR', $6)`,
-                [maDonThanhToan, tenantId, goiCuoc, calc.months, calc.soTien, ghiChu]
+                [maDonThanhToan, tenantId, planKey, calc.months, calc.soTien, ghiChu]
             );
 
-            const noiDungCK = `${maDonThanhToan} ${goiCuoc} ${calc.months}T`;
+            const noiDungCK = `${maDonThanhToan} ${planKey} ${calc.months}T`;
             const vietQrUrl = `https://img.vietqr.io/image/${SAAS_BANK_CONFIG.bankId}-${SAAS_BANK_CONFIG.accountNo}-compact2.png?amount=${calc.soTien}&addInfo=${encodeURIComponent(noiDungCK)}&accountName=${encodeURIComponent(SAAS_BANK_CONFIG.accountName)}`;
 
             res.status(201).json({
                 message: 'Đã tạo đơn thanh toán nâng cấp bản chính thức!',
                 order: {
                     maDonThanhToan,
-                    goiCuoc,
-                    tenGoi: PLAN_FEATURES[goiCuoc].label,
+                    goiCuoc: planKey,
+                    tenGoi: PLAN_FEATURES[planKey].label,
                     soThang: calc.months,
+                    branchCount: calc.branchCount,
                     extraBranches: calc.extraBranches,
                     giamGiaPhanTram: Math.round(calc.discount * 100),
                     soTienGoc: calc.goc,
@@ -811,7 +855,7 @@ function registerSaasRoutes(
         }
     });
 
-    // 4b. Chuyển sang gói FREE Vĩnh viễn (0đ/tháng — 400 đơn/tháng, báo cáo 7 ngày, có watermark + QR trên bill)
+    // 4b. Chuyển sang gói FREE Vĩnh viễn (0đ/tháng — 350 đơn/tháng, báo cáo 7 ngày, có watermark + QR trên bill)
     app.post('/api/saas/downgrade-free', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
         const tenantId = req.user.tenantId || 'DEFAULT';
         if (tenantId === 'DEFAULT') {
@@ -819,6 +863,26 @@ function registerSaasRoutes(
         }
         try {
             const flags = PLAN_FEATURES.FREE;
+            // Kiểm tra số chi nhánh hiện có không vượt quá hạn mức gói FREE (maxBranches = 1)
+            const maxFreeBranches = Number(flags.maxBranches || 1);
+            try {
+                const brCnt = await pool.queryTenant(
+                    tenantId,
+                    `SELECT COUNT(*) AS cnt FROM ChiNhanh WHERE TenantId = $1 AND COALESCE(TrangThai, 'ACTIVE') <> 'DELETED'`,
+                    [tenantId]
+                );
+                const activeBranches = Number(brCnt.rows[0]?.cnt || 0);
+                if (maxFreeBranches > 0 && activeBranches > maxFreeBranches) {
+                    return res.status(409).json({
+                        code: 'MAX_BRANCHES_EXCEEDED',
+                        currentBranches: activeBranches,
+                        maxBranches: maxFreeBranches,
+                        message: `Quán hiện có ${activeBranches} chi nhánh đang hoạt động, vượt quá giới hạn gói FREE (${maxFreeBranches} chi nhánh). Vui lòng tắt bớt chi nhánh trước khi hạ gói!`,
+                    });
+                }
+            } catch {
+                // Bỏ qua nếu bảng ChiNhanh chưa khởi tạo ở môi trường cũ
+            }
             await chayGiaoDich(async (client) => {
                 await client.query(
                     `UPDATE Tenants
@@ -854,7 +918,7 @@ function registerSaasRoutes(
             });
 
             res.json({
-                message: '✅ Đã chuyển sang gói FREE Vĩnh viễn (400 đơn/tháng, báo cáo 7 ngày). Bạn có thể bán hàng tiếp ngay lập tức!',
+                message: '✅ Đã chuyển sang gói FREE Vĩnh viễn (350 đơn/tháng, báo cáo 7 ngày). Bạn có thể bán hàng tiếp ngay lập tức!',
                 goiCuoc: 'FREE',
                 featureFlags: flags,
                 subscription,
@@ -1285,7 +1349,7 @@ function registerSaasRoutes(
     });
 
     // [Wave 3B — P1-05] Migration Toolkit 1 phút: Nhập thực đơn từ CSV / Excel xuất từ KiotViet hoặc Sapo
-    app.post('/api/saas/import-menu-sheet', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/saas/import-menu-sheet', kiemTraToken, choPhepVaiTro(1), checkAiMenu, async (req, res) => {
         const tenantId = layTenantId(req);
         const { rows = null, csvText = null } = req.body || {};
         if (!Array.isArray(rows) && !String(csvText || '').trim()) {
@@ -1373,7 +1437,9 @@ function registerSaasRoutes(
     });
 
     // [Wave 3B — P1-05] Chạy quét Dunning nhắc gia hạn (D-7, D-3, D-1, EXPIRED) & Tenant Health Score
-    app.post('/api/saas/dunning/run', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    // [Batch 1 Vá P0-09] Thay choPhepVaiTro(1) bằng kiemTraPlatformAdmin để bảo vệ tuyệt đối dữ liệu, chặn rò rỉ chéo tenant
+    const authDunning = kiemTraPlatformAdmin || ((req, res) => res.status(403).json({ message: 'Chỉ Platform Super Admin mới có quyền chạy Dunning!' }));
+    app.post('/api/saas/dunning/run', authDunning, async (req, res) => {
         try {
             const report = await runDunningCheck(pool);
             res.json(report);

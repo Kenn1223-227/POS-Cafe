@@ -200,7 +200,8 @@ app.post('/api/nhansu/chamcong', kiemTraToken, async (req, res) => {
 
     try {
         const todayVN = todayDateVN();
-        const clientIp = req.headers['x-forwarded-for'] || req.ip || '';
+        // [Batch 6 — Anti-Spoof] Chỉ dùng req.ip đã qua cơ chế 'trust proxy' của Express, không tin thẳng X-Forwarded-For từ client
+        const clientIp = String(req.ip || req.socket?.remoteAddress || '').trim();
         const outcome = await pool.withTenant(tenantId, async (client) => {
             await ganCoMissedClockOutChoTenant(client, tenantId);
 

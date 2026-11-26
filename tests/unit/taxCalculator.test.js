@@ -66,4 +66,35 @@ describe('Wave 3A Unit — Động cơ Thuế VAT Đa Mức Việt Nam (P1-01)',
         assert.equal(res.totalBeforeTax + res.totalTax, res.grandTotal);
         assert.equal(res.grandTotal, res.netAfterDiscount + res.serviceChargeAmt);
     });
+
+    it('Case 3 (NONE): Tôn trọng taxMode = "NONE" (trả 0đ thuế trên mọi dòng & mọi bucket, không ép về EXCLUDED 8%)', () => {
+        const res = calculateMixedRateVietnamTax({
+            items: [
+                { maMon: 'CF01', name: 'Cafe Sữa Đá', qty: 1, unitPrice: 40000, taxCategoryCode: 'VAT_8_FB', vatRate: 8 },
+                { maMon: 'BIA01', name: 'Bia Thủ Công', qty: 1, unitPrice: 80000, taxCategoryCode: 'VAT_10_STD', vatRate: 10 },
+            ],
+            orderDiscountTotal: 10000,
+            serviceChargePct: 5,
+            serviceChargeVatRate: 8,
+            taxMode: 'NONE',
+        });
+
+        assert.equal(res.taxMode, 'NONE');
+        assert.equal(res.totalGross, 120000);
+        assert.equal(res.orderDiscountTotal, 10000);
+        assert.equal(res.netAfterDiscount, 110000);
+        assert.equal(res.serviceChargeAmt, 5500);
+        assert.equal(res.totalTax, 0, 'taxMode = NONE bắt buộc trả totalTax = 0đ');
+        assert.equal(res.totalBeforeTax, 115500);
+        assert.equal(res.grandTotal, 115500);
+        assert.equal(res.totalBeforeTax + res.totalTax, res.grandTotal);
+
+        for (const it of res.items) {
+            assert.equal(it.vatAmount, 0, `Dòng ${it.maMon} phải có vatAmount = 0 khi taxMode = NONE`);
+            assert.equal(it.taxableBase, it.netAmount);
+        }
+        for (const b of res.taxBreakdown) {
+            assert.equal(b.vatAmount, 0, 'Mọi taxBucket phải có vatAmount = 0 khi taxMode = NONE');
+        }
+    });
 });

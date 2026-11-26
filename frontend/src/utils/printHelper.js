@@ -10,6 +10,57 @@ import {
   updatePersistentPrintJob,
 } from '../offline/offlineDb'
 import { buildVietQrSvgDataUrl } from './vietqrEmvco'
+import {
+  renderVietnameseReceiptToCanvas,
+  uint8ToBase64,
+  resolvePaperWidthPx,
+} from './escposRaster'
+
+/**
+ * [Batch 5 — Vietnamese ESC/POS Raster GS v 0]
+ * Dựng ảnh raster 1-bit tiếng Việt có dấu từ Canvas theo khổ giấy K80 (576px) / K58 (384px)
+ * và đính kèm `rasterBase64` vào payload gửi Local Print Bridge / WebSerial / WebUSB / RawBT.
+ * Khi cờ `vietnameseRaster` tắt hoặc môi trường không hỗ trợ Canvas 2D -> giữ nguyên payload ESC/POS ASCII.
+ */
+export function buildReceiptRasterPayload(
+  receiptPayload,
+  { vietnameseRaster = true, paperWidth = 'K80', renderFn = renderVietnameseReceiptToCanvas } = {}
+) {
+  if (!vietnameseRaster || !receiptPayload?.hoaDon) return receiptPayload
+  if (receiptPayload.rasterBase64) return receiptPayload
+  const normalizedPaper = String(paperWidth || 'K80').toUpperCase() === 'K58' ? 'K58' : 'K80'
+  const width = resolvePaperWidthPx(normalizedPaper)
+  try {
+    const rendered = renderFn(receiptPayload.hoaDon, {
+      tenQuan: receiptPayload.tenQuan,
+      diaChi: receiptPayload.diaChi || '',
+      thuNgan: receiptPayload.thuNgan || '',
+      soLanIn: receiptPayload.soLanIn,
+      laBanSao: receiptPayload.laBanSao,
+      reprintBanner: receiptPayload.reprintBanner,
+      laTamTinh: receiptPayload.laTamTinh,
+      laDonOffline: receiptPayload.laDonOffline,
+      showPlgWatermark: receiptPayload.showPlgWatermark,
+      plgReferralUrl: receiptPayload.plgReferralUrl,
+      paperWidth: normalizedPaper,
+      width,
+    })
+    const rasterBase64 =
+      rendered?.rasterBase64 ||
+      (rendered?.rasterBytes?.length ? uint8ToBase64(rendered.rasterBytes) : '')
+    if (rasterBase64) {
+      return {
+        ...receiptPayload,
+        paperWidth: normalizedPaper,
+        rasterWidth: width,
+        rasterBase64,
+      }
+    }
+  } catch {
+    // Môi trường không có Canvas 2D -> tự động fallback ESC/POS ASCII an toàn
+  }
+  return receiptPayload
+}
 
 function readCurrentUserMeta() {
   try {
@@ -133,6 +184,8 @@ export async function printReceiptK80(
     isCashPayment = false,
     kickDrawer = undefined,
     showPlgWatermark = undefined,
+    vietnameseRaster = undefined,
+    paperWidth = undefined,
     skipQueueOnFail = false,
     browserFallbackOnFail = true,
   } = {}
@@ -143,8 +196,33 @@ export async function printReceiptK80(
 
   // Tầng 1: Silent Print qua Local Print Bridge / Cloud Relay / WebSerial / WebUSB / WebBluetooth / RawBT
   const bridgeSettings = getBridgeClientSettings()
-  const receiptPayload = {
-    hoaDon,
+  const useVietnameseRaster =
+    typeof vietnameseRaster === 'boolean'
+      ? vietnameseRaster
+      : bridgeSettings.vietnameseRaster !== false
+  const effectivePaperWidth = paperWidth || bridgeSettings.paperWidth || 'K80'
+
+  const maskPhoneReceipt = (sdt) => {
+    const raw = String(sdt || '').trim()
+    if (!raw) return ''
+    if (raw.length <= 3) return '***'
+    return `${'*'.repeat(raw.length - 3)}${raw.slice(-3)}`
+  }
+
+  // [Batch 6 — NĐ 13/2023] Che SĐT khách hàng trước khi đóng gói payload gửi sang Print Bridge / Cloud Relay / Raster
+  const sanitizedHoaDon =
+    hoaDon?.khachHang && hoaDon.khachHang.soDienThoai
+      ? {
+          ...hoaDon,
+          khachHang: {
+            ...hoaDon.khachHang,
+            soDienThoai: maskPhoneReceipt(hoaDon.khachHang.soDienThoai),
+          },
+        }
+      : hoaDon
+
+  const baseReceiptPayload = {
+    hoaDon: sanitizedHoaDon,
     tenQuan: tenQuan || 'QUAN CA PHE POS',
     soLanIn,
     laBanSao,
@@ -158,6 +236,12 @@ export async function printReceiptK80(
     showPlgWatermark: plgMeta.showPlgWatermark,
     plgReferralUrl: plgMeta.plgReferralUrl,
   }
+  const receiptPayload = bridgeSettings.enabled
+    ? buildReceiptRasterPayload(baseReceiptPayload, {
+        vietnameseRaster: useVietnameseRaster,
+        paperWidth: effectivePaperWidth,
+      })
+    : baseReceiptPayload
   if (bridgeSettings.enabled) {
     try {
       const res = await bridgePrintReceipt(receiptPayload)
@@ -188,15 +272,6 @@ export async function printReceiptK80(
   const diemSuDung = Number(hoaDon.diemSuDung || 0)
   const phiPhucVu = Number(hoaDon.phiPhucVu ?? hoaDon.tienPhiPhucVu ?? 0)
   const thueVAT = Number(hoaDon.thueVAT ?? hoaDon.tienThueVAT ?? hoaDon.tienVat ?? 0)
-  const maskPhoneReceipt = (sdt) => {
-    const raw = String(sdt || '').trim()
-    if (!raw) return ''
-    if (raw.length < 7) {
-      if (raw.length <= 2) return '***'
-      return `${raw.slice(0, 1)}***${raw.slice(-1)}`
-    }
-    return `${raw.slice(0, 4)}***${raw.slice(-3)}`
-  }
 
   const taxBreakdown = Array.isArray(hoaDon.taxBreakdown || hoaDon.tax_breakdown_json)
     ? hoaDon.taxBreakdown || hoaDon.tax_breakdown_json
@@ -274,7 +349,7 @@ export async function printReceiptK80(
   const plgFooterHtml = plgMeta.showPlgWatermark
     ? `<hr/>
        <div style="text-align:center;font-size:9.5px;margin-top:4px;padding:4px;border:1px dashed #000">
-         <div style="font-weight:bold">🚀 Dùng CafePOS MIỄN PHÍ 400 đơn/tháng</div>
+         <div style="font-weight:bold">🚀 Dùng CafePOS MIỄN PHÍ 350 đơn/tháng</div>
          <div>Chủ quán? Quét QR mở quán trong 30 giây!</div>
          <img
            src="https://api.qrserver.com/v1/create-qr-code/?size=110x110&margin=2&data=${encodeURIComponent(plgMeta.plgReferralUrl)}"

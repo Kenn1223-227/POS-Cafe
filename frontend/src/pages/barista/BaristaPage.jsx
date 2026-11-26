@@ -175,14 +175,21 @@ export default function BaristaPage() {
       if (daThayRef.current) {
         const moi = ds.filter((m) => !daThayRef.current.has(m.maCTHD))
         if (moi.length > 0) {
-          const hasRemake = moi.some((m) => m.remakeOfCTHD || Number(m.mucDoUuTien) >= 2)
+          const hasRemake = moi.some((m) => Boolean(m.isRemake || m.remakeOfCTHD))
+          const hasRush = moi.some(
+            (m) => !m.isRemake && !m.remakeOfCTHD && (Boolean(m.isRush) || Number(m.mucDoUuTien || 0) >= 2)
+          )
           if (soundRef.current) {
-            if (hasRemake) playRushOrRemakeSound()
+            if (hasRemake || hasRush) playRushOrRemakeSound()
             else playNewOrderSound()
           }
           const nhanBan = [...new Set(moi.map((m) => m.tenBan || 'Mang đi'))].join(', ')
           toast.success(
-            hasRemake ? `⚡ VÉ LÀM LẠI ƯU TIÊN (${nhanBan})` : `🔔 ${moi.length} món mới (${nhanBan})`
+            hasRemake
+              ? `⚡ LÀM LẠI / REMAKE ƯU TIÊN (${nhanBan})`
+              : hasRush
+              ? `🔥 ĐƠN GẤP / RUSH (${nhanBan})`
+              : `🔔 ${moi.length} món mới (${nhanBan})`
           )
         }
       }
@@ -855,6 +862,17 @@ export default function BaristaPage() {
             ↻ Tải lại
           </button>
 
+          {[ROLES.QUAN_LY, ROLES.BARISTA].includes(Number(user?.vaiTro)) && (
+            <button
+              type="button"
+              onClick={() => navigate('/stocktake')}
+              className="px-3.5 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-xl text-xs font-bold cursor-pointer"
+              title="Kiểm kê kho mù 60s cuối ca"
+            >
+              🕵️ Kiểm kho mù
+            </button>
+          )}
+
           {Number(user?.vaiTro) === ROLES.QUAN_LY && (
             <button
               onClick={() => navigate('/pos')}
@@ -1006,6 +1024,16 @@ export default function BaristaPage() {
                         </span>
                       </div>
 
+                      {tk.hasRemake && (
+                        <div className="px-3 py-1.5 rounded-xl bg-fuchsia-600 text-white text-xs font-black text-center">
+                          ⚡ LÀM LẠI / REMAKE (0đ • ƯU TIÊN CAO NHẤT)
+                        </div>
+                      )}
+                      {!tk.hasRemake && tk.hasRush && (
+                        <div className="px-3 py-1.5 rounded-xl bg-orange-600 text-white text-xs font-black text-center">
+                          🔥 GẤP / RUSH (ƯU TIÊN LÀM NGAY)
+                        </div>
+                      )}
                       {tk.allStationsReady && (
                         <div className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-black text-center">
                           ✅ ĐỦ 100% MÓN ĐA QUẦY — SẴN SÀNG BƯNG / GỌI KHÁCH!
@@ -1153,16 +1181,34 @@ export default function BaristaPage() {
                   <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
                     {b.chiTiet.map((item) => {
                       const stt = formatStt(item.soThuTuNgay)
+                      const itemIsRemake = Boolean(item.isRemake || item.remakeOfCTHD)
+                      const itemIsRush = !itemIsRemake && (Boolean(item.isRush) || Number(item.mucDoUuTien || 0) >= 2)
                       return (
                         <div
                           key={item.maCTHD}
-                          className="p-2.5 rounded-xl bg-stone-900 flex items-center justify-between gap-2 text-xs"
+                          className={`p-2.5 rounded-xl bg-stone-900 flex items-center justify-between gap-2 text-xs ${
+                            itemIsRemake
+                              ? 'border border-fuchsia-500/80'
+                              : itemIsRush
+                              ? 'border border-orange-500/80'
+                              : ''
+                          }`}
                         >
                           <div>
                             <p className="font-bold text-amber-300 flex items-center gap-1.5 flex-wrap">
                               {stt && (
                                 <span className="px-1.5 py-0.5 rounded bg-amber-500 text-stone-950 font-black text-[11px]">
                                   {stt}
+                                </span>
+                              )}
+                              {itemIsRemake && (
+                                <span className="px-1.5 py-0.5 rounded bg-fuchsia-600 text-white font-black text-[10px]">
+                                  ⚡ LÀM LẠI
+                                </span>
+                              )}
+                              {itemIsRush && (
+                                <span className="px-1.5 py-0.5 rounded bg-orange-600 text-white font-black text-[10px]">
+                                  🔥 GẤP / RUSH
                                 </span>
                               )}
                               <span>
@@ -1240,13 +1286,37 @@ export default function BaristaPage() {
                     </span>
                   </div>
                   <div className="space-y-2.5 flex-1">
-                    {tk.items.map((item) => (
-                      <div key={item.maCTHD} className="p-3 rounded-xl bg-stone-900 space-y-2">
+                    {tk.items.map((item) => {
+                      const tkItemRemake = Boolean(item.isRemake || item.remakeOfCTHD)
+                      const tkItemRush = !tkItemRemake && (Boolean(item.isRush) || Number(item.mucDoUuTien || 0) >= 2)
+                      return (
+                      <div
+                        key={item.maCTHD}
+                        className={`p-3 rounded-xl bg-stone-900 space-y-2 ${
+                          tkItemRemake
+                            ? 'border border-fuchsia-500/80'
+                            : tkItemRush
+                            ? 'border border-orange-500/80'
+                            : ''
+                        }`}
+                      >
                         <div className="flex justify-between items-start gap-2">
                           <div>
-                            <p className="font-bold text-white text-sm">
-                              {item.tenMon} ({item.kichThuoc}) × {item.soLuong}
-                            </p>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {tkItemRemake && (
+                                <span className="px-1.5 py-0.5 rounded bg-fuchsia-600 text-white font-black text-[10px]">
+                                  ⚡ LÀM LẠI / REMAKE
+                                </span>
+                              )}
+                              {tkItemRush && (
+                                <span className="px-1.5 py-0.5 rounded bg-orange-600 text-white font-black text-[10px]">
+                                  🔥 GẤP / RUSH
+                                </span>
+                              )}
+                              <p className="font-bold text-white text-sm">
+                                {item.tenMon} ({item.kichThuoc}) × {item.soLuong}
+                              </p>
+                            </div>
                             {item.toppings?.length > 0 && (
                               <p className="text-xs text-amber-200">
                                 + {item.toppings.map((t) => `${t.tenTopping} x${t.soLuong}`).join(', ')}
@@ -1263,7 +1333,8 @@ export default function BaristaPage() {
                           </button>
                         </div>
                       </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 </div>
               )
@@ -1278,7 +1349,8 @@ export default function BaristaPage() {
               const mins = getElapsedMinutes(item.firedAt || item.thoiGianGoi, nowMs)
               const sla = getSlaStyle(mins, dangHoan)
               const isMaking = item.trangThaiPhaChe === 'DangLam'
-              const isRemake = Boolean(item.remakeOfCTHD) || Number(item.mucDoUuTien) >= 2
+              const isRemake = Boolean(item.isRemake || item.remakeOfCTHD)
+              const isRush = !isRemake && (Boolean(item.isRush) || Number(item.mucDoUuTien || 0) >= 2)
               const isOpenItem = Boolean(item.laMonThoiGia || item.tenMonTuyChinh || item.trongLuongGram)
               const stt = formatStt(item.soThuTuNgay)
 
@@ -1286,13 +1358,23 @@ export default function BaristaPage() {
                 <div
                   key={item.maCTHD}
                   className={`bg-stone-800 border-2 rounded-2xl p-5 flex flex-col justify-between shadow-lg ${
-                    isRemake ? 'border-fuchsia-400 ring-2 ring-fuchsia-500/70' : sla.border
+                    isRemake
+                      ? 'border-fuchsia-400 ring-2 ring-fuchsia-500/70'
+                      : isRush
+                      ? 'border-orange-500 ring-2 ring-orange-500/70'
+                      : sla.border
                   }`}
                 >
                   <div>
                     {isRemake && (
                       <div className="mb-2 px-3 py-1.5 rounded-xl bg-fuchsia-600 text-white text-xs font-black flex items-center justify-between">
-                        <span>⚡ LÀM LẠI (0đ • ƯU TIÊN CAO NHẤT)</span>
+                        <span>⚡ LÀM LẠI / REMAKE (0đ • ƯU TIÊN CAO NHẤT)</span>
+                        {cardIdx < 9 && <span className="px-1.5 py-0.5 rounded bg-black/30">Phím {cardIdx + 1}</span>}
+                      </div>
+                    )}
+                    {isRush && (
+                      <div className="mb-2 px-3 py-1.5 rounded-xl bg-orange-600 text-white text-xs font-black flex items-center justify-between">
+                        <span>🔥 GẤP / RUSH (ƯU TIÊN LÀM NGAY)</span>
                         {cardIdx < 9 && <span className="px-1.5 py-0.5 rounded bg-black/30">Phím {cardIdx + 1}</span>}
                       </div>
                     )}
@@ -1346,30 +1428,32 @@ export default function BaristaPage() {
                       <div className="flex items-center justify-between mt-2 gap-2">
                         <p className="text-2xl font-black text-emerald-400">×{item.soLuong}</p>
                         <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              try {
-                                const nextRush = !(Number(item.mucDoUuTien || 0) >= 2)
-                                await orderService.setOrderRush(item.maHoaDon, { rush: nextRush })
-                                toast.success(
-                                  nextRush
-                                    ? `🔥 Đã đặt ưu tiên GẤP đơn #${item.maHoaDon}`
-                                    : `Đã gỡ cờ GẤP đơn #${item.maHoaDon}`
-                                )
-                                void dongBo()
-                              } catch {
-                                // interceptor handles error
-                              }
-                            }}
-                            className={`px-2 py-1 rounded-lg text-xs font-extrabold cursor-pointer ${
-                              Number(item.mucDoUuTien || 0) >= 2
-                                ? 'bg-red-600 text-white'
-                                : 'bg-stone-700 hover:bg-red-700 text-amber-200'
-                            }`}
-                          >
-                            🔥 {Number(item.mucDoUuTien || 0) >= 2 ? 'GẤP' : 'Đặt gấp'}
-                          </button>
+                          {!isRemake && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  const nextRush = !isRush
+                                  await orderService.setOrderRush(item.maHoaDon, { rush: nextRush })
+                                  toast.success(
+                                    nextRush
+                                      ? `🔥 Đã đặt ưu tiên GẤP / RUSH đơn #${item.maHoaDon}`
+                                      : `Đã gỡ cờ GẤP / RUSH đơn #${item.maHoaDon}`
+                                  )
+                                  void dongBo()
+                                } catch {
+                                  // interceptor handles error
+                                }
+                              }}
+                              className={`px-2 py-1 rounded-lg text-xs font-extrabold cursor-pointer ${
+                                isRush
+                                  ? 'bg-orange-600 text-white'
+                                  : 'bg-stone-700 hover:bg-orange-700 text-amber-200'
+                              }`}
+                            >
+                              🔥 {isRush ? 'GẤP / RUSH' : 'Đặt gấp'}
+                            </button>
+                          )}
                           {nhan && (
                             <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${nhan.cls}`}>
                               {nhan.text}

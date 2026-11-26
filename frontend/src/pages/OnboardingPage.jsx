@@ -78,7 +78,7 @@ export default function OnboardingPage() {
         <div className="flex items-center justify-between border-b pb-4 gap-3">
           <div>
             <span className="text-xs font-extrabold uppercase tracking-wider text-emerald-700">
-              🎁 Gói FREE Vĩnh Viễn (400 đơn/tháng) • Hoặc Dùng Thử 30 Ngày PRO
+              🎁 Gói FREE Vĩnh Viễn (350 đơn/tháng) • Hoặc Dùng Thử 30 Ngày PRO
             </span>
             <h1 className="text-2xl font-black text-stone-900 mt-0.5">
               Khởi tạo quán POS trong 30 giây
@@ -294,7 +294,7 @@ export default function OnboardingPage() {
                   <p className="font-extrabold text-sm text-emerald-900">🆓 FREE Vĩnh viễn</p>
                   <p className="text-[11px] font-black text-emerald-700">0đ / tháng mãi mãi</p>
                   <p className="text-[11px] text-stone-600">
-                    1 POS • Tối đa 400 đơn/tháng • Báo cáo 7 ngày • Phù hợp xe cafe &amp; quán mới mở.
+                    1 POS • Tối đa 350 đơn/tháng • Báo cáo 7 ngày • Phù hợp xe cafe &amp; quán mới mở.
                   </p>
                 </button>
 
@@ -308,7 +308,7 @@ export default function OnboardingPage() {
                   }`}
                 >
                   <p className="font-extrabold text-sm text-stone-800">🌱 STARTER</p>
-                  <p className="text-[11px] font-black text-amber-700">Thử 30N • Sau 149k/tháng</p>
+                  <p className="text-[11px] font-black text-amber-700">Thử 30N • Sau 169k/tháng</p>
                   <p className="text-[11px] text-stone-600">
                     Không giới hạn đơn POS • Offline PWA • AI Menu • Bill sạch không watermark.
                   </p>
@@ -327,7 +327,7 @@ export default function OnboardingPage() {
                     PHỔ BIẾN NHẤT
                   </span>
                   <p className="font-extrabold text-sm text-amber-900">🚀 PRO / GROWTH</p>
-                  <p className="text-[11px] font-black text-emerald-700">Thử 30N • Sau 399k/tháng</p>
+                  <p className="text-[11px] font-black text-emerald-700">Thử 30N • Sau 349k/tháng</p>
                   <p className="text-[11px] text-stone-600">
                     Full Kho BOM + BCG, KDS đa trạm, VietQR Auto, QR Order, Anti-Fraud, Loyalty.
                   </p>
@@ -368,7 +368,7 @@ export default function OnboardingPage() {
               <p className="text-emerald-800">
                 {createdInfo.seededSummary?.isFreePlan ? (
                   <>
-                    Gói <b>FREE Vĩnh viễn (0đ/tháng — 400 đơn/tháng)</b> đã kích hoạt. Hệ thống đã nạp sẵn mô hình{' '}
+                    Gói <b>FREE Vĩnh viễn (0đ/tháng — 350 đơn/tháng)</b> đã kích hoạt. Hệ thống đã nạp sẵn mô hình{' '}
                     <b>{createdInfo.seededSummary?.moHinh}</b> và mở sẵn Ca thu ngân đầu tiên:
                   </>
                 ) : (

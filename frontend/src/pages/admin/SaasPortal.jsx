@@ -74,7 +74,7 @@ const FEATURE_ITEMS = [
   { key: 'vietqr_webhook', label: 'VietQR Auto Webhook', desc: 'Tự động chốt đơn & đọc tiền khi SePay/PayOS báo có', minPlan: 'PRO' },
   { key: 'audit_logs', label: 'Audit Logs & Telegram Anti-Fraud', desc: 'Nhật ký kiểm toán bất biến & cảnh báo gian lận tức thì', minPlan: 'PRO' },
   { key: 'qr_order', label: 'QR Order tại bàn & CRM Loyalty', desc: 'Khách tự quét mã gọi món & tích điểm thành viên', minPlan: 'PRO' },
-  { key: 'multi_branch', label: 'Chuỗi đa chi nhánh', desc: 'Menu tập trung, kho tổng & điều chuyển nhiều cơ sở', minPlan: 'ENTERPRISE' },
+  { key: 'multi_branch', label: 'Chuỗi đa chi nhánh', desc: 'Menu tập trung, kho tổng & điều chuyển nhiều cơ sở', minPlan: 'CHAIN' },
 ]
 
 const EXPANSION_OFFERS = [
@@ -129,7 +129,7 @@ export default function SaasPortal() {
   const { token, user, setAuth } = useAuthStore()
   const [info, setInfo] = useState(null)
   const [billingMonths, setBillingMonths] = useState(12)
-  const [extraBranches, setExtraBranches] = useState(0)
+  const [chainBranches, setChainBranches] = useState(3)
   const [activeOrder, setActiveOrder] = useState(null)
   const [processing, setProcessing] = useState(false)
   const [submittingOffer, setSubmittingOffer] = useState('')
@@ -163,10 +163,12 @@ export default function SaasPortal() {
   const handleStartCheckout = async (planId) => {
     setProcessing(true)
     try {
+      const isChainPlan = planId === 'CHAIN' || planId === 'ENTERPRISE'
+      const safeBranches = isChainPlan ? Math.max(3, Number(chainBranches) || 3) : 1
       const res = await saasService.createBillingOrder({
         goiCuoc: planId,
         soThang: billingMonths,
-        extraBranches: planId === 'ENTERPRISE' ? Number(extraBranches) || 0 : 0,
+        ...(isChainPlan ? { soChiNhanh: safeBranches, extraBranches: Math.max(0, safeBranches - 3) } : { extraBranches: 0 }),
       })
       setActiveOrder(res.order)
       toast.success(res.message)
@@ -351,11 +353,11 @@ export default function SaasPortal() {
               {isDefaultTenant
                 ? 'Quán vận hành mặc định với đầy đủ tính năng gói PRO. (Quản trị toàn nền tảng nằm tại cổng /super-admin độc lập.)'
                 : sub?.isFreeForever
-                ? 'Đang dùng miễn phí vĩnh viễn (tối đa 400 đơn/tháng, báo cáo 7 ngày). Nâng cấp STARTER (149k/tháng) để bán không giới hạn đơn & xóa watermark bill.'
+                ? 'Đang dùng miễn phí vĩnh viễn (tối đa 350 đơn/tháng, báo cáo 7 ngày). Nâng cấp STARTER (169k/tháng) để bán không giới hạn đơn & xóa watermark bill.'
                 : sub?.laDungThu && !sub?.hetHan
                 ? `Hạn dùng thử đến ${sub.trialEndsAt ? new Date(sub.trialEndsAt).toLocaleDateString('vi-VN') : ''}. Sau 30 ngày bạn có thể nâng cấp gói trả phí hoặc chuyển về gói FREE vĩnh viễn mà không mất dữ liệu.`
                 : sub?.hetHan
-                ? 'Thời gian bản quyền đã kết thúc. Chọn gói trả phí bên dưới hoặc chuyển sang gói FREE (400 đơn/tháng) để mở khóa bán hàng tức thì.'
+                ? 'Thời gian bản quyền đã kết thúc. Chọn gói trả phí bên dưới hoặc chuyển sang gói FREE (350 đơn/tháng) để mở khóa bán hàng tức thì.'
                 : `Bản quyền chính thức có hiệu lực đến ${sub?.subscriptionEndsAt ? new Date(sub.subscriptionEndsAt).toLocaleDateString('vi-VN') : 'không giới hạn'}.`}
             </p>
           </div>
@@ -367,7 +369,7 @@ export default function SaasPortal() {
                 onClick={() => handleStartCheckout(tenant.goiCuoc === 'FREE' ? 'STARTER' : tenant.goiCuoc || 'PRO')}
                 className="px-5 py-3 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-extrabold text-xs shadow cursor-pointer"
               >
-                💳 {sub?.isFreeForever ? 'Nâng cấp STARTER (149k/tháng)' : 'Thanh toán kích hoạt ngay'}
+                💳 {sub?.isFreeForever ? 'Nâng cấp STARTER (169k/tháng)' : 'Thanh toán kích hoạt ngay'}
               </button>
               {!sub?.isFreeForever && (
                 <button
@@ -429,7 +431,7 @@ export default function SaasPortal() {
               />
             </div>
             <p className="text-[11px] text-gray-500">
-              Đã dùng <b>{quotaPct}%</b> hạn mức {formatNumber(maxOrders)} đơn/tháng của gói {tenant?.goiCuoc}. Nâng cấp <b>STARTER (149k/tháng)</b> để bán không giới hạn đơn!
+              Đã dùng <b>{quotaPct}%</b> hạn mức {formatNumber(maxOrders)} đơn/tháng của gói {tenant?.goiCuoc}. Nâng cấp <b>STARTER (169k/tháng)</b> để bán không giới hạn đơn!
             </p>
           </div>
         )}
@@ -559,9 +561,9 @@ export default function SaasPortal() {
           {PLAN_CARDS.map((p) => {
             const isCurrent = tenant?.goiCuoc === p.id
             const isFree = p.id === 'FREE'
-            const isEnt = p.id === 'ENTERPRISE'
-            const monthlyBase =
-              p.priceVnd + (isEnt ? (Number(extraBranches) || 0) * (p.extraBranchPriceVnd || 0) : 0)
+            const isChain = p.id === 'CHAIN' || p.id === 'ENTERPRISE'
+            const effectiveBranches = isChain ? Math.max(3, Number(chainBranches) || 3) : 1
+            const monthlyBase = isChain ? p.priceVnd * effectiveBranches : p.priceVnd
             const monthlyAfterDiscount = Math.round(monthlyBase * (1 - discountRate))
             const totalCycle = monthlyAfterDiscount * billingMonths
             return (
@@ -607,20 +609,20 @@ export default function SaasPortal() {
                       </p>
                     )}
                     {isFree && (
-                      <p className="text-[11px] text-emerald-700 font-bold">Miễn phí trọn đời • 400 đơn/tháng</p>
+                      <p className="text-[11px] text-emerald-700 font-bold">Miễn phí trọn đời • 350 đơn/tháng</p>
                     )}
                   </div>
                   <p className="text-xs text-gray-500">{p.desc}</p>
-                  {isEnt && (
+                  {isChain && (
                     <div className="pt-1 flex items-center justify-between gap-2 text-[11px] bg-indigo-50 px-2.5 py-1.5 rounded-lg border border-indigo-100">
-                      <span className="font-bold text-indigo-900">Chi nhánh thêm (+250k):</span>
+                      <span className="font-bold text-indigo-900">Số điểm bán (tối thiểu 3 • 499k/CN):</span>
                       <input
                         type="number"
-                        min={0}
-                        max={50}
-                        value={extraBranches}
-                        onChange={(e) => setExtraBranches(Math.max(0, Number(e.target.value) || 0))}
-                        className="w-14 px-2 py-0.5 rounded border border-indigo-300 bg-white text-center font-bold"
+                        min={3}
+                        max={200}
+                        value={chainBranches}
+                        onChange={(e) => setChainBranches(Math.max(3, Number(e.target.value) || 3))}
+                        className="w-16 px-2 py-0.5 rounded border border-indigo-300 bg-white text-center font-bold"
                       />
                     </div>
                   )}

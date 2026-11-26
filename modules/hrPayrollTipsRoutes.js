@@ -23,14 +23,18 @@ function registerHrPayrollTipsRoutes(app, deps) {
         chayTruyVanBaoCao,
         kiemTraToken,
         choPhepVaiTro,
+        yeuCauTinhNang,
         layTenantId,
         layChiNhanhHienTai,
     } = deps;
+    const gate = (flag) => (typeof yeuCauTinhNang === 'function' ? yeuCauTinhNang(flag) : (_req, _res, next) => next());
+    const gateHrAdvanced = gate('horizontal_fnb');
+    const gateAiBi = gate('ai_forecast_upsell');
 
     // -------------------------------------------------------------------------
     // 1. TIP POOL (QUỸ TIP & PHÂN BỔ LỆCH 0Đ)
     // -------------------------------------------------------------------------
-    app.get('/api/hr/tip-pools', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.get('/api/hr/tip-pools', kiemTraToken, choPhepVaiTro(1), gateHrAdvanced, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const pools = await chayGiaoDich(
@@ -48,7 +52,7 @@ function registerHrPayrollTipsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/hr/tip-pools', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/hr/tip-pools', kiemTraToken, choPhepVaiTro(1), gateHrAdvanced, async (req, res) => {
         const tenantId = layTenantId(req);
         const branchId = layChiNhanhHienTai ? layChiNhanhHienTai(req) : null;
         try {
@@ -68,7 +72,7 @@ function registerHrPayrollTipsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/hr/tip-pools/:id/distribute', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/hr/tip-pools/:id/distribute', kiemTraToken, choPhepVaiTro(1), gateHrAdvanced, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const result = await chayGiaoDich(
@@ -90,7 +94,7 @@ function registerHrPayrollTipsRoutes(app, deps) {
     // -------------------------------------------------------------------------
     // 2. TĂNG CA OT 150% / 200% / 300% + PHỤ CẤP CA ĐÊM
     // -------------------------------------------------------------------------
-    app.get('/api/hr/ot-logs', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.get('/api/hr/ot-logs', kiemTraToken, choPhepVaiTro(1), gateHrAdvanced, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const logs = await chayGiaoDich(
@@ -109,7 +113,7 @@ function registerHrPayrollTipsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/hr/ot-logs', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/hr/ot-logs', kiemTraToken, choPhepVaiTro(1), gateHrAdvanced, async (req, res) => {
         const tenantId = layTenantId(req);
         const branchId = layChiNhanhHienTai ? layChiNhanhHienTai(req) : null;
         try {
@@ -132,7 +136,7 @@ function registerHrPayrollTipsRoutes(app, deps) {
     // -------------------------------------------------------------------------
     // 3. ANALYTICS: HOURLY SALES VS. LABOR COST %
     // -------------------------------------------------------------------------
-    app.get('/api/analytics/hourly-sales-vs-labor', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.get('/api/analytics/hourly-sales-vs-labor', kiemTraToken, choPhepVaiTro(1), gateAiBi, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const runReadOnly = (fn) =>

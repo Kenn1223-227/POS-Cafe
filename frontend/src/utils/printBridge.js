@@ -5,6 +5,7 @@
 // 4. ANDROID_RAWBT: In ngầm không hộp thoại trên máy tính bảng Android / máy POS cầm tay Sunmi qua giao thức rawbt:base64
 
 import axiosClient from '../api/axiosClient'
+import { base64ToUint8, wrapEscPosRasterReceiptBytes } from './escposRaster'
 
 const BRIDGE_SETTINGS_KEY = 'pos_print_bridge_settings'
 
@@ -30,6 +31,8 @@ export function getBridgeClientSettings() {
       transportMode: parsed.transportMode || 'AUTO', // 'AUTO' | 'LOCAL_BRIDGE' | 'CLOUD_RELAY' | 'WEB_SERIAL' | 'WEB_USB' | 'ANDROID_RAWBT'
       cloudRelayFallback: Boolean(parsed.cloudRelayFallback),
       serialBaudRate: Number(parsed.serialBaudRate || 9600),
+      vietnameseRaster: parsed.vietnameseRaster !== false, // Mặc định bật Raster ESC/POS GS v 0 in tiếng Việt có dấu
+      paperWidth: parsed.paperWidth === 'K58' ? 'K58' : 'K80', // 'K80' (576px) | 'K58' (384px)
     }
   } catch {
     return {
@@ -39,6 +42,8 @@ export function getBridgeClientSettings() {
       transportMode: 'AUTO',
       cloudRelayFallback: false,
       serialBaudRate: 9600,
+      vietnameseRaster: true,
+      paperWidth: 'K80',
     }
   }
 }
@@ -57,6 +62,12 @@ export function saveBridgeClientSettings(settings) {
         ? Boolean(settings.cloudRelayFallback)
         : prev.cloudRelayFallback,
     serialBaudRate: Number(settings.serialBaudRate || prev.serialBaudRate || 9600),
+    vietnameseRaster:
+      settings.vietnameseRaster !== undefined
+        ? Boolean(settings.vietnameseRaster)
+        : prev.vietnameseRaster !== false,
+    paperWidth:
+      (settings.paperWidth || prev.paperWidth || 'K80').toUpperCase() === 'K58' ? 'K58' : 'K80',
   }
   localStorage.setItem(BRIDGE_SETTINGS_KEY, JSON.stringify(next))
   return next
@@ -106,7 +117,22 @@ export function buildBrowserEscPosReceiptBytes({
   kickDrawer = undefined,
   showPlgWatermark = false,
   plgReferralUrl = '',
+  rasterBase64 = null,
+  rasterBytes = null,
 }) {
+  const shouldKick = kickDrawer !== undefined ? Boolean(kickDrawer) : Boolean(isCashPayment)
+
+  // Nếu đã dựng sẵn ảnh Raster ESC/POS GS v 0 tiếng Việt có dấu -> phát trực tiếp xuống máy in
+  if (rasterBytes && rasterBytes.length > 0) {
+    return wrapEscPosRasterReceiptBytes(rasterBytes, { kickDrawer: shouldKick, autoCut: true })
+  }
+  if (rasterBase64) {
+    const decoded = base64ToUint8(rasterBase64)
+    if (decoded.length > 0) {
+      return wrapEscPosRasterReceiptBytes(decoded, { kickDrawer: shouldKick, autoCut: true })
+    }
+  }
+
   const encoder = new TextEncoder()
   const byteList = []
   const LINE = '-'.repeat(48)
@@ -117,7 +143,6 @@ export function buildBrowserEscPosReceiptBytes({
     for (let i = 0; i < encoded.length; i++) byteList.push(encoded[i])
   }
 
-  const shouldKick = kickDrawer !== undefined ? Boolean(kickDrawer) : Boolean(isCashPayment)
   pushBytes(0x1b, 0x40) // ESC @ Init
   if (shouldKick) {
     pushBytes(0x1b, 0x70, 0x00, 0x19, 0xfa) // RJ11 Cash Drawer Kick
@@ -199,7 +224,7 @@ export function buildBrowserEscPosReceiptBytes({
     const refUrl = String(plgReferralUrl || 'https://cafepos.vn/onboarding').trim()
     pushLine(LINE)
     pushBytes(0x1b, 0x45, 0x01)
-    pushLine('Phan mem CafePOS - MIEN PHI 400 don/thang')
+    pushLine('Phan mem CafePOS - MIEN PHI 350 don/thang')
     pushBytes(0x1b, 0x45, 0x00)
     pushLine('Quet QR dung thu 30s cho chu quan:')
     const qrBytes = encoder.encode(refUrl)

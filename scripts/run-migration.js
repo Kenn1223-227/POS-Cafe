@@ -30,8 +30,18 @@ if (useEnvTest) {
 }
 
 function extractVersion(filename) {
-    const m = String(filename).match(/^(\d{3})_/);
+    const m = String(filename).match(/^(\d+)_/);
     return m ? m[1] : filename;
+}
+
+function compareMigrationFiles(a, b) {
+    const va = String(a).match(/^(\d+)_/);
+    const vb = String(b).match(/^(\d+)_/);
+    if (va && vb) {
+        const diff = Number(va[1]) - Number(vb[1]);
+        if (diff !== 0) return diff;
+    }
+    return a.localeCompare(b);
 }
 
 async function ensureSchemaMigrationsTable(pool) {
@@ -64,7 +74,7 @@ async function main() {
     const allFiles = fs
         .readdirSync(migrationsDir)
         .filter((f) => f.endsWith('.sql'))
-        .sort();
+        .sort(compareMigrationFiles);
 
     const filterArg = positionalArgs[0] ? String(positionalArgs[0]).trim() : 'all';
     const targetFiles =

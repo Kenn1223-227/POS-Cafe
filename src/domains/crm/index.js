@@ -139,7 +139,16 @@ app.post('/api/khachhang', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res
                 [String(soDienThoai).trim(), tenantId]
             );
             if (result.rows.length > 0) {
-                return { existing: true, khachHang: result.rows[0] };
+                const k = result.rows[0];
+                return {
+                    existing: true,
+                    khachHang: {
+                        maKH: k.makh,
+                        tenKH: k.tenkh,
+                        soDienThoai: maskPhoneForRole(k.sodienthoai, req.user?.vaiTro),
+                        diemTichLuy: Number(k.diemtichluy || 0),
+                    },
+                };
             }
 
             const maKH = 'KH' + crypto.randomBytes(4).toString('hex').toUpperCase();
@@ -147,7 +156,16 @@ app.post('/api/khachhang', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res
                 'INSERT INTO KhachHang (MaKH, TenKH, SoDienThoai, DiemTichLuy, TenantId) VALUES ($1, $2, $3, 0, $4) RETURNING MaKH, TenKH, SoDienThoai, DiemTichLuy',
                 [maKH, String(tenKH).trim().slice(0, 100), String(soDienThoai).trim().slice(0, 20), tenantId]
             );
-            return { existing: false, khachHang: insertResult.rows[0] };
+            const ins = insertResult.rows[0];
+            return {
+                existing: false,
+                khachHang: {
+                    maKH: ins.makh,
+                    tenKH: ins.tenkh,
+                    soDienThoai: maskPhoneForRole(ins.sodienthoai, req.user?.vaiTro),
+                    diemTichLuy: Number(ins.diemtichluy || 0),
+                },
+            };
         });
         res.json({
             message: out.existing ? 'Tìm thấy thông tin khách hàng!' : 'Đăng ký khách hàng thành công!',

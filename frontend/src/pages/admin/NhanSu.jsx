@@ -735,7 +735,7 @@ export default function NhanSu() {
               </tr>
             </thead>
             <tbody>
-              {nhanVienList.map((nv) => (
+              {danhSachNV.map((nv) => (
                 <tr key={nv.maNV} className="hover:bg-stone-50">
                   <td className="p-2 font-bold text-stone-800 border border-stone-200">{nv.tenNV}</td>
                   {weekDates.map((d) => {

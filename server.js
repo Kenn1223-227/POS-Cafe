@@ -28,6 +28,7 @@ const {
     taoMiddlewareHanMucDonThang,
     layEntitlementTenant,
     xoaCacheEntitlement,
+    taoMiddlewarePlatformAdmin,
 } = require('./modules/platformAdminRoutes');
 const {
     khoiTaoCanhBaoGianLan,
@@ -42,7 +43,7 @@ const {
 } = require('./modules/promotionAndPinService');
 const { kiemTraVaTangVersionHoaDon } = require('./modules/fohEngineService');
 const { registerFohPhase1Routes } = require('./modules/fohPhase1Routes');
-const { autoUn86OnRestock } = require('./modules/kdsPhase2Engine');
+const { autoUn86OnRestock, recordAndEmitOrderNewByStation } = require('./modules/kdsPhase2Engine');
 const { registerKdsPhase2Routes } = require('./modules/kdsPhase2Routes');
 const { registerPaymentShiftPhase3Routes } = require('./modules/paymentShiftPhase3Routes');
 const { registerInventoryCogsPhase4Routes } = require('./modules/inventoryCogsPhase4Routes');
@@ -96,7 +97,12 @@ const {
     detectOfflineClockDrift,
     createCoreRuntime,
 } = require('./src/core/auditAndSecurity');
-const { registerSocketHandlers } = require('./src/core/socketRooms');
+const {
+    registerSocketHandlers,
+    emitToBranch,
+    emitToRole,
+    emitToTenant,
+} = require('./src/core/socketRooms');
 const { createOrderHelpers } = require('./src/core/orderHelpers');
 const { registerAuthDomain } = require('./src/domains/auth');
 const { registerMenuDomain } = require('./src/domains/menu');
@@ -116,9 +122,11 @@ if (require.main === module) {
 }
 
 const app = express();
-// Chạy sau proxy (Render / Fly / Nginx): đặt TRUST_PROXY=1 để req.ip là IP khách thật
-if (process.env.TRUST_PROXY) {
-    const v = process.env.TRUST_PROXY;
+// Chạy sau reverse proxy (Render / Fly / Railway / Vercel / Nginx):
+// Cần 'trust proxy' để req.secure và req.ip nhận diện đúng giao thức HTTPS và IP khách thật.
+const trustProxyConfig = process.env.TRUST_PROXY !== undefined ? process.env.TRUST_PROXY : (process.env.NODE_ENV === 'production' ? 1 : false);
+if (trustProxyConfig) {
+    const v = String(trustProxyConfig);
     app.set('trust proxy', /^\d+$/.test(v) ? Number(v) : v === 'true' ? true : v);
 }
 const server = http.createServer(app);
@@ -291,6 +299,9 @@ const sharedDeps = {
     guiLoi,
     LoiNghiepVu,
     roomTen,
+    emitToBranch,
+    emitToRole,
+    emitToTenant,
     ngayHomNayVN,
     ...orderHelpers,
 };
@@ -310,11 +321,14 @@ registerSystemDomain(app, sharedDeps);
 // ============================================================================
 // ĐĂNG KÝ CÁC MODULE CHUYÊN BIỆT HIỆN HỮU (modules/*Routes.js)
 // ============================================================================
+const kiemTraPlatformAdmin = taoMiddlewarePlatformAdmin(pool, jwt, JWT_VERIFY_OPTIONS);
+
 registerSaasRoutes(app, {
     pool,
     chayGiaoDich,
     kiemTraToken,
     choPhepVaiTro,
+    kiemTraPlatformAdmin,
     gioiHanDangNhap,
     hashPassword,
     jwt,
@@ -381,6 +395,9 @@ registerFohPhase1Routes(app, {
     LoiNghiepVu,
     io,
     roomTen,
+    emitToBranch,
+    emitToRole,
+    emitToTenant,
     layHoaDonChiTiet: orderHelpers.layHoaDonChiTiet,
     layHoaDonMoCuaBan: orderHelpers.layHoaDonMoCuaBan,
     layMonTheoMa: orderHelpers.layMonTheoMa,
@@ -405,6 +422,9 @@ registerKdsPhase2Routes(app, {
     LoiNghiepVu,
     io,
     roomTen,
+    emitToBranch,
+    emitToRole,
+    emitToTenant,
     SQL_MON_PHA_CHE: orderHelpers.SQL_MON_PHA_CHE,
     mapMonPhaChe: orderHelpers.mapMonPhaChe,
     layMonTheoMa: orderHelpers.layMonTheoMa,
@@ -431,6 +451,9 @@ registerPaymentShiftPhase3Routes(app, {
     LoiNghiepVu,
     io,
     roomTen,
+    emitToBranch,
+    emitToRole,
+    emitToTenant,
     layCaDangMo: orderHelpers.layCaDangMo,
     loiChuaMoCa: orderHelpers.loiChuaMoCa,
     ghiNhanThanhToanTrongGiaoDich: orderHelpers.ghiNhanThanhToanTrongGiaoDich,
@@ -458,6 +481,9 @@ registerInventoryCogsPhase4Routes(app, {
     layCaDangMo: orderHelpers.layCaDangMo,
     io,
     roomTen,
+    emitToBranch,
+    emitToRole,
+    emitToTenant,
     autoUn86OnRestock,
 });
 
@@ -468,18 +494,40 @@ registerEcosystemPhase8Routes(app, {
     layTenantId,
     kiemTraToken,
     choPhepVaiTro,
+    yeuCauTinhNang,
+    layEntitlementTenant,
     ghiAuditLog,
     guiLoi,
     LoiNghiepVu,
     io,
     roomTen,
+    emitToBranch,
+    emitToRole,
+    emitToTenant,
     taoDonHangTrongGiaoDich: async (client, opts) => {
         const kq = await orderHelpers.taoOrderTrongGiaoDich(client, opts);
         const hoaDon = await orderHelpers.layHoaDonChiTiet(client, kq.maHoaDon);
+        const monMoiFired = Array.isArray(kq.dsMaCTHDFired) && kq.dsMaCTHDFired.length > 0
+            ? await orderHelpers.layMonTheoMa(client, kq.dsMaCTHDFired)
+            : [];
+        const kdsEmitPlan = monMoiFired.length > 0
+            ? await recordAndEmitOrderNewByStation(client, io, {
+                  tenantId: opts.tenantId || 'DEFAULT',
+                  branchId: kq.branchId || opts.branchId || 'DEFAULT',
+                  maHoaDon: kq.maHoaDon,
+                  maBan: opts.maBan || null,
+                  tenBan: monMoiFired[0]?.tenBan || hoaDon?.ban?.[0]?.tenBan || null,
+                  mangDi: !opts.maBan,
+                  themMon: !kq.laHoaDonMoi,
+                  dotGoi: kq.dotGoi || 1,
+                  monMoiFired,
+              })
+            : null;
         return {
             ...kq,
             soMonMoi: Array.isArray(kq.dsMaCTHD) ? kq.dsMaCTHD.length : 0,
             hoaDon,
+            kdsEmitPlan,
         };
     },
 });
@@ -489,6 +537,7 @@ registerEInvoiceRoutes(app, {
     chayGiaoDich,
     kiemTraToken,
     choPhepVaiTro,
+    yeuCauTinhNang,
     layTenantId,
     layChiNhanhHienTai,
 });
@@ -500,6 +549,7 @@ const wave4aRouteDeps = {
     chayTruyVanBaoCao,
     kiemTraToken,
     choPhepVaiTro,
+    yeuCauTinhNang,
     layTenantId,
     layChiNhanhHienTai,
     ghiAuditLog,
@@ -692,5 +742,6 @@ module.exports = {
     computeBusinessDate,
     refreshDailyBranchFinancialSummary,
     checkExpiringBatchesAndEmitKds: inventoryDomain.checkExpiringBatchesAndEmitKds,
+    runStartupBootstrap,
     gracefulShutdown,
 };

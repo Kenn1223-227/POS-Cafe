@@ -63,6 +63,8 @@ import {
   buildVietQrUrl,
 } from '../../utils/printHelper'
 import { playCashSuccessSound, playVietQrReceivedSound, speakVietnamese } from '../../utils/sound'
+import { buildOrderPayloadFromCart, buildHoldOrderPayloadFromCart } from '../../utils/orderPayload'
+import { shouldBlockPosHotkey, hasDomOpenModal, isEditableElement } from '../../utils/posHotkeys'
 
 export default function PosPage() {
   const { user, logout } = useAuthStore()
@@ -90,6 +92,7 @@ export default function PosPage() {
   const setActiveInvoice = usePosStore((s) => s.setActiveInvoice)
   const setCustomer = usePosStore((s) => s.setCustomer)
   const addToCart = usePosStore((s) => s.addToCart)
+  const replaceCart = usePosStore((s) => s.replaceCart)
   const updateCartQty = usePosStore((s) => s.updateCartQty)
   const updateCartItem = usePosStore((s) => s.updateCartItem)
   const updateCartNote = usePosStore((s) => s.updateCartNote)
@@ -244,12 +247,13 @@ export default function PosPage() {
     }
 
     try {
-      const [banList, menuList, toppingList, shift, openList, bankCfg, kmDangChay, cachedCustomers] = await Promise.all([
+      const [banList, menuList, toppingList, shift, openList, luuTamList, bankCfg, kmDangChay, cachedCustomers] = await Promise.all([
         banService.getAll(),
         sanPhamService.getMenu(),
         orderService.getToppings(),
         caService.getCaHienTai(),
         orderService.getDangMo().catch(() => []),
+        orderService.getLuuTam().catch(() => []),
         saasService.getBankSettings().catch(() => null),
         khuyenMaiService.getDangChay({ silent: true }).catch(() => null),
         khachHangService.getCache({ silent: true }).catch(() => null),
@@ -275,11 +279,17 @@ export default function PosPage() {
         }))
       }
       const openArr = Array.isArray(openList) ? openList : []
+      const onlineHeldArr = Array.isArray(luuTamList)
+        ? luuTamList
+        : Array.isArray(luuTamList?.danhSach)
+        ? luuTamList.danhSach
+        : []
       setTables(banList)
       setMenu(menuList)
       setToppings(toppingList)
       setCurrentShift(shift)
       setOpenInvoices(openArr)
+      setOnlineHeldOrders(onlineHeldArr)
       setCacheUpdatedAt(new Date().toISOString())
       // Lưu bản sao mới nhất xuống IndexedDB (Menu, Bàn, Ca, Khuyến mãi & Khách hàng — cô lập theo TenantId) để bán xuyên suốt khi đứt mạng
       void saveCatalogSnapshot(
@@ -646,6 +656,9 @@ export default function PosPage() {
       refreshActiveInvoice()
       loadLiveOperations()
     },
+    PARKED_ORDERS_UPDATED: () => {
+      loadLiveOperations()
+    },
   })
 
   const handleSelectTable = async (ban) => {
@@ -727,39 +740,46 @@ export default function PosPage() {
   }
 
   const buildOrderPayload = useCallback(
-    () => {
-      const cleanBuzzer = String(soTheRung || '').trim()
-      return {
-        maBan: selectedTable?.maBan || null,
-        maHoaDon: !selectedTable && activeInvoice ? activeInvoice.maHoaDon : null,
-        maKH: customer?.maKH || null,
-        loaiDonHang: selectedTable ? 'TAI_QUAN' : orderType || 'MANG_DI',
-        ...(tenKhachVangLai?.trim() ? { tenKhachVangLai: tenKhachVangLai.trim() } : {}),
-        ...(cleanBuzzer ? { soTheRung: cleanBuzzer } : {}),
-        ...(activeInvoice?.version ? { expectedVersion: activeInvoice.version } : {}),
-        danhSachMon: cart.map((item) => ({
-          maMon: item.maMon,
-          kichThuoc: item.kichThuoc,
-          soLuong: Number(item.soLuong),
-          ghiChu: item.ghiChu || null,
-          isTakeaway: Boolean(item.isTakeaway),
-          courseNo: Number(item.courseNo || 1),
-          fireStatus: item.fireStatus === 'HELD' ? 'HELD' : 'FIRED',
-          modifiers: (item.modifiers || []).map((m) => ({
-            groupId: m.groupId,
-            optionId: m.optionId,
-            qty: Number(m.qty || 1),
-          })),
-          toppings: (item.toppings || []).map((t) => ({
-            maTopping: t.maTopping,
-            soLuongMoiLy: Number(t.soLuongMoiLy ?? t.soLuong ?? 1),
-            soLuong: Number(t.soLuongMoiLy ?? t.soLuong ?? 1),
-          })),
-        })),
-      }
-    },
+    () =>
+      buildOrderPayloadFromCart({
+        selectedTable,
+        activeInvoice,
+        customer,
+        cart,
+        soTheRung,
+        orderType,
+        tenKhachVangLai,
+      }),
     [selectedTable, activeInvoice, customer, cart, soTheRung, orderType, tenKhachVangLai]
   )
+
+  const handleHoldOrder = useCallback(async () => {
+    if (cart.length === 0) return false
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      try {
+        const holdPayload = buildHoldOrderPayloadFromCart({
+          selectedTable,
+          customer,
+          cart,
+          orderType,
+          tenKhachVangLai,
+        })
+        const res = await orderService.luuTam(holdPayload)
+        clearCart()
+        setSoTheRung('')
+        await loadLiveOperations()
+        toast.success(res.message || '⏸️ Đã lưu tạm đơn lên máy chủ!')
+        return true
+      } catch {
+        // fallback local
+      }
+    }
+    if (holdCurrentOrder()) {
+      toast.success('⏸️ Đã lưu tạm đơn! Bạn có thể phục vụ khách tiếp theo.')
+      return true
+    }
+    return false
+  }, [cart, selectedTable, customer, orderType, tenKhachVangLai, clearCart, loadLiveOperations, holdCurrentOrder])
 
   const handlePrintInvoice = useCallback(
     async (hoaDon, extraOpts = {}) => {
@@ -1437,22 +1457,68 @@ export default function PosPage() {
     }
   }
 
-  // [P1] Bộ phím tắt tốc độ cao chuẩn POS (F1, F2, F4, F8, F9, F10, ESC)
+  const hasOpenModal = Boolean(
+    pickingProduct ||
+      editingCartTarget ||
+      showThuChiModal ||
+      showDongCaModal ||
+      showOpenShiftModal ||
+      showOpenOrdersModal ||
+      showBankModal ||
+      showOfflineModal ||
+      showPrintModal ||
+      showPaidHistoryModal ||
+      voidTarget ||
+      showSplitModal ||
+      showPinSwitchModal ||
+      showEcosystemDrawer ||
+      reprintPrompt ||
+      pickingCombo
+  )
+
+  // [P1 / Batch 5] Bộ phím tắt tốc độ cao chuẩn POS (F1, F2, F4, F8, F9, F10, ESC)
+  // Chặn hoàn toàn kích hoạt phím tắt (đặc biệt [F9]/[F10]/[F4]/[F2]) khi có bất kỳ modal/dialog/input focus nào đang mở phía trên
   useEffect(() => {
     const onKeyDown = (e) => {
       if (e.key === 'Escape') {
-        setPickingProduct(null)
-        setShowThuChiModal(false)
-        setShowDongCaModal(false)
-        setShowOpenOrdersModal(false)
-        setShowBankModal(false)
-        setShowOfflineModal(false)
-        setShowPrintModal(false)
-        setShowPaidHistoryModal(false)
-        setVoidTarget(null)
-        setShowSplitModal(false)
+        if (hasOpenModal) {
+          setPickingProduct(null)
+          setEditingCartTarget(null)
+          setShowThuChiModal(false)
+          setShowDongCaModal(false)
+          setShowOpenShiftModal(false)
+          setShowOpenOrdersModal(false)
+          setShowBankModal(false)
+          setShowOfflineModal(false)
+          setShowPrintModal(false)
+          setShowPaidHistoryModal(false)
+          setVoidTarget(null)
+          setShowSplitModal(false)
+          setShowPinSwitchModal(false)
+          setShowEcosystemDrawer(false)
+          setReprintPrompt(null)
+          setPickingCombo(null)
+          return
+        }
+        const activeEl = typeof document !== 'undefined' ? document.activeElement : null
+        if (isEditableElement(activeEl) && typeof activeEl.blur === 'function') {
+          activeEl.blur()
+        }
         return
       }
+
+      if (
+        shouldBlockPosHotkey({
+          key: e.key,
+          hasOpenModal,
+          hasDomModal: hasDomOpenModal(),
+          target: e.target,
+          activeElement: typeof document !== 'undefined' ? document.activeElement : null,
+        })
+      ) {
+        return
+      }
+
       if (e.key === 'F1') {
         e.preventDefault()
         searchInputRef.current?.focus()
@@ -1461,7 +1527,7 @@ export default function PosPage() {
         setSelectedTable(null)
       } else if (e.key === 'F4') {
         e.preventDefault()
-        if (holdCurrentOrder()) toast.success('⏸️ Đã lưu tạm đơn hàng (F4)!')
+        void handleHoldOrder()
       } else if (e.key === 'F8') {
         e.preventDefault()
         customerInputRef.current?.focus()
@@ -1480,7 +1546,7 @@ export default function PosPage() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [setSelectedTable, holdCurrentOrder, selectedTable, activeInvoice, cart.length, canManageCash, handleQuickCheckout, handleStartVietQrOrder])
+  }, [hasOpenModal, setSelectedTable, handleHoldOrder, selectedTable, activeInvoice, cart.length, canManageCash, handleQuickCheckout, handleStartVietQrOrder])
 
   // [PHÂN HỆ 6] Trình nghe Súng Quét Mã Vạch Toàn Cục (Global HID Barcode Listener <50ms/ký tự)
   const handleBarcodeScanned = useCallback(
@@ -1556,7 +1622,7 @@ export default function PosPage() {
     [menu, addToCart, setCustomer, activeInvoice, cart, handleApplyPromo, customer, diemSuDungInput]
   )
 
-  useBarcodeScanner({ onScan: handleBarcodeScanned, enabled: true })
+  useBarcodeScanner({ onScan: handleBarcodeScanned, enabled: !hasOpenModal })
 
   // [PHÂN HỆ 8] Tải gợi ý AI Smart Upsell theo giỏ hàng hiện tại (debounced)
   const cartMaMonKey = cart.map((c) => c.maMon).join(',')
@@ -1821,6 +1887,17 @@ export default function PosPage() {
             </>
           )}
 
+          {[ROLES.QUAN_LY, ROLES.THU_NGAN].includes(userRole) && (
+            <button
+              type="button"
+              onClick={() => navigate('/stocktake')}
+              className="min-h-10 px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 rounded-xl text-xs font-bold cursor-pointer"
+              title="Kiểm kê kho mù 60s cuối ca (ẩn tồn hệ thống & giá vốn)"
+            >
+              🕵️ Kiểm kho mù
+            </button>
+          )}
+
           {[ROLES.PHUC_VU, ROLES.QUAN_LY].includes(userRole) && (
             <button
               type="button"
@@ -1896,29 +1973,60 @@ export default function PosPage() {
           <span className="font-extrabold text-amber-900">
             ⏸️ Đơn đang giữ tạm ({onlineHeldOrders.length + heldOrders.length}):
           </span>
-          {onlineHeldOrders.map((h) => (
-            <div
-              key={`online-${h.maHoaDon || h.id}`}
-              className="inline-flex items-center gap-1 bg-emerald-50 border border-emerald-400 rounded-xl px-2.5 py-1 shadow-xs"
-            >
-              <button
-                type="button"
-                onClick={async () => {
-                  try {
-                    const hd = await orderService.getById(h.maHoaDon || h.id)
-                    setActiveInvoice(hd)
-                    toast.success(`☁️ Đã mở lại đơn tạm online #${h.maHoaDon || h.id}`)
-                  } catch {
-                    toast.error('Không thể tải chi tiết đơn lưu tạm online!')
-                  }
-                }}
-                className="font-bold text-emerald-900 hover:underline cursor-pointer"
+          {onlineHeldOrders.map((h) => {
+            const heldId = h.maHoaDon || h.id
+            const itemCount = Number(h.tongLy ?? h.soMon ?? 0)
+            return (
+              <div
+                key={`online-${heldId}`}
+                className="inline-flex items-center gap-1 bg-emerald-50 border border-emerald-400 rounded-xl px-2.5 py-1 shadow-xs"
               >
-                ☁️ {h.tenKhachVangLai || h.ghiChu || h.label || `Đơn tạm #${h.maHoaDon || h.id}`}
-                {h.soMon ? ` (${h.soMon} món)` : ''}
-              </button>
-            </div>
-          ))}
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const restored = await orderService.khoiPhucTam(heldId)
+                      if (Array.isArray(restored?.cart)) {
+                        replaceCart(restored.cart)
+                      }
+                      setActiveInvoice(null)
+                      if (restored?.loaiDonHang && restored.loaiDonHang !== 'TAI_QUAN') {
+                        setSelectedTable(null)
+                        setOrderType(restored.loaiDonHang)
+                      }
+                      setTenKhachVangLai(restored?.tenKhachVangLai || '')
+                      if (restored?.khachHang) setCustomer(restored.khachHang)
+                      await loadLiveOperations()
+                      toast.success(restored?.message || `☁️ Đã khôi phục đơn tạm #${heldId} về giỏ hàng!`)
+                    } catch {
+                      toast.error('Không thể khôi phục đơn lưu tạm online!')
+                    }
+                  }}
+                  className="font-bold text-emerald-900 hover:underline cursor-pointer"
+                >
+                  ☁️ {h.label || h.tenKhachVangLai || h.ghiChu || `Đơn tạm #${heldId}`}
+                  {itemCount > 0 ? ` (${itemCount} ly)` : ''}
+                  {Number(h.tongTamTinh || 0) > 0 ? ` • ${formatVND(h.tongTamTinh)}` : ''}
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await orderService.xoaLuuTam(heldId)
+                      await loadLiveOperations()
+                      toast.success(`Đã xóa đơn lưu tạm #${heldId}`)
+                    } catch {
+                      toast.error('Không thể xóa đơn lưu tạm online!')
+                    }
+                  }}
+                  className="text-red-500 font-bold ml-1 cursor-pointer"
+                  title="Xóa đơn lưu tạm"
+                >
+                  ✕
+                </button>
+              </div>
+            )
+          })}
           {heldOrders.map((h) => (
             <div
               key={h.id}
@@ -2010,25 +2118,7 @@ export default function PosPage() {
                 clearCart()
                 setSoTheRung('')
               }}
-              onHoldOrder={async () => {
-                if (typeof navigator !== 'undefined' && navigator.onLine && cart.length > 0) {
-                  try {
-                    const res = await orderService.luuTam({
-                      label: tenKhachVangLai || customer?.tenKH || selectedTable?.tenBan || null,
-                      maKH: customer?.maKH || null,
-                      loaiDonHang: selectedTable ? 'TAI_QUAN' : orderType,
-                      danhSachMon: buildOrderPayload().danhSachMon,
-                    })
-                    clearCart()
-                    await loadLiveOperations()
-                    toast.success(res.message || '⏸️ Đã lưu tạm đơn lên máy chủ!')
-                    return
-                  } catch {
-                    // fallback local
-                  }
-                }
-                if (holdCurrentOrder()) toast.success('⏸️ Đã lưu tạm đơn! Bạn có thể phục vụ khách tiếp theo.')
-              }}
+              onHoldOrder={handleHoldOrder}
               onSubmitOrder={handleSubmitOrder}
               onQuickCheckout={handleQuickCheckout}
               onStartVietQrOrder={handleStartVietQrOrder}
@@ -2113,7 +2203,7 @@ export default function PosPage() {
       />
 
       {showOpenShiftModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" data-pos-modal="true" className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b pb-3">
               <div>
@@ -2191,7 +2281,7 @@ export default function PosPage() {
 
       {/* Modal Danh sách Hóa đơn chưa thanh toán (chống Đơn Mang đi mồ côi) */}
       {showOpenOrdersModal && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" data-pos-modal="true" className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-lg w-full p-5 shadow-2xl space-y-4 max-h-[85vh] flex flex-col">
             <div className="flex items-center justify-between border-b pb-3">
               <h3 className="font-extrabold text-base text-gray-800">
@@ -2368,7 +2458,7 @@ export default function PosPage() {
 
       {/* [Wave 3B — P1-02] Modal chọn món theo Slot cho Combo */}
       {pickingCombo && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" data-pos-modal="true" className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b pb-3">
               <div>
@@ -2419,6 +2509,7 @@ export default function PosPage() {
                 const slots = pickingCombo.slots || []
                 const count = Math.max(1, slots.length)
                 const perSlotPrice = Math.round(Number(pickingCombo.giaBanCombo || 0) / count)
+                const comboInstanceId = `CMB-${pickingCombo.maCombo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
                 slots.forEach((sl, idx) => {
                   const chosenCode = comboSelections[sl.id] || sl.items?.[0]?.maMon
                   const chosen = (sl.items || []).find((i) => i.maMon === chosenCode) || sl.items?.[0]
@@ -2438,6 +2529,8 @@ export default function PosPage() {
                     ghiChu: `Combo: ${pickingCombo.tenCombo}`,
                     maCombo: pickingCombo.maCombo,
                     tenComboSnapshot: pickingCombo.tenCombo,
+                    comboInstanceId,
+                    comboSlotId: sl.id,
                     isTakeaway: false,
                     courseNo: 1,
                     fireStatus: 'FIRED',

@@ -9,8 +9,10 @@ const {
     guiLoi,
     choPhepVaiTro,
     layTenantId,
-    roomTen,
 } = require('../../core/auditAndSecurity');
+const {
+    emitToBranch,
+} = require('../../core/socketRooms');
 const {
     DEFAULT_SHIFT_POLICY,
     normalizeBranchForShift,
@@ -231,7 +233,13 @@ async function handleMoCa(req, res) {
             return { ...row, branchId: normBranch, terminalId: normTerminal, chenhLechBanGiao, maCaTruoc, soGiaoDichTuDongGanCa };
         }, tenantId);
 
-        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('CA_THAY_DOI', { trangThai: 'MO', maCaThuNgan: ca.macathungan });
+        emitToBranch(io, {
+            tenantId,
+            branchId: ca.branchId || req.user?.branchId || 'DEFAULT',
+            roles: ['POS', 'WAITER'],
+            event: 'CA_THAY_DOI',
+            payload: { trangThai: 'MO', maCaThuNgan: ca.macathungan },
+        });
         res.status(201).json({
             message: ca.soGiaoDichTuDongGanCa > 0
                 ? `Mở ca thành công & đã tự động gắn ${ca.soGiaoDichTuDongGanCa} giao dịch chuyển khoản ngoài giờ vào ca!`
@@ -795,7 +803,13 @@ async function handleDongCa(req, res) {
             }).catch(() => {});
         }
 
-        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('CA_THAY_DOI', { trangThai: 'DONG' });
+        emitToBranch(io, {
+            tenantId,
+            branchId: ketQua.doiSoat?.branchId || req.user?.branchId || 'DEFAULT',
+            roles: ['POS', 'WAITER'],
+            event: 'CA_THAY_DOI',
+            payload: { trangThai: 'DONG' },
+        });
         res.json({
             message: `Đã chốt ca thành công (${ketQua.zNumber})!`,
             zNumber: ketQua.zNumber,

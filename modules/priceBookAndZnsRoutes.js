@@ -30,14 +30,19 @@ function registerPriceBookAndZnsRoutes(app, deps) {
         chayGiaoDich,
         kiemTraToken,
         choPhepVaiTro,
+        yeuCauTinhNang,
         layTenantId,
         layChiNhanhHienTai,
     } = deps;
+    const gate = (flag) => (typeof yeuCauTinhNang === 'function' ? yeuCauTinhNang(flag) : (_req, _res, next) => next());
+    const gatePriceBooks = gate('aggregator_hub');
+    const gateZns = gate('crm_tiers');
+    const gateBida = gate('horizontal_fnb');
 
     // -------------------------------------------------------------------------
     // 1. PRICE BOOKS ĐA KÊNH
     // -------------------------------------------------------------------------
-    app.get('/api/price-books', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) => {
+    app.get('/api/price-books', kiemTraToken, choPhepVaiTro(1, 4), gatePriceBooks, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const priceBooks = await chayGiaoDich(
@@ -50,7 +55,7 @@ function registerPriceBookAndZnsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/price-books', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/price-books', kiemTraToken, choPhepVaiTro(1), gatePriceBooks, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const result = await chayGiaoDich(
@@ -63,7 +68,7 @@ function registerPriceBookAndZnsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/price-books/:id/items', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/price-books/:id/items', kiemTraToken, choPhepVaiTro(1), gatePriceBooks, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const items = await chayGiaoDich(
@@ -81,7 +86,7 @@ function registerPriceBookAndZnsRoutes(app, deps) {
         }
     });
 
-    app.get('/api/price-books/resolve', kiemTraToken, async (req, res) => {
+    app.get('/api/price-books/resolve', kiemTraToken, gatePriceBooks, async (req, res) => {
         const tenantId = layTenantId(req);
         const maSp = String(req.query.maSp || '').trim();
         if (!maSp) {
@@ -109,7 +114,7 @@ function registerPriceBookAndZnsRoutes(app, deps) {
     // -------------------------------------------------------------------------
     // 2. ZALO ZNS OUTBOX WORKER THẬT (NĐ 13/2023)
     // -------------------------------------------------------------------------
-    app.get('/api/zns/outbox', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.get('/api/zns/outbox', kiemTraToken, choPhepVaiTro(1), gateZns, async (req, res) => {
         const tenantId = layTenantId(req);
         const status = req.query.status ? String(req.query.status).toUpperCase() : null;
         try {
@@ -135,7 +140,7 @@ function registerPriceBookAndZnsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/zns/outbox', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) => {
+    app.post('/api/zns/outbox', kiemTraToken, choPhepVaiTro(1, 4), gateZns, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const item = await chayGiaoDich(
@@ -148,7 +153,7 @@ function registerPriceBookAndZnsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/zns/outbox/process', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/zns/outbox/process', kiemTraToken, choPhepVaiTro(1), gateZns, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const summary = await chayGiaoDich(
@@ -169,7 +174,7 @@ function registerPriceBookAndZnsRoutes(app, deps) {
     // -------------------------------------------------------------------------
     // 3. BIDA TIME-BILLING SESSIONS
     // -------------------------------------------------------------------------
-    app.get('/api/bida/sessions', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
+    app.get('/api/bida/sessions', kiemTraToken, choPhepVaiTro(1, 3, 4), gateBida, async (req, res) => {
         const tenantId = layTenantId(req);
         const status = req.query.status ? String(req.query.status).toUpperCase() : null;
         try {
@@ -191,7 +196,7 @@ function registerPriceBookAndZnsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/bida/sessions/start', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
+    app.post('/api/bida/sessions/start', kiemTraToken, choPhepVaiTro(1, 3, 4), gateBida, async (req, res) => {
         const tenantId = layTenantId(req);
         const branchId = layChiNhanhHienTai ? layChiNhanhHienTai(req) : null;
         try {
@@ -211,7 +216,7 @@ function registerPriceBookAndZnsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/bida/sessions/:id/pause', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
+    app.post('/api/bida/sessions/:id/pause', kiemTraToken, choPhepVaiTro(1, 3, 4), gateBida, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const session = await chayGiaoDich(
@@ -224,7 +229,7 @@ function registerPriceBookAndZnsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/bida/sessions/:id/resume', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
+    app.post('/api/bida/sessions/:id/resume', kiemTraToken, choPhepVaiTro(1, 3, 4), gateBida, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const session = await chayGiaoDich(
@@ -237,7 +242,7 @@ function registerPriceBookAndZnsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/bida/sessions/:id/close', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
+    app.post('/api/bida/sessions/:id/close', kiemTraToken, choPhepVaiTro(1, 3, 4), gateBida, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const result = await chayGiaoDich(

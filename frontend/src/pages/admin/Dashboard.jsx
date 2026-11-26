@@ -107,7 +107,7 @@ export default function Dashboard() {
             {report.wasClamped && report.kyBaoCao?.tuNgay
               ? ` (đã tự động giới hạn từ ngày ${formatDate(report.kyBaoCao.tuNgay)}).`
               : '.'}{' '}
-            Nâng cấp gói STARTER (chỉ 149.000đ/tháng) để xem toàn bộ lịch sử &amp; không giới hạn đơn!
+            Nâng cấp gói STARTER (chỉ 169.000đ/tháng) để xem toàn bộ lịch sử &amp; không giới hạn đơn!
           </span>
           <Link
             to="/admin/saas"

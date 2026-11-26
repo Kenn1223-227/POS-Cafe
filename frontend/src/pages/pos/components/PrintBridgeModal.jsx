@@ -18,7 +18,7 @@ import {
   connectWebUsbPrinter,
   connectWebBluetoothPrinter,
 } from '../../../utils/printBridge'
-import { retryPersistentPrintJob } from '../../../utils/printHelper'
+import { buildReceiptRasterPayload, retryPersistentPrintJob } from '../../../utils/printHelper'
 import {
   getAllPersistentPrintJobs,
   deletePersistentPrintJob,
@@ -197,13 +197,24 @@ export default function PrintBridgeModal({ isOpen, onClose, user, onStatusChange
   const handleTestReceipt = async () => {
     setLoading(true)
     try {
-      await bridgePrintReceipt({
-        hoaDon: SAMPLE_TEST_INVOICE,
-        tenQuan: user?.tenQuan || 'QUAN CA PHE POS',
-        thuNgan: user?.tenNV || 'Thu ngân',
-        isCashPayment: true,
-      })
-      toast.success('🖨️ Đã gửi lệnh in thử Bill K80 (Silent Print)!')
+      const testPayload = buildReceiptRasterPayload(
+        {
+          hoaDon: SAMPLE_TEST_INVOICE,
+          tenQuan: user?.tenQuan || 'QUÁN CÀ PHÊ POS',
+          thuNgan: user?.tenNV || 'Thu ngân',
+          isCashPayment: true,
+        },
+        {
+          vietnameseRaster: clientCfg.vietnameseRaster !== false,
+          paperWidth: clientCfg.paperWidth || 'K80',
+        }
+      )
+      await bridgePrintReceipt(testPayload)
+      toast.success(
+        `🖨️ Đã gửi lệnh in thử Bill ${clientCfg.paperWidth || 'K80'}${
+          testPayload.rasterBase64 ? ' (Tiếng Việt Raster GS v 0)' : ' (ESC/POS ASCII)'
+        }!`
+      )
       await refreshBridge()
     } catch (err) {
       toast.error(err.message)
@@ -446,6 +457,33 @@ export default function PrintBridgeModal({ isOpen, onClose, user, onStatusChange
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-stone-200">
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="inline-flex items-center gap-2 font-semibold text-stone-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={clientCfg.vietnameseRaster !== false}
+                    onChange={(e) =>
+                      setClientCfg({ ...clientCfg, vietnameseRaster: e.target.checked })
+                    }
+                    className="w-4 h-4 accent-emerald-600"
+                  />
+                  <span>
+                    🇻🇳 In tiếng Việt có dấu (<b>Raster ESC/POS GS v 0</b>)
+                  </span>
+                </label>
+                <select
+                  value={clientCfg.paperWidth || 'K80'}
+                  onChange={(e) => setClientCfg({ ...clientCfg, paperWidth: e.target.value })}
+                  className="min-h-10 px-2.5 py-1 border rounded-xl font-bold bg-white text-stone-800"
+                  title="Chọn khổ giấy máy in hóa đơn (K80: 576px / K58: 384px)"
+                >
+                  <option value="K80">🧾 Khổ giấy K80 (80mm • 576px)</option>
+                  <option value="K58">🧾 Khổ giấy K58 (58mm • 384px)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-stone-200">
               <label className="inline-flex items-center gap-2 font-semibold text-stone-700 cursor-pointer">
                 <input
                   type="checkbox"
@@ -669,6 +707,33 @@ export default function PrintBridgeModal({ isOpen, onClose, user, onStatusChange
                     Hỗ trợ tách 1 đơn N ly thành N tem độc lập (Xprinter XP-350B / XP-365B / Gprinter / HPRT).
                   </p>
                 </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl border border-gray-200 bg-white space-y-1.5">
+                <label className="block font-extrabold text-xs text-gray-800">
+                  🌐 Danh sách Origin HTTPS được phép kết nối CORS (phân tách bằng dấu phẩy)
+                </label>
+                <input
+                  type="text"
+                  value={(printerCfg.security?.allowedOrigins || []).join(', ')}
+                  onChange={(e) =>
+                    setPrinterCfg({
+                      ...printerCfg,
+                      security: {
+                        ...(printerCfg.security || {}),
+                        allowedOrigins: e.target.value
+                          .split(',')
+                          .map((s) => s.trim())
+                          .filter(Boolean),
+                      },
+                    })
+                  }
+                  placeholder="https://*.vercel.app, https://pos.tenquancuaban.vn"
+                  className="w-full px-3 py-2 border rounded-lg font-mono text-xs bg-stone-50"
+                />
+                <p className="text-[11px] text-gray-500">
+                  Localhost / 127.0.0.1 luôn tự động được phép. Mọi domain lạ ngoài danh sách sẽ bị chặn 403.
+                </p>
               </div>
 
               <div className="flex flex-wrap items-center justify-between gap-2">

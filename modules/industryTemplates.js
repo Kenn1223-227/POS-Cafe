@@ -21,6 +21,7 @@ const PLAN_FEATURES = {
         aggregator_hub: false,
         horizontal_fnb: false,
         ai_forecast_upsell: false,
+        einvoice: false,
     },
     STARTER: {
         label: 'Gói Cơ bản (Starter)',
@@ -42,6 +43,7 @@ const PLAN_FEATURES = {
         aggregator_hub: false,
         horizontal_fnb: false,
         ai_forecast_upsell: false,
+        einvoice: false,
     },
     PRO: {
         label: 'Gói Chuyên nghiệp (Pro)',
@@ -63,6 +65,7 @@ const PLAN_FEATURES = {
         aggregator_hub: true,
         horizontal_fnb: true,
         ai_forecast_upsell: true,
+        einvoice: true,
     },
     CHAIN: {
         label: 'Gói Chuỗi (Chain — từ 3 điểm bán)',
@@ -85,6 +88,7 @@ const PLAN_FEATURES = {
         aggregator_hub: true,
         horizontal_fnb: true,
         ai_forecast_upsell: true,
+        einvoice: true,
     },
     ENTERPRISE: {
         label: 'Gói Chuỗi (Chain / Enterprise — từ 3 điểm bán)',
@@ -108,6 +112,7 @@ const PLAN_FEATURES = {
         aggregator_hub: true,
         horizontal_fnb: true,
         ai_forecast_upsell: true,
+        einvoice: true,
     },
 };
 

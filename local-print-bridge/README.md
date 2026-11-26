@@ -22,4 +22,13 @@ Dịch vụ chạy nền siêu nhẹ tại máy quầy thu ngân (`http://127.0.
    npx @yao-pkg/pkg bridge-server.js --targets node20-win-x64 --output CafePOS-PrintBridge.exe
    ```
 2. Gửi file `CafePOS-PrintBridge.exe` cho chủ quán nhấn đúp chạy nền (hoặc bỏ shortcut vào `shell:startup` để tự bật cùng Windows).
-3. **Hỗ trợ HTTPS Production (Vercel -> Localhost)**: Bridge mặc định trả header `Access-Control-Allow-Private-Network: true` cùng `Access-Control-Allow-Origin` theo Origin gọi vào để vượt kiểm tra **Chrome Private Network Access (PNA)** mà không bị chặn.
+3. **Cấu hình CORS cho Frontend HTTPS Production (Vercel / Custom Domain -> Localhost)**:
+   - Bridge tự động cho phép mọi origin loopback (`http(s)://localhost:*`, `http(s)://127.0.0.1:*`) và trả `Access-Control-Allow-Private-Network: true` để vượt kiểm tra **Chrome Private Network Access (PNA)**.
+   - Mọi origin bên ngoài phải nằm trong danh sách cho phép (allowlist); origin lạ sẽ bị từ chối với HTTP `403`.
+   - Cấu hình bằng 1 trong 2 cách (hoặc kết hợp cả hai — xem mẫu trong `bridge-config.example.json`):
+     - Trong `bridge-config.json` → `security.allowedOrigins` (mặc định hỗ trợ `https://*.vercel.app`, `https://cafepos.vn`, `https://*.cafepos.vn` — khuyến nghị khóa chặt về đúng domain quán của bạn khi triển khai thực tế).
+     - Hoặc biến môi trường `PRINT_BRIDGE_ALLOWED_ORIGINS` (phân tách bằng dấu phẩy), ví dụ:
+       ```bash
+       PRINT_BRIDGE_ALLOWED_ORIGINS="https://pos.quancuaban.vn,https://my-cafe-pos.vercel.app" node bridge-server.js
+       ```
+   - Không chấp nhận wildcard mở toang (`*`) để tránh website độc hại gửi lệnh in / mở két tiền trái phép vào `127.0.0.1:9100`.

@@ -1,38 +1,13 @@
 import axiosClient from '../api/axiosClient'
+import { buildCreateOrderBody } from '../utils/orderPayload'
+
+export { buildCreateOrderBody }
 
 export const orderService = {
-  create: (
-    {
-      maBan,
-      maHoaDon = null,
-      maKH,
-      danhSachMon,
-      combos = [],
-      soTheRung = null,
-      loaiDonHang = null,
-      tenKhachVangLai = null,
-      diaChiGiao = null,
-      soKhach = 1,
-      expectedVersion = null,
-    },
-    idempotencyKey,
-    extraConfig = {}
-  ) =>
+  create: (params, idempotencyKey, extraConfig = {}) =>
     axiosClient.post(
       '/order',
-      {
-        maBan,
-        maHoaDon,
-        maKH,
-        danhSachMon,
-        ...(Array.isArray(combos) && combos.length > 0 ? { combos } : {}),
-        ...(soTheRung ? { soTheRung } : {}),
-        ...(loaiDonHang ? { loaiDonHang } : {}),
-        ...(tenKhachVangLai ? { tenKhachVangLai } : {}),
-        ...(diaChiGiao ? { diaChiGiao } : {}),
-        ...(soKhach ? { soKhach } : {}),
-        ...(expectedVersion !== null && expectedVersion !== undefined ? { expectedVersion } : {}),
-      },
+      buildCreateOrderBody(params),
       {
         ...extraConfig,
         headers: {
@@ -238,14 +213,25 @@ export const orderService = {
       ...(expectedVersion !== null && expectedVersion !== undefined ? { expectedVersion } : {}),
     }),
 
-  chuyenMon: ({ fromMaHoaDon, toMaBan = null, toMaHoaDon = null, items = [], expectedVersion = null }) =>
-    axiosClient.post('/order/chuyen-mon', {
+  chuyenMon: ({
+    fromMaHoaDon,
+    toMaBan = null,
+    toMaHoaDon = null,
+    items = [],
+    expectedVersion = null,
+    destExpectedVersion = null,
+    toExpectedVersion = null,
+  }) => {
+    const finalDestVer = destExpectedVersion ?? toExpectedVersion ?? null
+    return axiosClient.post('/order/chuyen-mon', {
       fromMaHoaDon,
       toMaBan,
       toMaHoaDon,
       items,
       ...(expectedVersion !== null && expectedVersion !== undefined ? { expectedVersion } : {}),
-    }),
+      ...(finalDestVer !== null && finalDestVer !== undefined ? { destExpectedVersion: finalDestVer } : {}),
+    })
+  },
 
   // Course Firing (Hẹn giờ ra món)
   getChoBaoBep: () => axiosClient.get('/order/cho-bao-bep'),
@@ -274,6 +260,15 @@ export const orderService = {
     }),
 
   ghiNhanMoKetKhongBan: (lyDo) => axiosClient.post('/pos/drawer-kick', { lyDo }),
+
+  verifyManagerPin: ({ managerPin, maNVDuyet = null, action = 'OFFLINE_QUEUE_ITEM_DELETED', lyDo = '', details = {} }) =>
+    axiosClient.post('/pos/verify-manager-pin', {
+      managerPin,
+      ...(maNVDuyet ? { maNVDuyet } : {}),
+      action,
+      lyDo,
+      details,
+    }),
 
   getToppings: () => axiosClient.get('/topping'),
 

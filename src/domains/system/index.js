@@ -6,8 +6,11 @@ const {
     guiLoi,
     choPhepVaiTro,
     layTenantId,
-    roomTen,
 } = require('../../core/auditAndSecurity');
+const {
+    emitToBranch,
+    emitToTenant,
+} = require('../../core/socketRooms');
 const {
     xuLyThanhToanGoiTuWebhook,
     timTenantWebhookConfig,
@@ -26,6 +29,7 @@ function registerSystemDomain(app, deps) {
         ghiAuditLog,
         dispatchFraudAlertFromAudit,
         kiemTraCanhBaoTanSuatGianLan,
+        xacThucPinQuanLy,
         layCaDangMo,
         layHoaDonChiTiet,
         ghiNhanThanhToanTrongGiaoDich,
@@ -48,7 +52,36 @@ function layPrintRelayState(tenantId) {
     return st;
 }
 
-app.post('/api/print-relay/dispatch', kiemTraToken, choPhepVaiTro(1, 2, 3, 4), (req, res) => {
+function maskPhoneLast3ForPrint(sdt) {
+    if (sdt === null || sdt === undefined) return sdt;
+    const raw = String(sdt).trim();
+    if (!raw) return '';
+    if (raw.length <= 3) return '***';
+    return `${'*'.repeat(raw.length - 3)}${raw.slice(-3)}`;
+}
+
+function sanitizePrintRelayPayloadPii(payload) {
+    if (!payload || typeof payload !== 'object') return payload;
+    const clone = { ...payload };
+    if (clone.hoaDon && typeof clone.hoaDon === 'object') {
+        clone.hoaDon = { ...clone.hoaDon };
+        if (clone.hoaDon.khachHang && typeof clone.hoaDon.khachHang === 'object' && clone.hoaDon.khachHang.soDienThoai) {
+            clone.hoaDon.khachHang = {
+                ...clone.hoaDon.khachHang,
+                soDienThoai: maskPhoneLast3ForPrint(clone.hoaDon.khachHang.soDienThoai),
+            };
+        }
+    }
+    if (clone.khachHang && typeof clone.khachHang === 'object' && clone.khachHang.soDienThoai) {
+        clone.khachHang = {
+            ...clone.khachHang,
+            soDienThoai: maskPhoneLast3ForPrint(clone.khachHang.soDienThoai),
+        };
+    }
+    return clone;
+}
+
+app.post('/api/print-relay/dispatch', kiemTraToken, choPhepVaiTro(1, 2, 3, 4), async (req, res) => {
     const tenantId = layTenantId(req);
     const { kind = 'RECEIPT', payload = {} } = req.body || {};
     const validKinds = ['RECEIPT', 'LABEL', 'Z_REPORT', 'DRAWER_KICK'];
@@ -56,15 +89,76 @@ app.post('/api/print-relay/dispatch', kiemTraToken, choPhepVaiTro(1, 2, 3, 4), (
     if (!validKinds.includes(cleanKind)) {
         return res.status(400).json({ ok: false, message: 'Loại lệnh in Relay không hợp lệ!' });
     }
+
+    const relayBranchId = String(
+        req.body?.branchId || payload?.branchId || req.headers['x-branch-id'] || req.user?.branchId || req.user?.maChiNhanh || 'DEFAULT'
+    ).trim();
+    const isDrawerKick = cleanKind === 'DRAWER_KICK' || Boolean(payload?.kickDrawer);
+    if (isDrawerKick && ![1, 4].includes(Number(req.user?.vaiTro))) {
+        return res.status(403).json({
+            ok: false,
+            code: 'DRAWER_KICK_FORBIDDEN',
+            message: 'Chỉ Quản lý hoặc Thu ngân mới được phép gửi lệnh mở két tiền!',
+        });
+    }
+
     const st = layPrintRelayState(tenantId);
+    const sanitizedPayload = sanitizePrintRelayPayloadPii(payload);
+    const createdAt = new Date().toISOString();
+    const jobId = st.seq++;
+
+    // [Batch 6 — Anti-Fraud] Bắt buộc ghi Audit Log mỗi lần có lệnh mở két tiền (cash drawer kick)
+    if (isDrawerKick) {
+        const drawerReason = String(
+            req.body?.reason ||
+                req.body?.lyDo ||
+                payload?.reason ||
+                payload?.lyDo ||
+                (cleanKind === 'DRAWER_KICK' ? 'NO_SALE_RELAY' : 'CASH_RECEIPT_DRAWER_KICK')
+        ).trim();
+        const userId = String(req.user?.maNV || 'POS');
+        const auditData = {
+            userId,
+            branchId: relayBranchId,
+            reason: drawerReason,
+            timestamp: createdAt,
+            kind: cleanKind,
+            jobId,
+            source: 'PRINT_RELAY_DISPATCH',
+        };
+        try {
+            const writeAudit = (client) =>
+                ghiAuditLog(client, {
+                    tenantId,
+                    maNV: userId,
+                    vaiTro: req.user?.vaiTro,
+                    hanhDong: cleanKind === 'DRAWER_KICK' ? 'DRAWER_NO_SALE_KICK' : 'DRAWER_RECEIPT_KICK',
+                    doiTuong: 'KET_TIEN',
+                    maDoiTuong: `RELAY_${jobId}`,
+                    giaTriMoi: auditData,
+                    lyDo: drawerReason,
+                    ip: req.ip,
+                    batBuoc: true,
+                });
+            if (typeof pool?.withTenant === 'function') {
+                await pool.withTenant(tenantId, writeAudit);
+            } else {
+                await writeAudit(pool);
+            }
+        } catch (error) {
+            return guiLoi(res, error, 'Lỗi ghi Audit Log khi mở két tiền qua Print Relay:');
+        }
+    }
+
     const job = {
-        id: st.seq++,
+        id: jobId,
         tenantId,
+        branchId: relayBranchId,
         kind: cleanKind,
-        payload,
+        payload: sanitizedPayload,
         status: 'PENDING',
         createdBy: req.user?.maNV || 'POS',
-        createdAt: new Date().toISOString(),
+        createdAt,
         pulledAt: null,
         completedAt: null,
         error: null,
@@ -72,15 +166,35 @@ app.post('/api/print-relay/dispatch', kiemTraToken, choPhepVaiTro(1, 2, 3, 4), (
     st.jobs.unshift(job);
     if (st.jobs.length > 50) st.jobs.pop();
 
-    io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'barista')).emit('PRINT_RELAY_JOB', {
-        id: job.id,
-        kind: job.kind,
-        createdAt: job.createdAt,
-    });
+    if (relayBranchId && relayBranchId !== 'DEFAULT') {
+        emitToBranch(io, {
+            tenantId,
+            branchId: relayBranchId,
+            roles: ['POS', 'KDS'],
+            event: 'PRINT_RELAY_JOB',
+            payload: {
+                id: job.id,
+                kind: job.kind,
+                createdAt: job.createdAt,
+            },
+        });
+    } else {
+        emitToTenant(io, {
+            tenantId,
+            roles: ['POS', 'KDS'],
+            event: 'PRINT_RELAY_JOB',
+            payload: {
+                id: job.id,
+                kind: job.kind,
+                createdAt: job.createdAt,
+            },
+        });
+    }
 
     res.status(201).json({
         ok: true,
         mode: 'CLOUD_RELAY',
+        auditLogged: isDrawerKick,
         message: 'Đã đẩy lệnh in qua Cloud Print Relay về máy in tại quán!',
         job: { id: job.id, kind: job.kind, status: job.status, createdAt: job.createdAt },
     });
@@ -184,8 +298,8 @@ async function timHoaDonMoTuNoiDungCK(client, noiDungCK, fallbackOrderCode = nul
     const candidates = new Set();
 
     const regexes = [
-        /POS[\s\-_]*HD[\s\-_]*([A-Z0-9](?:[A-Z0-9\-]{0,35}[A-Z0-9])?)/g,
-        /\bHD[\s\-_]*([A-Z0-9](?:[A-Z0-9\-]{0,35}[A-Z0-9])?)\b/g,
+        /POS[\s\-_]*HD[\s\-_]*([A-Z0-9](?:[A-Z0-9\-_]{0,35}[A-Z0-9])?)/g,
+        /\bHD[\s\-_]*([A-Z0-9](?:[A-Z0-9\-_]{0,35}[A-Z0-9])?)\b/g,
     ];
     for (const rx of regexes) {
         let m;
@@ -257,9 +371,9 @@ async function timHoaDonBatKyTuNoiDungCK(client, noiDungCK, fallbackOrderCode = 
     const candidates = new Set();
 
     const regexes = [
-        /(?:POS|TT)[\s\-_]*HD[\s\-_]*([A-Z0-9](?:[A-Z0-9\-]{0,35}[A-Z0-9])?)/g,
-        /\bTT([A-Z0-9]{2,36})\b/g,
-        /\bHD[\s\-_]*([A-Z0-9](?:[A-Z0-9\-]{0,35}[A-Z0-9])?)\b/g,
+        /(?:POS|TT)[\s\-_]*HD[\s\-_]*([A-Z0-9](?:[A-Z0-9\-_]{0,35}[A-Z0-9])?)/g,
+        /\bTT([A-Z0-9_]{2,36})\b/g,
+        /\bHD[\s\-_]*([A-Z0-9](?:[A-Z0-9\-_]{0,35}[A-Z0-9])?)\b/g,
     ];
     for (const rx of regexes) {
         let m;
@@ -497,6 +611,18 @@ async function xuLyBienDongSoDuVietQR({
 
         const hdTenantId = resolvedInv?.tenant_id || found.tenantId || 'DEFAULT';
         await client.query(`SELECT set_config('app.current_tenant_id', $1, true)`, [hdTenantId]);
+        let hdBranchId = 'DEFAULT';
+        try {
+            const brRes = await client.query(
+                `SELECT COALESCE(NULLIF(to_jsonb(HoaDon)->>'branchid', ''), 'DEFAULT') AS branchid
+                   FROM HoaDon
+                  WHERE MaHoaDon = $1`,
+                [maHoaDon]
+            );
+            hdBranchId = brRes.rows[0]?.branchid || 'DEFAULT';
+        } catch {
+            hdBranchId = 'DEFAULT';
+        }
         const expectedAcc = String(resolvedInv?.bank_account_no || '').replace(/[^0-9A-Za-z]/g, '');
         const incomingAcc = String(soTaiKhoanNhan || '').replace(/[^0-9A-Za-z]/g, '');
         if (expectedAcc && incomingAcc && expectedAcc !== incomingAcc) {
@@ -533,6 +659,7 @@ async function xuLyBienDongSoDuVietQR({
                 pendingAction: true,
                 webhookEventId,
                 tenantId: hdTenantId,
+                branchId: hdBranchId,
                 trangThaiXuLy: trangThaiLog,
                 trangThaiXuLyDu: 'PENDING_ACTION',
                 nhaCungCap,
@@ -673,6 +800,7 @@ async function xuLyBienDongSoDuVietQR({
             matched: true,
             webhookEventId,
             tenantId: hdTenantId,
+            branchId: ttRes.branchId || ttRes.hoaDon?.branchId || hdBranchId,
             trangThaiXuLy,
             trangThaiXuLyDu,
             nhaCungCap,
@@ -684,37 +812,62 @@ async function xuLyBienDongSoDuVietQR({
 
     if (!ketQua.duplicate && !ketQua.isSubscription) {
         const tId = ketQua.tenantId || ketQua.hoaDon?.tenantId || expectedTenantId || 'DEFAULT';
+        const bId = ketQua.branchId || ketQua.hoaDon?.branchId || 'DEFAULT';
         if (ketQua.doublePaid || ketQua.pendingAction) {
-            io.to(roomTen(tId, 'thungan')).emit('payment:vietqr_double_paid', {
-                webhookEventId: ketQua.webhookEventId,
-                maHoaDon: ketQua.maHoaDon,
-                soTienNhan: ketQua.soTienNhan,
-                trangThaiXuLy: ketQua.trangThaiXuLy,
-                trangThaiXuLyDu: 'PENDING_ACTION',
-                message:
-                    ketQua.lyDoCanhBao ||
-                    `⚠️ Tiền chuyển khoản ${ketQua.soTienNhan.toLocaleString('vi-VN')}đ cho HĐ #${ketQua.maHoaDon} cần Thu ngân xử lý ngay!`,
+            emitToBranch(io, {
+                tenantId: tId,
+                branchId: bId,
+                roles: ['POS'],
+                event: 'payment:vietqr_double_paid',
+                payload: {
+                    webhookEventId: ketQua.webhookEventId,
+                    maHoaDon: ketQua.maHoaDon,
+                    soTienNhan: ketQua.soTienNhan,
+                    trangThaiXuLy: ketQua.trangThaiXuLy,
+                    trangThaiXuLyDu: 'PENDING_ACTION',
+                    message:
+                        ketQua.lyDoCanhBao ||
+                        `⚠️ Tiền chuyển khoản ${ketQua.soTienNhan.toLocaleString('vi-VN')}đ cho HĐ #${ketQua.maHoaDon} cần Thu ngân xử lý ngay!`,
+                },
             });
         } else if (ketQua.trangThaiXuLy === 'UNMATCHED' && tId && tId !== 'SYSTEM_UNMATCHED') {
-            io.to(roomTen(tId, 'thungan')).emit('payment:vietqr_unmatched', {
-                webhookEventId: ketQua.webhookEventId,
-                soTienNhan: ketQua.soTienNhan,
-                noiDungCK: ketQua.noiDungCK,
+            emitToTenant(io, {
+                tenantId: tId,
+                roles: ['POS'],
+                event: 'payment:vietqr_unmatched',
+                payload: {
+                    webhookEventId: ketQua.webhookEventId,
+                    soTienNhan: ketQua.soTienNhan,
+                    noiDungCK: ketQua.noiDungCK,
+                },
             });
         } else if (ketQua.matched) {
             for (const maBan of ketQua.banDaTrong || []) {
-                io.to(roomTen(tId, 'thungan')).to(roomTen(tId, 'phucvu')).emit('BAN_THAY_DOI', { maBan, trangThai: 3 });
+                emitToBranch(io, {
+                    tenantId: tId,
+                    branchId: bId,
+                    roles: ['POS', 'WAITER'],
+                    event: 'BAN_THAY_DOI',
+                    payload: { maBan, trangThai: 3 },
+                });
             }
             if (ketQua.daHoanTat) {
-                if (ketQua.kdsEmitPlan && typeof ketQua.kdsEmitPlan.emit === 'function') {
-                    ketQua.kdsEmitPlan.emit();
+                if (ketQua.kdsEmitPlan && typeof ketQua.kdsEmitPlan.flush === 'function') {
+                    ketQua.kdsEmitPlan.flush();
                 }
-                io.to(roomTen(tId, 'thungan')).emit('HOADON_DA_TT', { maHoaDon: ketQua.maHoaDon });
+                emitToBranch(io, {
+                    tenantId: tId,
+                    branchId: bId,
+                    roles: ['POS'],
+                    event: 'HOADON_DA_TT',
+                    payload: { maHoaDon: ketQua.maHoaDon },
+                });
             }
             const payloadEmit = {
                 webhookEventId: ketQua.webhookEventId,
                 nhaCungCap: ketQua.nhaCungCap,
                 maHoaDon: ketQua.maHoaDon,
+                branchId: bId,
                 tenBan: ketQua.hoaDon?.ban?.map((b) => b.tenBan).join(', ') || 'Mang đi',
                 soTienNhan: ketQua.soTienNhan,
                 tienChuyenThua: ketQua.tienChuyenThua || 0,
@@ -726,13 +879,37 @@ async function xuLyBienDongSoDuVietQR({
                 diemCong: ketQua.diemCong,
                 hoaDon: ketQua.hoaDon,
             };
-            io.to(roomTen(tId, 'thungan')).to(roomTen(tId, 'phucvu')).emit('VIETQR_DA_NHAN', payloadEmit);
+            emitToBranch(io, {
+                tenantId: tId,
+                branchId: bId,
+                roles: ['POS', 'WAITER'],
+                event: 'VIETQR_DA_NHAN',
+                payload: payloadEmit,
+            });
             if (ketQua.tienChuyenThua > 0) {
-                io.to(roomTen(tId, 'thungan')).emit('payment:vietqr_overpaid', payloadEmit);
+                emitToBranch(io, {
+                    tenantId: tId,
+                    branchId: bId,
+                    roles: ['POS'],
+                    event: 'payment:vietqr_overpaid',
+                    payload: payloadEmit,
+                });
             } else if (ketQua.daHoanTat) {
-                io.to(roomTen(tId, 'thungan')).emit('payment:vietqr_settled', payloadEmit);
+                emitToBranch(io, {
+                    tenantId: tId,
+                    branchId: bId,
+                    roles: ['POS'],
+                    event: 'payment:vietqr_settled',
+                    payload: payloadEmit,
+                });
             } else {
-                io.to(roomTen(tId, 'thungan')).emit('payment:vietqr_partial', payloadEmit);
+                emitToBranch(io, {
+                    tenantId: tId,
+                    branchId: bId,
+                    roles: ['POS'],
+                    event: 'payment:vietqr_partial',
+                    payload: payloadEmit,
+                });
             }
         }
     }
@@ -890,6 +1067,85 @@ app.get('/api/webhooks/vietqr/logs', kiemTraToken, choPhepVaiTro(1), yeuCauTinhN
     }
 });
 
+
+// [Batch 6 — Anti-Fraud] Xác thực mã PIN Quản lý cho thao tác nhạy cảm trên POS (VD: Xóa đơn Offline Queue) + ghi Audit Log
+app.post('/api/pos/verify-manager-pin', kiemTraToken, choPhepVaiTro(1, 2, 3, 4), async (req, res) => {
+    const tenantId = layTenantId(req);
+    const {
+        managerPin = '',
+        maNVDuyet = null,
+        action = 'OFFLINE_QUEUE_ITEM_DELETED',
+        lyDo = 'Xác thực PIN Quản lý thao tác POS nhạy cảm',
+        details = {},
+    } = req.body || {};
+
+    if (!String(managerPin || '').trim()) {
+        return res.status(403).json({
+            ok: false,
+            code: 'CAN_PIN_QUAN_LY',
+            maLoi: 'CAN_PIN_QUAN_LY',
+            message: 'Vui lòng nhập mã PIN Quản lý hoặc Ca trưởng để xác thực thao tác này!',
+        });
+    }
+
+    try {
+        const mgr = await pool.withTenant(tenantId, async (client) => {
+            const verified = await xacThucPinQuanLy(
+                client,
+                tenantId,
+                managerPin,
+                req.ip,
+                maNVDuyet,
+                'order.item.void_approve'
+            );
+            if (!verified) return null;
+
+            const cleanAction = String(action || 'MANAGER_PIN_VERIFIED')
+                .trim()
+                .toUpperCase()
+                .replace(/[^A-Z0-9_]/g, '_')
+                .slice(0, 64) || 'MANAGER_PIN_VERIFIED';
+
+            await ghiAuditLog(client, {
+                tenantId,
+                maNV: req.user.maNV,
+                vaiTro: req.user.vaiTro,
+                nguoiDuyet: verified.maNV,
+                hanhDong: cleanAction,
+                doiTuong: 'POS_SECURITY',
+                maDoiTuong: String(details?.offlineClientId || details?.jobId || req.user.maNV).slice(0, 64),
+                giaTriMoi: {
+                    ...details,
+                    nguoiDuyet: verified.maNV,
+                    tenNguoiDuyet: verified.tenNV,
+                    branchId: req.headers['x-branch-id'] || req.user?.branchId || 'DEFAULT',
+                    timestamp: new Date().toISOString(),
+                },
+                lyDo: String(lyDo || '').trim(),
+                ip: req.ip,
+                batBuoc: true,
+            });
+            return verified;
+        });
+
+        if (!mgr) {
+            return res.status(403).json({
+                ok: false,
+                code: 'INVALID_MANAGER_PIN',
+                maLoi: 'CAN_PIN_QUAN_LY',
+                message: 'Mã PIN Quản lý không đúng hoặc không có quyền duyệt!',
+            });
+        }
+
+        res.json({
+            ok: true,
+            message: `Đã xác thực PIN Quản lý (${mgr.tenNV || mgr.maNV})!`,
+            nguoiDuyet: mgr,
+        });
+    } catch (error) {
+        guiLoi(res, error, 'Lỗi API Xác thực PIN Quản lý:');
+    }
+});
 
 // [P0 Hardware Anti-Fraud] Ghi nhận sự kiện Mở két tiền không bán hàng (No-Sale RJ11 Drawer Kick) vào Audit Log bất biến
 app.post('/api/pos/drawer-kick', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {

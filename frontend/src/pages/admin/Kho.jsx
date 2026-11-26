@@ -1611,7 +1611,7 @@ export default function Kho() {
               📦 Vật tư Đóng gói theo Kênh (Bao bì động Mang đi / Giao hàng)
             </h2>
             <p className="text-xs text-stone-500">
-              Tự động trừ ly nhựa, nắp cầu, ống hút, túi chữ T theo kênh bán (MANG_DI / GIAO_HANG / APP) vào COGS
+              Tự động trừ ly nhựa, nắp cầu, ống hút, túi chữ T theo kênh bán (ALL / MANG_DI / GIAO_HANG / APP_SAN / TAI_QUAN) vào COGS
             </p>
           </div>
           <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-amber-100 text-amber-800">
@@ -1624,9 +1624,11 @@ export default function Kho() {
             onChange={(e) => setPackagingForm((p) => ({ ...p, loaiDonHang: e.target.value }))}
             className="rounded-xl border border-stone-300 px-3 py-2 text-xs font-semibold"
           >
+            <option value="ALL">🌐 Mọi kênh mang đi (ALL)</option>
             <option value="MANG_DI">🛍️ Mang đi (MANG_DI)</option>
             <option value="GIAO_HANG">🛵 Giao hàng (GIAO_HANG)</option>
-            <option value="APP">📱 App Delivery (APP)</option>
+            <option value="APP_SAN">📱 App Delivery (APP_SAN)</option>
+            <option value="TAI_QUAN">☕ Tại quán (TAI_QUAN)</option>
           </select>
           <select
             value={packagingForm.kichThuoc}
@@ -1670,12 +1672,12 @@ export default function Kho() {
         {packagingRules.length > 0 && (
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             {packagingRules.map((r, idx) => (
-              <div key={r.id || idx} className="p-2.5 rounded-xl bg-stone-50 border border-stone-200 text-xs flex justify-between">
+              <div key={`${r.kenhDung || r.loaiDonHang || 'ALL'}_${r.kichThuoc}_${r.maNL}_${idx}`} className="p-2.5 rounded-xl bg-stone-50 border border-stone-200 text-xs flex justify-between">
                 <span className="font-bold text-stone-800">
-                  {r.loaiDonHang || r.loaidonhang} • Size {r.kichThuoc || r.kichthuoc}
+                  {r.kenhDung || r.loaiDonHang || r.loaidonhang || 'ALL'} • Size {r.kichThuoc || r.kichthuoc}
                 </span>
                 <span className="text-amber-800 font-extrabold">
-                  {r.tenNL || r.manl} × {r.soLuongMoiLy || r.soluongmoily}
+                  {r.tenNL || r.manl} × {r.soLuongMoiLy ?? r.soLuongTieuHao ?? r.soluongmoily}
                 </span>
               </div>
             ))}

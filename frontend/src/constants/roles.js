@@ -24,4 +24,5 @@ export const ROUTE_ROLES = {
   '/pos': [4, 1, 3], // Cho phép cả Thu ngân, Quản lý và Phục vụ truy cập POS
   '/barista': [2, 1], // Cho phép cả Barista và Quản lý giám sát KDS
   '/waiter': [3, 1],
+  '/stocktake': [1, 2, 4], // Kiểm kê mù 60s cho Quản lý, Pha chế và Thu ngân (tách khỏi /admin/kho tài chính)
 }

@@ -30,7 +30,14 @@ const CONFIG_PATH = process.env.PRINT_BRIDGE_CONFIG_PATH || path.join(__dirname,
 const LAN_ORDERS_PATH = path.join(__dirname, 'lan-orders.json');
 const SPOOL_PATH = process.env.PRINT_SPOOL_PATH || path.join(__dirname, 'spool-queue.json');
 
-const LOCAL_LOOPBACK_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
+const LOCAL_LOOPBACK_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+
+// Danh sách Origin production mặc định (chỉ mở cho HTTPS Vercel & domain chính thức; luôn chặn origin lạ)
+const DEFAULT_ALLOWED_ORIGINS = [
+    'https://*.vercel.app',
+    'https://cafepos.vn',
+    'https://*.cafepos.vn',
+];
 
 function parseAllowedOrigins(raw) {
     if (Array.isArray(raw)) {
@@ -40,6 +47,49 @@ function parseAllowedOrigins(raw) {
         .split(',')
         .map((o) => o.trim().replace(/\/+$/, ''))
         .filter(Boolean);
+}
+
+/**
+ * Kiểm tra Origin có khớp mẫu allowlist hay không:
+ * - Hỗ trợ exact origin: `https://pos.quancafe.vn`, `https://my-cafe.vercel.app:443`
+ * - Hỗ trợ wildcard subdomain an toàn: `https://*.vercel.app`, `https://*.cafepos.vn`
+ * - Tuyệt đối KHÔNG chấp nhận wildcard mở toang `*` hay suffix giả mạo (`https://evilvercel.app`)
+ */
+function matchOriginPattern(origin, pattern) {
+    const cleanOrigin = String(origin || '').trim().replace(/\/+$/, '');
+    const cleanPattern = String(pattern || '').trim().replace(/\/+$/, '');
+    if (!cleanOrigin || !cleanPattern || cleanPattern === '*') return false;
+
+    let originUrl;
+    try {
+        originUrl = new URL(cleanOrigin);
+    } catch {
+        return false;
+    }
+    if (originUrl.protocol !== 'http:' && originUrl.protocol !== 'https:') return false;
+    if (originUrl.origin.toLowerCase() !== cleanOrigin.toLowerCase()) return false;
+
+    const wildcardMatch = cleanPattern.match(/^(https?):\/\/\*\.([a-z0-9-]+(?:\.[a-z0-9-]+)+)(?::(\d+))?$/i);
+    if (wildcardMatch) {
+        const expectedProto = `${wildcardMatch[1].toLowerCase()}:`;
+        const baseDomain = wildcardMatch[2].toLowerCase();
+        const expectedPort = wildcardMatch[3] || '';
+        const host = originUrl.hostname.toLowerCase();
+        if (originUrl.protocol !== expectedProto) return false;
+        if (originUrl.port !== expectedPort) return false;
+        if (!/^[a-z0-9.-]+$/.test(host)) return false;
+        const suffix = `.${baseDomain}`;
+        return host.endsWith(suffix) && host.length > suffix.length;
+    }
+
+    let patternUrl;
+    try {
+        patternUrl = new URL(cleanPattern);
+    } catch {
+        return false;
+    }
+    if (patternUrl.protocol !== 'http:' && patternUrl.protocol !== 'https:') return false;
+    return originUrl.origin.toLowerCase() === patternUrl.origin.toLowerCase();
 }
 
 const DEFAULT_CONFIG = {
@@ -84,7 +134,12 @@ const DEFAULT_CONFIG = {
     },
     security: {
         apiToken: process.env.PRINT_BRIDGE_TOKEN || '',
-        allowedOrigins: parseAllowedOrigins(process.env.PRINT_BRIDGE_ALLOWED_ORIGINS),
+        allowedOrigins: [
+            ...new Set([
+                ...DEFAULT_ALLOWED_ORIGINS,
+                ...parseAllowedOrigins(process.env.PRINT_BRIDGE_ALLOWED_ORIGINS),
+            ]),
+        ],
     },
 };
 
@@ -110,7 +165,9 @@ function loadConfig() {
                     ).trim(),
                     allowedOrigins: [
                         ...new Set([
-                            ...parseAllowedOrigins(raw.security?.allowedOrigins),
+                            ...(Array.isArray(raw.security?.allowedOrigins)
+                                ? parseAllowedOrigins(raw.security.allowedOrigins)
+                                : DEFAULT_ALLOWED_ORIGINS),
                             ...parseAllowedOrigins(process.env.PRINT_BRIDGE_ALLOWED_ORIGINS),
                         ]),
                     ],
@@ -329,7 +386,7 @@ function isOriginAllowed(origin) {
         ...parseAllowedOrigins(process.env.PRINT_BRIDGE_ALLOWED_ORIGINS),
         ...parseAllowedOrigins(bridgeConfig.security?.allowedOrigins),
     ];
-    return configured.some((allowed) => allowed.toLowerCase() === clean.toLowerCase());
+    return configured.some((pattern) => matchOriginPattern(clean, pattern));
 }
 
 function buildCorsHeaders(req) {
@@ -412,10 +469,14 @@ function ensureJobBuffers(job, { failoverHeader = null } = {}) {
     }
     if (job.kind === 'Z_REPORT') {
         const built = buildZReportK80({
+            doiSoat: body.doiSoat || body.ca || {},
             tenQuan: body.tenQuan || 'QUAN CA PHE POS',
-            ca: body.ca || {},
+            diaChi: body.diaChi || '',
             nguoiIn: body.nguoiIn || '',
+            laBanSao: Boolean(body.laBanSao),
+            failoverHeader,
             autoCut: bridgeConfig.receiptPrinter.autoCut !== false,
+            kickDrawer: Boolean(body.kickDrawer),
         });
         job._buffer = built.buffer;
         job.previewText = built.previewText;
@@ -626,7 +687,7 @@ async function enqueuePrintJob(kind, body = {}, { sync = false } = {}) {
     const job = {
         id: jobSeq++,
         kind: cleanKind,
-        maHoaDon: body.hoaDon?.maHoaDon || body.ca?.maCaThuNgan || 'TEST',
+        maHoaDon: body.hoaDon?.maHoaDon || body.doiSoat?.maCaThuNgan || body.ca?.maCaThuNgan || 'TEST',
         label: '',
         status: 'QUEUED',
         attempts: 0,
@@ -1108,4 +1169,9 @@ module.exports = {
     executeJob,
     resumePausedSpoolJobs,
     printJobs,
+    isOriginAllowed,
+    matchOriginPattern,
+    buildCorsHeaders,
+    parseAllowedOrigins,
+    DEFAULT_ALLOWED_ORIGINS,
 };

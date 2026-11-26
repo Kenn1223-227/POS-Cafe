@@ -114,14 +114,28 @@ jobs:
           node --check db.js
           find src/core src/domains -type f -name '*.js' -print0 | xargs -0 -n1 node --check
 
-      - name: Run DB migrations (initial run 001 -> 038)
+      - name: Run DB migrations (all db/migrations/ in ascending order)
         run: npm run db:migrate:test
 
-      - name: Verify DB migrations idempotency (second run 001 -> 038)
+      - name: Verify DB migrations idempotency (second run all db/migrations/)
         run: npm run db:migrate:test
+
+      - name: Run Unit Test Suite
+        run: npm run test:unit
 
       - name: Run Test Wave 1 (Core & RLS Guard)
         run: npm run test:wave1
+
+      - name: Run P0 Integration E2E Suite (Express + app_runtime FORCE RLS + Socket.IO)
+        run: npm run test:p0-e2e
+
+      - name: Run P1 Pilot Ops Integration Suite (Blind Stocktake & Channel Packaging BOM)
+        run: npm run test:p1-ops
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm run build
 
       - name: Run Test Wave 2 (Ops & Idempotency)
         run: npm run test:wave2
@@ -137,8 +151,3 @@ jobs:
 
       - name: Run Test Wave 4b (Scale 500, Business Day, Replica & Monolith Guard)
         run: npm run test:wave4b
-
-      - name: Build frontend
-        run: |
-          cd frontend
-          npm run build

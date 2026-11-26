@@ -45,7 +45,8 @@ function calculateMixedRateVietnamTax({
     serviceChargeVatRate = 8,
     taxMode = 'EXCLUDED',
 } = {}) {
-    const mode = String(taxMode || 'EXCLUDED').toUpperCase() === 'INCLUDED' ? 'INCLUDED' : 'EXCLUDED';
+    const rawMode = String(taxMode || 'EXCLUDED').trim().toUpperCase();
+    const mode = rawMode === 'NONE' ? 'NONE' : rawMode === 'INCLUDED' ? 'INCLUDED' : 'EXCLUDED';
     const normalizedItems = (Array.isArray(items) ? items : []).map((it, idx) => {
         const qty = Math.max(0, Number(it?.qty ?? it?.soLuong ?? 1));
         const unitPrice = Math.max(0, Number(it?.unitPrice ?? it?.donGia ?? 0));
@@ -132,7 +133,7 @@ function calculateMixedRateVietnamTax({
 
         let taxableBase = 0;
         let vatAmount = 0;
-        if (it.isKct || it.vatRate === 0) {
+        if (mode === 'NONE' || it.isKct || it.vatRate === 0) {
             taxableBase = it.netAmount;
             vatAmount = 0;
         } else if (mode === 'INCLUDED') {
@@ -159,7 +160,7 @@ function calculateMixedRateVietnamTax({
         .map((b) => {
             let taxableBase = 0;
             let vatAmount = 0;
-            if (b.isKct || b.vatRate === 0) {
+            if (mode === 'NONE' || b.isKct || b.vatRate === 0) {
                 taxableBase = b.rawSum;
                 vatAmount = 0;
             } else if (mode === 'INCLUDED') {

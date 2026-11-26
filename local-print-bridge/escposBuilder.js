@@ -360,7 +360,7 @@ function buildReceiptK80({
         const refUrl = String(plgReferralUrl || 'https://cafepos.vn/onboarding').trim();
         pushLine(LINE);
         pushBytes(ESC, 0x45, 0x01);
-        pushLine('Phan mem CafePOS - MIEN PHI 400 don/thang');
+        pushLine('Phan mem CafePOS - MIEN PHI 350 don/thang');
         pushBytes(ESC, 0x45, 0x00);
         pushLine('Quet QR dung thu 30s cho chu quan:');
         chunks.push(buildEscPosQrCodeBuffer(refUrl, 4));
@@ -386,10 +386,12 @@ function buildReceiptK80({
 // Dựng Buffer nhị phân ESC/POS + bản xem trước cho Phiếu Chốt Ca Nhiệt (Z-Report K80)
 function buildZReportK80({
     doiSoat,
+    ca,
     tenQuan = 'QUAN CA PHE POS',
     diaChi = '',
     nguoiIn = '',
     laBanSao = false,
+    failoverHeader = null,
     autoCut = true,
     kickDrawer = false,
 }) {
@@ -415,6 +417,13 @@ function buildZReportK80({
     pushBytes(ESC, 0x40);
     if (kickDrawer) chunks.push(buildCashDrawerKickBuffer());
 
+    if (failoverHeader) {
+        pushBytes(ESC, 0x61, 0x01);
+        pushBytes(ESC, 0x45, 0x01);
+        pushLine(failoverHeader);
+        pushBytes(ESC, 0x45, 0x00);
+    }
+
     // Header
     pushBytes(ESC, 0x61, 0x01);
     pushBytes(ESC, 0x45, 0x01);
@@ -429,7 +438,7 @@ function buildZReportK80({
 
     // Thông tin ca
     pushBytes(ESC, 0x61, 0x00);
-    const ds = doiSoat || {};
+    const ds = doiSoat || ca || {};
     const dt = ds.doanhThu || {};
     const ht = ds.hoanTien || {};
     const moLuc = ds.thoiGianMoCa ? new Date(ds.thoiGianMoCa).toLocaleString('vi-VN') : '-';
@@ -437,6 +446,9 @@ function buildZReportK80({
         ? new Date(ds.thoiGianDongCa).toLocaleString('vi-VN')
         : new Date().toLocaleString('vi-VN');
 
+    const maZReport =
+        ds.maZReport || (ds.soZReport ? `Z-${String(ds.soZReport).padStart(4, '0')}` : null);
+    if (maZReport) pushLine(`So Z-Report: ${maZReport}`);
     pushLine(`Ma ca:    #${ds.maCaThuNgan || '-'}`);
     pushLine(`Thu ngan: ${ds.tenNV || '-'}`);
     pushLine(`Mo ca:    ${moLuc}`);
@@ -445,15 +457,30 @@ function buildZReportK80({
     pushLine(LINE);
 
     // 1. Doanh thu theo PTTT
+    const dtTienMat = Number(dt.tienMat || 0);
+    const dtChuyenKhoan = Number(dt.chuyenKhoan || 0);
+    const dtThe = Number(dt.the || 0);
+    const dtVoucher = Number(dt.voucher || 0);
+    const dtViKhach = Number(dt.viKhach || 0);
+    const dtViDienTu = Number(dt.viDienTu || 0);
+    const dtSanGiaoHang = Number(dt.sanGiaoHang || 0);
+    const dtTong =
+        dt.tong !== undefined && dt.tong !== null
+            ? Number(dt.tong)
+            : dtTienMat + dtChuyenKhoan + dtThe + dtVoucher + dtViKhach + dtViDienTu + dtSanGiaoHang;
+
     pushBytes(ESC, 0x45, 0x01);
     pushLine('1. DOANH THU TRONG CA');
     pushBytes(ESC, 0x45, 0x00);
-    pushLine(padTwoCols('  Tien mat:', dinhDangTien(dt.tienMat)));
-    pushLine(padTwoCols('  Chuyen khoan / VietQR:', dinhDangTien(dt.chuyenKhoan)));
-    if (Number(dt.the) > 0) pushLine(padTwoCols('  The ngan hang:', dinhDangTien(dt.the)));
-    if (Number(dt.voucher) > 0) pushLine(padTwoCols('  Voucher / Khac:', dinhDangTien(dt.voucher)));
+    pushLine(padTwoCols('  Tien mat:', dinhDangTien(dtTienMat)));
+    pushLine(padTwoCols('  Chuyen khoan / VietQR:', dinhDangTien(dtChuyenKhoan)));
+    if (dtThe > 0) pushLine(padTwoCols('  The ngan hang:', dinhDangTien(dtThe)));
+    if (dtVoucher > 0) pushLine(padTwoCols('  Voucher / Khac:', dinhDangTien(dtVoucher)));
+    if (dtViKhach > 0) pushLine(padTwoCols('  Vi thanh vien:', dinhDangTien(dtViKhach)));
+    if (dtViDienTu > 0) pushLine(padTwoCols('  Vi dien tu:', dinhDangTien(dtViDienTu)));
+    if (dtSanGiaoHang > 0) pushLine(padTwoCols('  San giao hang:', dinhDangTien(dtSanGiaoHang)));
     pushBytes(ESC, 0x45, 0x01);
-    pushLine(padTwoCols('  TONG DOANH THU:', dinhDangTien(dt.tong)));
+    pushLine(padTwoCols('  TONG DOANH THU:', dinhDangTien(dtTong)));
     pushBytes(ESC, 0x45, 0x00);
 
     if (Number(ht.tong) > 0) {
@@ -461,25 +488,32 @@ function buildZReportK80({
         if (Number(ht.tienMat) > 0) {
             pushLine(padTwoCols('    - Hoan tien mat:', '-' + dinhDangTien(ht.tienMat)));
         }
-        const hoanKhac = Number(ht.chuyenKhoan || 0) + Number(ht.the || 0) + Number(ht.voucher || 0);
+        const hoanKhac =
+            Number(ht.chuyenKhoan || 0) +
+            Number(ht.the || 0) +
+            Number(ht.voucher || 0) +
+            Number(ht.viKhach || 0);
         if (hoanKhac > 0) {
-            pushLine(padTwoCols('    - Hoan CK / The:', '-' + dinhDangTien(hoanKhac)));
+            pushLine(padTwoCols('    - Hoan CK / The / Vi:', '-' + dinhDangTien(hoanKhac)));
         }
     }
     pushLine(LINE);
 
-    // 2. Đối soát két tiền mặt (tách riêng Safe Drop / Rút két!)
+    // 2. Đối soát két tiền mặt (tách riêng Safe Drop / Rút két & Thối CK dư!)
     pushBytes(ESC, 0x45, 0x01);
     pushLine('2. DOI SOAT KET TIEN MAT');
     pushBytes(ESC, 0x45, 0x00);
     pushLine(padTwoCols('  (+) Tien mat dau ca:', dinhDangTien(ds.tienMatDauCa)));
-    pushLine(padTwoCols('  (+) Doanh thu tien mat:', dinhDangTien(dt.tienMat)));
+    pushLine(padTwoCols('  (+) Doanh thu tien mat:', dinhDangTien(dtTienMat)));
     if (Number(ht.tienMat) > 0) {
         pushLine(padTwoCols('  (-) Hoan tien mat sau TT:', '-' + dinhDangTien(ht.tienMat)));
     }
     pushLine(padTwoCols('  (+) Thu lat vat (Pay-In):', dinhDangTien(ds.thuLatVat)));
     pushLine(padTwoCols('  (-) Chi lat vat (Pay-Out):', '-' + dinhDangTien(ds.chiLatVat)));
     pushLine(padTwoCols('  (-) Rut ket an toan (Safe Drop):', '-' + dinhDangTien(ds.rutKet)));
+    if (Number(ds.thoiCkDu) > 0) {
+        pushLine(padTwoCols('  (-) Thoi CK du (tien mat):', '-' + dinhDangTien(ds.thoiCkDu)));
+    }
     pushLine(LINE);
 
     pushBytes(ESC, 0x45, 0x01);
@@ -489,6 +523,12 @@ function buildZReportK80({
     pushLine(padTwoCols('CHENH LECH:', fmtSigned(ds.chenhLech)));
     pushBytes(GS, 0x21, 0x00);
     pushBytes(ESC, 0x45, 0x00);
+    if (Number(ds.tienGiuLaiKet) > 0) {
+        pushLine(padTwoCols('  Tien giu lai ket ca sau:', dinhDangTien(ds.tienGiuLaiKet)));
+    }
+    if (Number(ds.tienNopVeChuQuan) > 0) {
+        pushLine(padTwoCols('  Tien nop ve chu quan:', dinhDangTien(ds.tienNopVeChuQuan)));
+    }
     if (ds.trangThai) {
         pushLine(`Ket luan: ${ds.trangThai}`);
     }

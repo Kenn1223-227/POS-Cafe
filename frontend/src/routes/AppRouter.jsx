@@ -10,6 +10,7 @@ import PosPage from '../pages/pos/PosPage'
 import CfdPage from '../pages/pos/CfdPage'
 import BaristaPage from '../pages/barista/BaristaPage'
 import WaiterPage from '../pages/waiter/WaiterPage'
+import BlindStocktakePage from '../pages/stocktake/BlindStocktakePage'
 import AdminLayout from '../layouts/AdminLayout'
 import QrOrderPage from '../pages/public/QrOrderPage'
 
@@ -57,6 +58,15 @@ export default function AppRouter() {
         element={
           <ProtectedRoute allowedRoles={ROUTE_ROLES['/waiter']}>
             <WaiterPage />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/stocktake"
+        element={
+          <ProtectedRoute allowedRoles={ROUTE_ROLES['/stocktake']}>
+            <BlindStocktakePage />
           </ProtectedRoute>
         }
       />

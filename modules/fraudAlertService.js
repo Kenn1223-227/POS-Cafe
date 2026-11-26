@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { maskPhoneForRole } = require('./vnTaxAndEInvoiceService');
 
 const CACHE_TTL_MS = 30 * 1000;
 const HTTP_TIMEOUT_MS = 4500;
@@ -23,6 +24,24 @@ const ALERT_EVENT_META = [
     {
         key: 'ITEM_VOID_WASTE',
         label: '🗑️ Hủy món đã pha chế (Hao hụt kho)',
+        severity: 'HIGH',
+        defaultEnabled: true,
+    },
+    {
+        key: 'ITEM_VOID_RETURN_STOCK',
+        label: '⚠️ Hủy món sau in tạm tính (Hoàn kho)',
+        severity: 'HIGH',
+        defaultEnabled: true,
+    },
+    {
+        key: 'ITEM_SWAP_AFTER_PREBILL',
+        label: '🔄 Đổi món sau khi đã in tạm tính (Pre-bill)',
+        severity: 'HIGH',
+        defaultEnabled: true,
+    },
+    {
+        key: 'ORDER_PARTIAL_REFUND',
+        label: '↩️ Hoàn tiền một phần hóa đơn sau thanh toán',
         severity: 'HIGH',
         defaultEnabled: true,
     },
@@ -274,8 +293,9 @@ function buildDetailLines(eventKey, audit) {
     } else if (eventKey === 'DRAWER_NO_SALE_KICK') {
         lines.push('Thao tác: Mở ngăn kéo tiền mặt ngoài giao dịch bán hàng (No-Sale)');
     } else if (eventKey === 'LOYALTY_HARVESTING_SUSPECTED') {
+        const maskedPhone = gm.soDienThoai ? maskPhoneForRole(gm.soDienThoai, 4) : '-';
         lines.push(
-            `Khách hàng: ${gm.tenKH || gm.maKH || '-'} (${gm.soDienThoai || '-'}) đã tích điểm ${gm.soDonTienMatTrongCa || 4} đơn TIỀN MẶT trong cùng Ca #${gm.maCaThuNgan || '-'}`
+            `Khách hàng: ${gm.tenKH || gm.maKH || '-'} (${maskedPhone}) đã tích điểm ${gm.soDonTienMatTrongCa || 4} đơn TIỀN MẶT trong cùng Ca #${gm.maCaThuNgan || '-'}`
         );
     } else if (eventKey === 'DISCOUNT_VELOCITY_ABUSE') {
         lines.push(
@@ -447,8 +467,15 @@ async function dispatchFraudAlertFromAudit(pool, audit) {
         let tenNV = audit.tenNV || null;
         if (!tenNV && audit.maNV && audit.maNV !== 'SYSTEM' && audit.maNV !== 'VIETQR_BOT') {
             try {
-                const nvRes = await pool.query(`SELECT TenNV FROM NhanVien WHERE MaNV = $1 LIMIT 1`, [audit.maNV]);
-                tenNV = nvRes.rows[0]?.tennv || null;
+                if (typeof pool?.withTenant === 'function') {
+                    const nvRes = await pool.withTenant(tenantId, (client) =>
+                        client.query(`SELECT TenNV FROM NhanVien WHERE MaNV = $1 AND COALESCE(TenantId, 'DEFAULT') = $2 LIMIT 1`, [audit.maNV, tenantId])
+                    );
+                    tenNV = nvRes.rows[0]?.tennv || null;
+                } else {
+                    const nvRes = await pool.query(`SELECT TenNV FROM NhanVien WHERE MaNV = $1 LIMIT 1`, [audit.maNV]);
+                    tenNV = nvRes.rows[0]?.tennv || null;
+                }
             } catch {
                 // ignore
             }
@@ -659,7 +686,7 @@ async function kiemTraCanhBaoTanSuatGianLan(
                         giaTriMoi: {
                             maKH,
                             tenKH: khCashRes.rows[0]?.ten_kh || null,
-                            soDienThoai: khCashRes.rows[0]?.sdt || null,
+                            soDienThoai: maskPhoneForRole(khCashRes.rows[0]?.sdt || null, 4),
                             maCaThuNgan,
                             maHoaDonMoiNhat: maHoaDon,
                             soDonTienMatTrongCa: soDon,

@@ -20,11 +20,13 @@ const {
     guiLoi,
     choPhepVaiTro,
     layTenantId,
-    roomTen,
     lam3,
     docKhoaIdempotency,
     detectOfflineClockDrift,
 } = require('../../core/auditAndSecurity');
+const {
+    emitToBranch,
+} = require('../../core/socketRooms');
 const {
     chiaDeuTienVND,
     capSoThuTuNgayKhongTrung,
@@ -510,11 +512,31 @@ async function handleCreateOrAppendOrder(req, res) {
         }
         if (Array.isArray(countdownUpdates) && countdownUpdates.length > 0) {
             for (const cd of countdownUpdates) {
-                io.to(roomTen(tId, 'thungan')).to(roomTen(tId, 'phucvu')).to(roomTen(tId, 'barista')).emit('THUC_DON_THAY_DOI', cd);
-                io.to(roomBranchPos(tId, resolvedBranchId)).emit('menu:86_updated', { type: 'COUNTDOWN', product: cd });
+                emitToBranch(io, {
+                    tenantId: tId,
+                    branchId: resolvedBranchId,
+                    roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+                    event: 'THUC_DON_THAY_DOI',
+                    payload: cd,
+                });
+                emitToBranch(io, {
+                    tenantId: tId,
+                    branchId: resolvedBranchId,
+                    roles: ['POS', 'WAITER', 'KDS'],
+                    event: 'menu:86_updated',
+                    payload: { type: 'COUNTDOWN', product: cd },
+                });
             }
         }
-        if (maBan) io.to(roomTen(tId, 'thungan')).to(roomTen(tId, 'phucvu')).emit('BAN_THAY_DOI', { maBan, trangThai: 2 });
+        if (maBan) {
+            emitToBranch(io, {
+                tenantId: tId,
+                branchId: resolvedBranchId,
+                roles: ['POS', 'WAITER'],
+                event: 'BAN_THAY_DOI',
+                payload: { maBan, trangThai: 2 },
+            });
+        }
 
         res.status(201).json(responsePayload);
     } catch (error) {
@@ -815,10 +837,29 @@ app.post('/api/order/quick-checkout', kiemTraToken, choPhepVaiTro(1, 4), kiemTra
         }
         if (Array.isArray(ketQua.countdownUpdates) && ketQua.countdownUpdates.length > 0) {
             for (const cd of ketQua.countdownUpdates) {
-                io.to(roomTen(tId, 'thungan')).to(roomTen(tId, 'phucvu')).to(roomTen(tId, 'barista')).emit('THUC_DON_THAY_DOI', cd);
+                emitToBranch(io, {
+                    tenantId: tId,
+                    branchId: resolvedBranchId,
+                    roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+                    event: 'THUC_DON_THAY_DOI',
+                    payload: cd,
+                });
+                emitToBranch(io, {
+                    tenantId: tId,
+                    branchId: resolvedBranchId,
+                    roles: ['POS', 'WAITER', 'KDS'],
+                    event: 'menu:86_updated',
+                    payload: { type: 'COUNTDOWN', product: cd },
+                });
             }
         }
-        io.to(roomTen(tId, 'thungan')).emit('HOADON_DA_TT', { maHoaDon: ketQua.hoaDon.maHoaDon });
+        emitToBranch(io, {
+            tenantId: tId,
+            branchId: resolvedBranchId,
+            roles: ['POS'],
+            event: 'HOADON_DA_TT',
+            payload: { maHoaDon: ketQua.hoaDon.maHoaDon },
+        });
         void kiemTraCanhBaoTanSuatGianLan(pool, {
             tenantId: tId,
             maCaThuNgan: ketQua.hoaDon?.maCaThuNgan || null,
@@ -1136,7 +1177,7 @@ app.post('/api/order/huy-mon', kiemTraToken, choPhepVaiTro(1, 4), async (req, re
             // Kiểm tra: tổng tiền mới không được tụt thấp hơn số tiền khách đã thanh toán trước (Partial Payment)
             const hdPostVoid = await layHoaDonChiTiet(client, item.mahoadon);
             const daThanhToanMoi = Number(hdPostVoid?.daThanhToan || 0);
-            const tongPhaiTraMoi = Number(recalc?.totals?.tongTienThanhToan ?? hdPostVoid?.tongTienThanhToan ?? 0);
+            const tongPhaiTraMoi = Number(recalc?.totals?.tongPhaiTra ?? hdPostVoid?.tongPhaiTra ?? 0);
             if (tongPhaiTraMoi < daThanhToanMoi) {
                 throw new LoiNghiepVu(
                     409,
@@ -1252,12 +1293,17 @@ app.post('/api/order/huy-mon', kiemTraToken, choPhepVaiTro(1, 4), async (req, re
             legacyWaiterEvent: 'MON_BI_HUY',
             legacyPosEvent: 'MON_BI_HUY',
         });
-        io.to(roomTen(tenantId, 'barista')).emit('MON_BI_HUY', ketQua.voidPayload);
         if (ketQua.autoVoidedOrder) {
-            io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', {
-                loai: 'ORDER_AUTO_VOIDED',
-                maHoaDon: ketQua.maHoaDon,
-                freedTables: ketQua.freedTables || [],
+            emitToBranch(io, {
+                tenantId,
+                branchId: ketQua.branchId,
+                roles: ['POS', 'WAITER'],
+                event: 'BAN_THAY_DOI',
+                payload: {
+                    loai: 'ORDER_AUTO_VOIDED',
+                    maHoaDon: ketQua.maHoaDon,
+                    freedTables: ketQua.freedTables || [],
+                },
             });
         }
 
@@ -1633,6 +1679,7 @@ app.post('/api/order/:maHoaDon/hoan-tien', kiemTraToken, choPhepVaiTro(1, 4), as
 
             return {
                 maHoaDon,
+                branchId: normalizeBranchId(ca?.branchid || req.user?.branchId || 'DEFAULT'),
                 laHoanMotPhan,
                 soMonHoan: targetItems.length,
                 tongHoan,
@@ -1643,13 +1690,25 @@ app.post('/api/order/:maHoaDon/hoan-tien', kiemTraToken, choPhepVaiTro(1, 4), as
             };
         }, tenantId);
 
-        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'barista')).to(roomTen(tenantId, 'phucvu')).emit('HOADON_DA_HOAN', {
-            maHoaDon: ketQua.maHoaDon,
-            laHoanMotPhan: ketQua.laHoanMotPhan,
-            tongHoan: ketQua.tongHoan,
-            phuongThucHoan: ketQua.phuongThucHoan,
+        emitToBranch(io, {
+            tenantId,
+            branchId: ketQua.branchId,
+            roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+            event: 'HOADON_DA_HOAN',
+            payload: {
+                maHoaDon: ketQua.maHoaDon,
+                laHoanMotPhan: ketQua.laHoanMotPhan,
+                tongHoan: ketQua.tongHoan,
+                phuongThucHoan: ketQua.phuongThucHoan,
+            },
         });
-        io.to(roomTen(tenantId, 'thungan')).emit('CA_THAY_DOI', { trangThai: 'CAP_NHAT' });
+        emitToBranch(io, {
+            tenantId,
+            branchId: ketQua.branchId,
+            roles: ['POS'],
+            event: 'CA_THAY_DOI',
+            payload: { trangThai: 'CAP_NHAT' },
+        });
 
         res.json({
             message: ketQua.laHoanMotPhan
@@ -1783,9 +1842,27 @@ app.post('/api/ban/chuyen', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, re
             };
         }, tenantId);
 
-        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', { maBan: fromMaBan, trangThai: 3 });
-        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', { maBan: toMaBan, trangThai: 2 });
-        io.to(roomTen(tenantId, 'barista')).to(roomTen(tenantId, 'phucvu')).to(roomTen(tenantId, 'thungan')).emit('BAN_CHUYEN', ketQua);
+        emitToBranch(io, {
+            tenantId,
+            branchId: ketQua.branchId,
+            roles: ['POS', 'WAITER'],
+            event: 'BAN_THAY_DOI',
+            payload: { maBan: fromMaBan, trangThai: 3 },
+        });
+        emitToBranch(io, {
+            tenantId,
+            branchId: ketQua.branchId,
+            roles: ['POS', 'WAITER'],
+            event: 'BAN_THAY_DOI',
+            payload: { maBan: toMaBan, trangThai: 2 },
+        });
+        emitToBranch(io, {
+            tenantId,
+            branchId: ketQua.branchId,
+            roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+            event: 'BAN_CHUYEN',
+            payload: ketQua,
+        });
         emitScopedKdsEvent(io, {
             tenantId,
             branchId: ketQua.branchId,
@@ -2004,18 +2081,37 @@ app.post('/api/ban/gop', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) 
             };
         }, tenantId);
 
+        const mergeBranchId = ketQua.branchId || ketQua.hoaDon?.branchId || req.user?.branchId || 'DEFAULT';
         if (ketQua.mode === 'EXPAND_EMPTY_TABLE') {
-            io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', { maBan: toMaBan, trangThai: 2 });
+            emitToBranch(io, {
+                tenantId,
+                branchId: mergeBranchId,
+                roles: ['POS', 'WAITER'],
+                event: 'BAN_THAY_DOI',
+                payload: { maBan: toMaBan, trangThai: 2 },
+            });
         } else {
             if (!keepTable) {
-                io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', { maBan: fromMaBan, trangThai: 1 });
+                emitToBranch(io, {
+                    tenantId,
+                    branchId: mergeBranchId,
+                    roles: ['POS', 'WAITER'],
+                    event: 'BAN_THAY_DOI',
+                    payload: { maBan: fromMaBan, trangThai: 1 },
+                });
             }
-            io.to(roomTen(tenantId, 'barista')).to(roomTen(tenantId, 'phucvu')).to(roomTen(tenantId, 'thungan')).emit('BAN_CHUYEN', {
-                maHoaDon: ketQua.hdDich,
-                fromMaBan,
-                toMaBan,
-                tenBanCu: ketQua.tenBanCu,
-                tenBanMoi: ketQua.tenBanDich,
+            emitToBranch(io, {
+                tenantId,
+                branchId: mergeBranchId,
+                roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+                event: 'BAN_CHUYEN',
+                payload: {
+                    maHoaDon: ketQua.hdDich,
+                    fromMaBan,
+                    toMaBan,
+                    tenBanCu: ketQua.tenBanCu,
+                    tenBanMoi: ketQua.tenBanDich,
+                },
             });
             emitScopedKdsEvent(io, {
                 tenantId,
@@ -2082,15 +2178,23 @@ app.put('/api/ban/:maBan/trangthai', kiemTraToken, choPhepVaiTro(1, 3, 4), async
                 );
             }
             const upd = await client.query(
-                `UPDATE Ban SET TrangThai = $2 WHERE MaBan = $1 AND COALESCE(TenantId, 'DEFAULT') = $3 RETURNING MaBan, TenBan, TrangThai`,
+                `UPDATE Ban SET TrangThai = $2
+                  WHERE MaBan = $1 AND COALESCE(TenantId, 'DEFAULT') = $3
+                  RETURNING MaBan, TenBan, TrangThai, COALESCE(NULLIF(to_jsonb(Ban)->>'branchid', ''), 'DEFAULT') AS BranchId`,
                 [maBan, trangThai, tenantId]
             );
             return upd.rows[0];
         }, tenantId);
 
-        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', {
-            maBan: ban.maban,
-            trangThai: Number(ban.trangthai),
+        emitToBranch(io, {
+            tenantId,
+            branchId: ban.branchid || req.user?.branchId || 'DEFAULT',
+            roles: ['POS', 'WAITER'],
+            event: 'BAN_THAY_DOI',
+            payload: {
+                maBan: ban.maban,
+                trangThai: Number(ban.trangthai),
+            },
         });
 
         const nhan = trangThai === 3 ? '🧹 Chờ dọn' : trangThai === 4 ? '📅 Đã đặt trước' : '✨ Trống sẵn sàng';
@@ -2608,16 +2712,29 @@ async function handleSplitOrder(req, res) {
             };
         }, tenantId);
 
+        const splitBranchId = ketQua.hoaDonMoi?.branchId || ketQua.hoaDonGoc?.branchId || req.user?.branchId || 'DEFAULT';
         if (toMaBan) {
-            io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', { maBan: toMaBan, trangThai: 2 });
+            emitToBranch(io, {
+                tenantId,
+                branchId: splitBranchId,
+                roles: ['POS', 'WAITER'],
+                event: 'BAN_THAY_DOI',
+                payload: { maBan: toMaBan, trangThai: 2 },
+            });
         }
-        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'barista')).to(roomTen(tenantId, 'phucvu')).emit('BAN_CHUYEN', {
-            maHoaDon: ketQua.maHoaDonMoi,
-            maHoaDonGoc: ketQua.maHoaDonGoc,
-            toMaBan,
-            tenBanCu: ketQua.hoaDonGoc?.tenBan || `HĐ #${ketQua.maHoaDonGoc}`,
-            tenBanMoi: ketQua.hoaDonMoi?.tenBan || (toMaBan || 'Đơn tách Mang đi'),
-            laTachDon: true,
+        emitToBranch(io, {
+            tenantId,
+            branchId: splitBranchId,
+            roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+            event: 'BAN_CHUYEN',
+            payload: {
+                maHoaDon: ketQua.maHoaDonMoi,
+                maHoaDonGoc: ketQua.maHoaDonGoc,
+                toMaBan,
+                tenBanCu: ketQua.hoaDonGoc?.ban?.map((b) => b.tenBan).join(', ') || `HĐ #${ketQua.maHoaDonGoc}`,
+                tenBanMoi: ketQua.hoaDonMoi?.ban?.map((b) => b.tenBan).join(', ') || (toMaBan || 'Đơn tách Mang đi'),
+                laTachDon: true,
+            },
         });
 
         res.status(201).json({
@@ -2645,7 +2762,7 @@ app.get('/api/ban/:maBan/hoadon', kiemTraToken, choPhepVaiTro(1, 3, 4), async (r
             );
             if (ban.rows.length === 0) return { notFound: true };
             const maHoaDon = await layHoaDonMoCuaBan(client, req.params.maBan);
-            return { notFound: false, hoaDon: maHoaDon ? await layHoaDonChiTiet(client, maHoaDon) : null };
+            return { notFound: false, hoaDon: maHoaDon ? await layHoaDonChiTiet(client, maHoaDon, { vaiTro: req.user?.vaiTro }) : null };
         });
         if (out.notFound) return res.status(404).json({ message: 'Không tìm thấy bàn!' });
         res.json({ hoaDon: out.hoaDon });
@@ -2664,7 +2781,7 @@ app.get('/api/hoadon/:maHoaDon', kiemTraToken, choPhepVaiTro(1, 4), async (req, 
                 [req.params.maHoaDon, tenantId]
             );
             if (own.rows.length === 0) return null;
-            return layHoaDonChiTiet(client, req.params.maHoaDon);
+            return layHoaDonChiTiet(client, req.params.maHoaDon, { vaiTro: req.user?.vaiTro });
         });
         if (!hoaDon) return res.status(404).json({ message: 'Không tìm thấy hóa đơn!' });
         res.json({ hoaDon });
@@ -2874,14 +2991,27 @@ app.post('/api/order/thanhtoan', kiemTraToken, choPhepVaiTro(1, 4), kiemTraHanSu
 
         if (!ketQua.trungLap) {
             const tId = layTenantId(req);
+            const payBranchId = ketQua.branchId || ketQua.hoaDon?.branchId || branchId || req.user?.branchId || 'DEFAULT';
             for (const maBan of ketQua.banDaTrong) {
-                io.to(roomTen(tId, 'thungan')).to(roomTen(tId, 'phucvu')).emit('BAN_THAY_DOI', { maBan, trangThai: 3 });
+                emitToBranch(io, {
+                    tenantId: tId,
+                    branchId: payBranchId,
+                    roles: ['POS', 'WAITER'],
+                    event: 'BAN_THAY_DOI',
+                    payload: { maBan, trangThai: 3 },
+                });
             }
             if (ketQua.daHoanTat) {
-                if (ketQua.kdsEmitPlan && typeof ketQua.kdsEmitPlan.emit === 'function') {
-                    ketQua.kdsEmitPlan.emit();
+                if (ketQua.kdsEmitPlan && typeof ketQua.kdsEmitPlan.flush === 'function') {
+                    ketQua.kdsEmitPlan.flush();
                 }
-                io.to(roomTen(tId, 'thungan')).emit('HOADON_DA_TT', { maHoaDon });
+                emitToBranch(io, {
+                    tenantId: tId,
+                    branchId: payBranchId,
+                    roles: ['POS'],
+                    event: 'HOADON_DA_TT',
+                    payload: { maHoaDon },
+                });
                 void kiemTraCanhBaoTanSuatGianLan(pool, {
                     tenantId: tId,
                     maCaThuNgan: ketQua.maCaThuNgan || null,
@@ -2904,11 +3034,17 @@ app.post('/api/order/thanhtoan', kiemTraToken, choPhepVaiTro(1, 4), kiemTraHanSu
                     ]);
                     if (pol.hanMucKetTienMat > 0 && dsNow.tienMatLyThuyet >= pol.hanMucKetTienMat) {
                         // [Wave 1 — P0-07] Bịt rò rỉ Blind Drop: TUYỆT ĐỐI không gửi tienMatLyThuyet/tienMatHienTai trong payload & message!
-                        io.to(roomTen(tId, 'thungan')).emit('shift:drawer_limit_warning', {
-                            maCaThuNgan: ketQua.maCaThuNgan,
-                            hanMucKetTienMat: pol.hanMucKetTienMat,
-                            thresholdExceeded: true,
-                            message: `🏦 Két tiền mặt đã vượt ngưỡng an toàn (${pol.hanMucKetTienMat.toLocaleString('vi-VN')}đ) — vui lòng thực hiện Rút két (Safe Drop) ngay!`,
+                        emitToBranch(io, {
+                            tenantId: tId,
+                            branchId: payBranchId,
+                            roles: ['POS'],
+                            event: 'shift:drawer_limit_warning',
+                            payload: {
+                                maCaThuNgan: ketQua.maCaThuNgan,
+                                hanMucKetTienMat: pol.hanMucKetTienMat,
+                                thresholdExceeded: true,
+                                message: `🏦 Két tiền mặt đã vượt ngưỡng an toàn (${pol.hanMucKetTienMat.toLocaleString('vi-VN')}đ) — vui lòng thực hiện Rút két (Safe Drop) ngay!`,
+                            },
                         });
                     }
                 }).catch(() => {});

@@ -102,46 +102,47 @@ function emitScopedKdsEvent(
 
     const events = Array.isArray(socketEvents) ? socketEvents.filter(Boolean) : [socketEvents].filter(Boolean);
 
-    // 1. Gửi tới đúng phòng KDS của chi nhánh & trạm
+    // 1. Gom toàn bộ phòng 3 tầng đích vào 1 Set để Socket.IO chống bắn trùng 100%
+    // (đặc biệt khi Barista mở màn hình station='ALL' vốn đang join đồng thời cả 3 trạm + ALL)
+    const targetRooms = new Set();
     const kdsRooms =
         st === 'ALL'
-            ? VALID_STATIONS.map((s) => roomBranchKds(tId, bId, s))
+            ? [...VALID_STATIONS.map((s) => roomBranchKds(tId, bId, s)), roomBranchKds(tId, bId, 'ALL')]
             : [roomBranchKds(tId, bId, st)];
+    for (const room of kdsRooms) targetRooms.add(room);
+    if (includeExpo) targetRooms.add(roomBranchExpo(tId, bId));
+    if (includeWaiter) targetRooms.add(roomBranchWaiter(tId, bId));
+    if (includePos) targetRooms.add(roomBranchPos(tId, bId));
+    if (includeQr) targetRooms.add(roomBranchQr(tId, bId));
 
-    for (const room of kdsRooms) {
-        for (const ev of events) {
-            io.to(room).emit(ev, envelope);
+    const isDefaultBranch = bId === 'DEFAULT' || bId === `${tId}_MAIN`;
+    const legacyRoomsByEvent = new Map();
+    const addLegacy = (evName, roomName) => {
+        if (!evName || !isDefaultBranch) return;
+        if (!legacyRoomsByEvent.has(evName)) legacyRoomsByEvent.set(evName, new Set());
+        legacyRoomsByEvent.get(evName).add(roomName);
+    };
+    addLegacy(legacyBaristaEvent, `t:${tId}:barista`);
+    addLegacy(legacyWaiterEvent, `t:${tId}:phucvu`);
+    addLegacy(legacyPosEvent, `t:${tId}:thungan`);
+
+    for (const ev of events) {
+        const roomsForEv = new Set(targetRooms);
+        const extraLegacy = legacyRoomsByEvent.get(ev);
+        if (extraLegacy) {
+            for (const lr of extraLegacy) roomsForEv.add(lr);
+            legacyRoomsByEvent.delete(ev);
+        }
+        if (roomsForEv.size > 0) {
+            io.to([...roomsForEv]).emit(ev, envelope);
         }
     }
-    if (st === 'ALL') {
-        for (const ev of events) {
-            io.to(roomBranchKds(tId, bId, 'ALL')).emit(ev, envelope);
+
+    // 2. Các sự kiện legacy có tên riêng (nếu khác danh sách events) — chỉ gửi cho chi nhánh DEFAULT
+    for (const [legacyEv, legacyRoomSet] of legacyRoomsByEvent.entries()) {
+        if (legacyRoomSet.size > 0) {
+            io.to([...legacyRoomSet]).emit(legacyEv, envelope);
         }
-    }
-
-    // 2. Gửi tới Expo / Waiter / POS / QR của đúng chi nhánh
-    if (includeExpo) {
-        for (const ev of events) io.to(roomBranchExpo(tId, bId)).emit(ev, envelope);
-    }
-    if (includeWaiter) {
-        for (const ev of events) io.to(roomBranchWaiter(tId, bId)).emit(ev, envelope);
-    }
-    if (includePos) {
-        for (const ev of events) io.to(roomBranchPos(tId, bId)).emit(ev, envelope);
-    }
-    if (includeQr) {
-        for (const ev of events) io.to(roomBranchQr(tId, bId)).emit(ev, envelope);
-    }
-
-    // 3. Tương thích ngược với client cũ chưa gọi room:subscribe (client đã subscribe sẽ rời room legacy)
-    if (legacyBaristaEvent) {
-        io.to(`t:${tId}:barista`).emit(legacyBaristaEvent, envelope);
-    }
-    if (legacyWaiterEvent) {
-        io.to(`t:${tId}:phucvu`).emit(legacyWaiterEvent, envelope);
-    }
-    if (legacyPosEvent) {
-        io.to(`t:${tId}:thungan`).emit(legacyPosEvent, envelope);
     }
 }
 
@@ -229,10 +230,13 @@ async function recordAndEmitOrderNewByStation(
             eventType: 'ORDER_NEW',
             serverNowMs: Date.now(),
         };
-        io.to(roomBranchExpo(tenantId, bId)).emit('order:new', fullPayload);
-        io.to(roomBranchExpo(tenantId, bId)).emit('CO_DON_MOI', fullPayload);
-        // Legacy fallback cho client cũ chưa subscribe 3-tier
-        io.to(`t:${tenantId}:barista`).emit('CO_DON_MOI', fullPayload);
+        const expoRoom = roomBranchExpo(tenantId, bId);
+        io.to(expoRoom).emit('order:new', fullPayload);
+        const coDonMoiRooms = [expoRoom];
+        if (bId === 'DEFAULT' || bId === `${tenantId}_MAIN`) {
+            coDonMoiRooms.push(`t:${tenantId}:barista`);
+        }
+        io.to(coDonMoiRooms).emit('CO_DON_MOI', fullPayload);
     };
 
     return { emitted, flush };
@@ -402,6 +406,8 @@ function buildBatchSummary(items = []) {
                 totalQty: 0,
                 choPhaCheQty: 0,
                 dangLamQty: 0,
+                hasRemake: false,
+                hasRush: false,
                 hasRemakeOrRush: false,
                 oldestTime: item.firedAt || item.thoiGianGoi || null,
                 modifierBreakdown: new Map(),
@@ -410,10 +416,14 @@ function buildBatchSummary(items = []) {
         }
         const g = groups.get(key);
         const qty = Number(item.soLuong || 1);
+        const itemIsRemake = Boolean(item.isRemake || item.remakeOfCTHD);
+        const itemIsRush = !itemIsRemake && (Boolean(item.isRush) || Number(item.mucDoUuTien || 0) >= 2);
         g.totalQty += qty;
         if (item.trangThaiPhaChe === 'ChoPhaChe') g.choPhaCheQty += qty;
         if (item.trangThaiPhaChe === 'DangLam') g.dangLamQty += qty;
-        if (Number(item.mucDoUuTien || 0) > 0 || item.remakeOfCTHD) g.hasRemakeOrRush = true;
+        if (itemIsRemake) g.hasRemake = true;
+        if (itemIsRush) g.hasRush = true;
+        if (Number(item.mucDoUuTien || 0) > 0 || itemIsRemake) g.hasRemakeOrRush = true;
 
         const modTag = formatModifierTag(item);
         g.modifierBreakdown.set(modTag, (g.modifierBreakdown.get(modTag) || 0) + qty);
@@ -427,6 +437,9 @@ function buildBatchSummary(items = []) {
             trangThaiPhaChe: item.trangThaiPhaChe,
             mucDoUuTien: Number(item.mucDoUuTien || 0),
             remakeOfCTHD: item.remakeOfCTHD || null,
+            isRemake: itemIsRemake,
+            isRush: itemIsRush,
+            priorityLabel: itemIsRemake ? 'REMAKE' : itemIsRush ? 'RUSH' : 'NORMAL',
             modTag,
             thoiGianGoi: item.firedAt || item.thoiGianGoi,
         });
@@ -442,6 +455,8 @@ function buildBatchSummary(items = []) {
             totalQty: g.totalQty,
             choPhaCheQty: g.choPhaCheQty,
             dangLamQty: g.dangLamQty,
+            hasRemake: g.hasRemake,
+            hasRush: g.hasRush,
             hasRemakeOrRush: g.hasRemakeOrRush,
             oldestTime: g.oldestTime,
             modifierBreakdown: [...g.modifierBreakdown.entries()].map(([label, qty]) => ({ label, qty })),
@@ -476,6 +491,8 @@ function buildExpoTickets(items = []) {
                 clientOrderUid: item.clientOrderUid || null,
                 oldestTime: item.firedAt || item.thoiGianGoi,
                 maxPriority: Number(item.mucDoUuTien || 0),
+                hasRemake: false,
+                hasRush: false,
                 stationsMap: new Map(),
                 items: [],
             });
@@ -498,6 +515,10 @@ function buildExpoTickets(items = []) {
             stStat.pending += 1;
         }
         if (Number(item.mucDoUuTien || 0) > t.maxPriority) t.maxPriority = Number(item.mucDoUuTien || 0);
+        const expoItemRemake = Boolean(item.isRemake || item.remakeOfCTHD);
+        const expoItemRush = !expoItemRemake && (Boolean(item.isRush) || Number(item.mucDoUuTien || 0) >= 2);
+        if (expoItemRemake) t.hasRemake = true;
+        if (expoItemRush) t.hasRush = true;
         const itemMs = new Date(item.firedAt || item.thoiGianGoi || 0).getTime();
         if (itemMs && itemMs < new Date(t.oldestTime || 0).getTime()) t.oldestTime = item.firedAt || item.thoiGianGoi;
         t.items.push(item);
@@ -529,6 +550,8 @@ function buildExpoTickets(items = []) {
             clientOrderUid: t.clientOrderUid,
             oldestTime: t.oldestTime,
             maxPriority: t.maxPriority,
+            hasRemake: t.hasRemake,
+            hasRush: t.hasRush,
             totalItems,
             doneItems,
             allStationsReady: stations.length > 0 && stations.every((s) => s.ready),

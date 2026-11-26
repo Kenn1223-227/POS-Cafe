@@ -23,6 +23,7 @@ const {
 } = require('./kdsPhase2Engine');
 
 const { danhGiaModifiersChoMon, tinhGiaToppingBacThang, tinhBomMotLySauSubstitution } = require('./fohEngineService');
+const { emitToBranch, emitToTenant } = require('../src/core/socketRooms');
 
 const LOAI_GD_BAN_HANG = 6;
 const LOAI_GD_HOAN_KHO = 7;
@@ -542,6 +543,7 @@ function registerKdsPhase2Routes(app, deps) {
                             sp.TenMon AS TenMonCu, sp.NhomMon AS NhomMonCu,
                             COALESCE((to_jsonb(sp)->>'lahangdonggoi')::boolean, FALSE) AS LaHangDongGoiCu,
                             hd.TrangThaiTT, hd.MaKH, hd.TongTienThanhToan, hd.MaCaThuNgan,
+                            COALESCE(hd.DaInTamTinh, FALSE) AS DaInTamTinh,
                             COALESCE(NULLIF(to_jsonb(hd)->>'branchid', ''), 'DEFAULT') AS BranchId
                        FROM ChiTietHoaDon c
                        JOIN HoaDon hd ON hd.MaHoaDon = c.MaHoaDon
@@ -562,8 +564,34 @@ function registerKdsPhase2Routes(app, deps) {
                     throw new LoiNghiepVu(409, 'Hóa đơn này đã hoàn tiền toàn bộ, không thể đổi món!');
                 }
 
+                const daInTamTinh = Boolean(oldItem.daintamtinh);
                 const daBatDauPha = ['DangLam', 'DaXong', 'DaPhucVu'].includes(oldItem.trangthaiphache);
                 let nguoiDuyet = req.user.maNV;
+                let daXacThucQuyenDoiMon = false;
+
+                // [Batch 6 — Anti-Fraud] Nếu hóa đơn đã in tạm tính (Pre-bill), bắt buộc quyền Quản lý/Ca trưởng hoặc xác thực PIN Quản lý
+                if (daInTamTinh) {
+                    const tuDuQuyen = coQuyenHan(req.user, 'order.item.void_approve');
+                    if (!tuDuQuyen) {
+                        const mgr = managerPin
+                            ? await xacThucPinQuanLy(client, tenantId, managerPin, req.ip, maNVDuyet, 'order.item.void_approve')
+                            : null;
+                        if (!mgr) {
+                            throw new LoiNghiepVu(
+                                403,
+                                'Hóa đơn đã in tạm tính (Pre-bill)! Đổi món sau khi in tạm tính bắt buộc có mã PIN Quản lý hoặc Ca trưởng để chống gian lận!',
+                                {
+                                    code: 'PREBILL_SWAP_FORBIDDEN',
+                                    maLoi: 'CAN_PIN_QUAN_LY',
+                                    daInTamTinh: true,
+                                }
+                            );
+                        }
+                        nguoiDuyet = mgr.maNV;
+                    }
+                    daXacThucQuyenDoiMon = true;
+                }
+
                 if (daBatDauPha) {
                     if (!forceWasteIfInProgress) {
                         throw new LoiNghiepVu(
@@ -576,19 +604,21 @@ function registerKdsPhase2Routes(app, deps) {
                             }
                         );
                     }
-                    const tuDuQuyen = coQuyenHan(req.user, 'order.item.void_approve');
-                    if (!tuDuQuyen) {
-                        const mgr = managerPin
-                            ? await xacThucPinQuanLy(client, tenantId, managerPin, req.ip, maNVDuyet, 'order.item.void_approve')
-                            : null;
-                        if (!mgr) {
-                            throw new LoiNghiepVu(
-                                403,
-                                'Đổi món đang pha/đã xong yêu cầu mã PIN Quản lý hoặc Ca trưởng để xác nhận hao hụt!',
-                                { maLoi: 'CAN_PIN_QUAN_LY' }
-                            );
+                    if (!daXacThucQuyenDoiMon) {
+                        const tuDuQuyen = coQuyenHan(req.user, 'order.item.void_approve');
+                        if (!tuDuQuyen) {
+                            const mgr = managerPin
+                                ? await xacThucPinQuanLy(client, tenantId, managerPin, req.ip, maNVDuyet, 'order.item.void_approve')
+                                : null;
+                            if (!mgr) {
+                                throw new LoiNghiepVu(
+                                    403,
+                                    'Đổi món đang pha/đã xong yêu cầu mã PIN Quản lý hoặc Ca trưởng để xác nhận hao hụt!',
+                                    { maLoi: 'CAN_PIN_QUAN_LY' }
+                                );
+                            }
+                            nguoiDuyet = mgr.maNV;
                         }
-                        nguoiDuyet = mgr.maNV;
                     }
                 }
 
@@ -889,11 +919,31 @@ function registerKdsPhase2Routes(app, deps) {
                     maNV: req.user.maNV,
                     vaiTro: req.user.vaiTro,
                     nguoiDuyet,
-                    hanhDong: 'ITEM_SWAPPED',
+                    hanhDong: daInTamTinh ? 'ITEM_SWAP_AFTER_PREBILL' : 'ITEM_SWAPPED',
                     doiTuong: 'CHITIETHOADON',
                     maDoiTuong: maCTHD,
-                    giaTriCu: { maCTHD, maMon: oldItem.mamon, tenMon: oldItem.tenmoncu, giaCu, trangThaiPhaChe: oldItem.trangthaiphache },
-                    giaTriMoi: { newMaCTHD, maMon: spMoi.mamon, tenMon: spMoi.tenmon, giaMoi, chenhLech, financialAction, hoanKhoMonCu, refundRecordId },
+                    giaTriCu: {
+                        maHoaDon: oldItem.mahoadon,
+                        maCTHD,
+                        maMon: oldItem.mamon,
+                        tenMon: oldItem.tenmoncu,
+                        giaCu,
+                        trangThaiPhaChe: oldItem.trangthaiphache,
+                        daInTamTinh,
+                    },
+                    giaTriMoi: {
+                        maHoaDon: oldItem.mahoadon,
+                        newMaCTHD,
+                        maMon: spMoi.mamon,
+                        tenMon: spMoi.tenmon,
+                        giaMoi,
+                        chenhLech,
+                        financialAction,
+                        hoanKhoMonCu,
+                        refundRecordId,
+                        daInTamTinh,
+                        nguoiDuyet,
+                    },
                     lyDo: String(lyDo || '').trim(),
                     ip: req.ip,
                     batBuoc: true,
@@ -953,7 +1003,7 @@ function registerKdsPhase2Routes(app, deps) {
                     swapPayload,
                     seqs,
                     monMoi,
-                    hoaDon: await layHoaDonChiTiet(client, oldItem.mahoadon),
+                    hoaDon: await layHoaDonChiTiet(client, oldItem.mahoadon, { vaiTro: req.user?.vaiTro }),
                 };
             }, tenantId);
 
@@ -1134,6 +1184,7 @@ function registerKdsPhase2Routes(app, deps) {
                       WHERE c.MaMon = sp.MaMon
                         AND c.MaHoaDon = $1
                         AND c.TrangThaiPhaChe NOT IN ('DaHuy', 'DaXong', 'DaPhucVu')
+                        AND COALESCE(to_jsonb(c)->>'remakeofcthd', '') = ''
                       RETURNING c.MaCTHD, c.MaMon, sp.TenMon, sp.NhomMon,
                                 COALESCE(to_jsonb(sp)->>'tramchebien', '') AS TramCheBien`,
                     [maHoaDon, priority]
@@ -1156,6 +1207,9 @@ function registerKdsPhase2Routes(app, deps) {
                     maHoaDon,
                     branchId,
                     rush,
+                    isRush: rush,
+                    isRemake: false,
+                    priorityLabel: rush ? 'RUSH' : 'NORMAL',
                     mucDoUuTien: priority,
                     updatedMaCTHD: updRes.rows.map((r) => r.macthd),
                     updatedBy: req.user?.maNV || 'SYSTEM',
@@ -1256,14 +1310,18 @@ function registerKdsPhase2Routes(app, deps) {
                 };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan'))
-                .to(roomTen(tenantId, 'phucvu'))
-                .to(roomTen(tenantId, 'barista'))
-                .emit('THUC_DON_THAY_DOI', updated);
-            io.to(roomTen(tenantId, 'thungan'))
-                .to(roomTen(tenantId, 'phucvu'))
-                .to(roomTen(tenantId, 'barista'))
-                .emit('menu:86_updated', { type: 'COUNTDOWN', product: updated });
+            emitToTenant(io, {
+                tenantId,
+                roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+                event: 'THUC_DON_THAY_DOI',
+                payload: updated,
+            });
+            emitToTenant(io, {
+                tenantId,
+                roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+                event: 'menu:86_updated',
+                payload: { type: 'COUNTDOWN', product: updated },
+            });
 
             res.json({
                 message:
@@ -1377,7 +1435,13 @@ function registerKdsPhase2Routes(app, deps) {
                 return { maHoaDon, tenGhiNho: memo, trangThaiTT: -1, thoiGianTao: hdRes.rows[0].thoigiantao };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan')).emit('PARKED_ORDERS_UPDATED', { maHoaDon: parked.maHoaDon });
+            emitToBranch(io, {
+                tenantId,
+                branchId: req.body?.branchId || req.user?.branchId || 'DEFAULT',
+                roles: ['POS'],
+                event: 'PARKED_ORDERS_UPDATED',
+                payload: { maHoaDon: parked.maHoaDon },
+            });
             res.status(201).json({
                 message: `⏸️ Đã lưu nháp (Park) đơn #${parked.maHoaDon} (chưa trừ kho, chưa đẩy KDS)!`,
                 ...parked,
@@ -1440,7 +1504,13 @@ function registerKdsPhase2Routes(app, deps) {
                 };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan')).emit('PARKED_ORDERS_UPDATED', { maHoaDon });
+            emitToBranch(io, {
+                tenantId,
+                branchId: req.body?.branchId || req.user?.branchId || 'DEFAULT',
+                roles: ['POS'],
+                event: 'PARKED_ORDERS_UPDATED',
+                payload: { maHoaDon },
+            });
             res.json({ message: `▶️ Đã khôi phục đơn nháp #${maHoaDon} về giỏ hàng!`, ...restored });
         } catch (error) {
             guiLoi(res, error, 'Lỗi API Resume Park Order:');

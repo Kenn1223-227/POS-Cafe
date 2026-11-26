@@ -16,6 +16,198 @@ const {
     roomBranchQr,
 } = require('../../modules/kdsPhase2Engine');
 
+const SOCKET_ROLE_ALIASES = {
+    POS: 'POS',
+    THUNGAN: 'POS',
+    CASHIER: 'POS',
+    WAITER: 'WAITER',
+    PHUCVU: 'WAITER',
+    KDS: 'KDS',
+    BARISTA: 'KDS',
+    EXPO: 'EXPO',
+    QR: 'QR',
+};
+
+const LEGACY_ROLE_FOR_CANONICAL = {
+    POS: 'thungan',
+    WAITER: 'phucvu',
+    KDS: 'barista',
+    EXPO: 'barista',
+};
+
+function normalizeSocketRole(role) {
+    const clean = String(role || '').trim().toUpperCase();
+    return SOCKET_ROLE_ALIASES[clean] || null;
+}
+
+function roomTenantRole(tenantId, role) {
+    const tId = String(tenantId || 'DEFAULT');
+    const canon = normalizeSocketRole(role) || 'POS';
+    return `t:${tId}:role:${canon}`;
+}
+
+function isDefaultBranchId(tenantId, branchId) {
+    const tId = String(tenantId || 'DEFAULT');
+    const clean = String(branchId || '').trim();
+    if (!clean) return true;
+    const upper = clean.toUpperCase();
+    return upper === 'DEFAULT' || upper === 'ALL' || clean === `${tId}_MAIN`;
+}
+
+function resolveBranchRooms(
+    tenantId,
+    branchId = 'DEFAULT',
+    roles = ['POS'],
+    { station = 'ALL', includeLegacy } = {}
+) {
+    const tId = String(tenantId || 'DEFAULT');
+    const rawBranch = String(branchId || '').trim();
+    const isDefault = isDefaultBranchId(tId, rawBranch);
+    const bId = normalizeBranchId(rawBranch || 'DEFAULT');
+    const branchTargets = isDefault
+        ? [...new Set(['DEFAULT', bId === 'ALL' ? 'DEFAULT' : bId, `${tId}_MAIN`])]
+        : [bId];
+
+    const roleList = (Array.isArray(roles) ? roles : [roles])
+        .map(normalizeSocketRole)
+        .filter(Boolean);
+    const canonRoles = roleList.length > 0 ? [...new Set(roleList)] : ['POS'];
+    const st = normalizeStation(station || 'ALL');
+    const rooms = new Set();
+
+    for (const br of branchTargets) {
+        for (const r of canonRoles) {
+            if (r === 'POS') {
+                rooms.add(roomBranchPos(tId, br));
+            } else if (r === 'WAITER') {
+                rooms.add(roomBranchWaiter(tId, br));
+            } else if (r === 'EXPO') {
+                rooms.add(roomBranchExpo(tId, br));
+            } else if (r === 'QR') {
+                rooms.add(roomBranchQr(tId, br));
+            } else if (r === 'KDS') {
+                if (st === 'ALL') {
+                    for (const s of VALID_STATIONS) rooms.add(roomBranchKds(tId, br, s));
+                    rooms.add(roomBranchKds(tId, br, 'ALL'));
+                } else {
+                    rooms.add(roomBranchKds(tId, br, st));
+                    rooms.add(roomBranchKds(tId, br, 'ALL'));
+                }
+            }
+        }
+    }
+
+    // Controlled legacy fallback: chỉ bật mặc định cho chi nhánh DEFAULT/MAIN (không rò rỉ chéo chi nhánh ở chuỗi đa chi nhánh).
+    // Gộp chung vào cùng 1 lệnh io.to([...rooms]).emit() để Socket.IO tự chống bắn trùng 100%.
+    const shouldIncludeLegacy = typeof includeLegacy === 'boolean' ? includeLegacy : isDefault;
+    if (shouldIncludeLegacy) {
+        for (const r of canonRoles) {
+            const legacyRole = LEGACY_ROLE_FOR_CANONICAL[r];
+            if (legacyRole) rooms.add(roomTen(tId, legacyRole));
+        }
+    }
+
+    return [...rooms];
+}
+
+/**
+ * Phát sự kiện chuẩn phòng 3 tầng cho đúng 1 Chi nhánh (Tenant -> Branch -> Role/Station).
+ * Luôn gom toàn bộ phòng đích vào 1 lệnh io.to(rooms).emit() duy nhất để chống bắn trùng sự kiện.
+ */
+function emitToBranch(
+    io,
+    {
+        tenantId = 'DEFAULT',
+        branchId = 'DEFAULT',
+        roles = ['POS'],
+        station = 'ALL',
+        event,
+        payload,
+        includeLegacy,
+    } = {}
+) {
+    if (!io || !event) return [];
+    const rooms = resolveBranchRooms(tenantId, branchId, roles, { station, includeLegacy });
+    if (rooms.length > 0) {
+        io.to(rooms).emit(event, payload);
+    }
+    return rooms;
+}
+
+/**
+ * Phát sự kiện toàn Tenant cho các vai trò chỉ định (ví dụ: cập nhật topping/modifier toàn cục,
+ * VietQR chưa khớp hóa đơn...). Dùng phòng `t:{tenantId}:role:{ROLE}` + 3 tầng DEFAULT + fallback legacy có kiểm soát.
+ */
+function emitToTenant(
+    io,
+    {
+        tenantId = 'DEFAULT',
+        roles = ['POS', 'WAITER', 'KDS', 'EXPO'],
+        station = 'ALL',
+        event,
+        payload,
+        includeLegacy = true,
+    } = {}
+) {
+    if (!io || !event) return [];
+    const tId = String(tenantId || 'DEFAULT');
+    const roleList = (Array.isArray(roles) ? roles : [roles])
+        .map(normalizeSocketRole)
+        .filter(Boolean);
+    const canonRoles = roleList.length > 0 ? [...new Set(roleList)] : ['POS', 'WAITER', 'KDS', 'EXPO'];
+
+    const rooms = new Set(
+        resolveBranchRooms(tId, 'DEFAULT', canonRoles, { station, includeLegacy })
+    );
+    for (const r of canonRoles) {
+        rooms.add(roomTenantRole(tId, r));
+    }
+
+    const roomList = [...rooms];
+    if (roomList.length > 0) {
+        io.to(roomList).emit(event, payload);
+    }
+    return roomList;
+}
+
+/**
+ * Phát sự kiện theo 1 vai trò cụ thể (nếu có branchId cụ thể -> bắn 3 tầng theo chi nhánh;
+ * nếu không có branchId hoặc branchId === 'ALL' -> bắn toàn Tenant cho vai trò đó).
+ */
+function emitToRole(
+    io,
+    {
+        tenantId = 'DEFAULT',
+        branchId = null,
+        role = 'POS',
+        station = 'ALL',
+        event,
+        payload,
+        includeLegacy,
+    } = {}
+) {
+    const cleanBranch = String(branchId || '').trim();
+    if (!cleanBranch || cleanBranch.toUpperCase() === 'ALL') {
+        return emitToTenant(io, {
+            tenantId,
+            roles: [role],
+            station,
+            event,
+            payload,
+            includeLegacy: typeof includeLegacy === 'boolean' ? includeLegacy : true,
+        });
+    }
+    return emitToBranch(io, {
+        tenantId,
+        branchId: cleanBranch,
+        roles: [role],
+        station,
+        event,
+        payload,
+        includeLegacy,
+    });
+}
+
 function registerSocketHandlers(io, deps) {
     const {
         pool,
@@ -115,7 +307,13 @@ io.on('connection', (socket) => {
             }
             if (entry.tenantId === tenantId) active.push(entry);
         }
-        io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('table:checkout_locks', active);
+        emitToBranch(io, {
+            tenantId,
+            branchId: socket.activeBranchId || socket.user.branchId || 'DEFAULT',
+            roles: ['POS', 'WAITER'],
+            event: 'table:checkout_locks',
+            payload: active,
+        });
     };
 
     socket.on('table:checkout_lock', (payload = {}, ack) => {
@@ -223,12 +421,16 @@ io.on('connection', (socket) => {
 
         if (role === 'EXPO') {
             addRoom(roomBranchExpo(tenantId, branchId));
+            addRoom(roomTenantRole(tenantId, 'EXPO'));
         } else if (role === 'WAITER') {
             addRoom(roomBranchWaiter(tenantId, branchId));
+            addRoom(roomTenantRole(tenantId, 'WAITER'));
         } else if (role === 'POS') {
             addRoom(roomBranchPos(tenantId, branchId));
+            addRoom(roomTenantRole(tenantId, 'POS'));
         } else if (role === 'QR') {
             addRoom(roomBranchQr(tenantId, branchId));
+            addRoom(roomTenantRole(tenantId, 'QR'));
         } else {
             // Mặc định KDS theo trạm pha chế cụ thể (hoặc ALL cho màn hình KDS tổng của đúng Chi nhánh)
             if (station === 'ALL') {
@@ -237,7 +439,11 @@ io.on('connection', (socket) => {
             } else {
                 addRoom(roomBranchKds(tenantId, branchId, station));
             }
+            addRoom(roomTenantRole(tenantId, 'KDS'));
         }
+
+        socket.activeBranchId = branchId;
+        socket.activeRole = role;
 
         const reply = {
             ok: true,
@@ -271,4 +477,12 @@ io.on('connection', (socket) => {
 
 }
 
-module.exports = { registerSocketHandlers };
+module.exports = {
+    registerSocketHandlers,
+    emitToBranch,
+    emitToRole,
+    emitToTenant,
+    roomTenantRole,
+    normalizeSocketRole,
+    resolveBranchRooms,
+};

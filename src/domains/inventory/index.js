@@ -13,9 +13,11 @@ const {
     guiLoi,
     choPhepVaiTro,
     layTenantId,
-    roomTen,
     lam3,
 } = require('../../core/auditAndSecurity');
+const {
+    emitToBranch,
+} = require('../../core/socketRooms');
 const {
     normalizeBranchId,
     roomBranchPos,
@@ -302,12 +304,21 @@ app.post('/api/kho/nhap', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
                 autoUnlocked.unlockedModifiers.length > 0 ||
                 autoUnlocked.unlockedCombos.length > 0)
         ) {
-            io.to(roomTen(tenantId, 'thungan'))
-                .to(roomTen(tenantId, 'phucvu'))
-                .to(roomTen(tenantId, 'barista'))
-                .emit('menu:86_updated', { type: 'AUTO_UN86_RESTOCK', ...autoUnlocked });
+            emitToBranch(io, {
+                tenantId,
+                branchId,
+                roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+                event: 'menu:86_updated',
+                payload: { type: 'AUTO_UN86_RESTOCK', ...autoUnlocked },
+            });
             for (const p of autoUnlocked.unlockedProducts) {
-                io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).to(roomTen(tenantId, 'barista')).emit('THUC_DON_THAY_DOI', p);
+                emitToBranch(io, {
+                    tenantId,
+                    branchId,
+                    roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+                    event: 'THUC_DON_THAY_DOI',
+                    payload: p,
+                });
             }
         }
 
@@ -553,6 +564,11 @@ app.post('/api/kho/kiemke', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) 
     if (![2, 3].includes(loaiGD) || !Array.isArray(danhSachNguyenLieu) || danhSachNguyenLieu.length === 0) {
         return res.status(400).json({ message: 'Loại giao dịch không hợp lệ hoặc danh sách nguyên liệu trống!' });
     }
+    if (loaiGD === 3 && Number(req.user.vaiTro) !== 1) {
+        return res.status(403).json({
+            message: 'Nhân viên ca phải kiểm kho qua luồng Kiểm kê mù (/api/kho/kiem-ke/start và /submit), không được điều chỉnh trực tiếp tồn kho!',
+        });
+    }
     const cleanReasonCode =
         loaiGD === 2
             ? VALID_WASTAGE_CODES.includes(String(maLyDoHuy || '').toUpperCase())
@@ -790,10 +806,11 @@ app.get('/api/kho/candoi', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
 
 app.get('/api/kho/nguyenlieu', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
     const tenantId = layTenantId(req);
-    const laQuanLy = req.user.vaiTro === 1;
+    const laQuanLy = Number(req.user.vaiTro) === 1;
     const branchId = normalizeInventoryBranch(tenantId, req.query.branchId || req.user.branchId || null);
     const isMain = branchId === `${tenantId}_MAIN`;
-    const isBlind = String(req.query.blind || '') === '1' && !laQuanLy;
+    // Luôn ẩn tồn hệ thống (Blind) cho tài khoản không phải Quản lý để tránh rò rỉ tồn lý thuyết
+    const isBlind = !laQuanLy || String(req.query.blind || '') === '1';
     try {
         const r = await qTenant(
             req,
@@ -1359,12 +1376,22 @@ app.post('/api/kho/san-xuat-me', kiemTraToken, choPhepVaiTro(1, 2), async (req, 
                 ketQua.autoUnlocked.unlockedModifiers.length > 0 ||
                 ketQua.autoUnlocked.unlockedCombos.length > 0)
         ) {
-            io.to(roomTen(tenantId, 'thungan'))
-                .to(roomTen(tenantId, 'phucvu'))
-                .to(roomTen(tenantId, 'barista'))
-                .emit('menu:86_updated', { type: 'AUTO_UN86_SUBRECIPE', ...ketQua.autoUnlocked });
+            const subRecipeBranchId = ketQua.branchId || req.body?.branchId || req.user?.branchId || 'DEFAULT';
+            emitToBranch(io, {
+                tenantId,
+                branchId: subRecipeBranchId,
+                roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+                event: 'menu:86_updated',
+                payload: { type: 'AUTO_UN86_SUBRECIPE', ...ketQua.autoUnlocked },
+            });
             for (const p of ketQua.autoUnlocked.unlockedProducts) {
-                io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).to(roomTen(tenantId, 'barista')).emit('THUC_DON_THAY_DOI', p);
+                emitToBranch(io, {
+                    tenantId,
+                    branchId: subRecipeBranchId,
+                    roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+                    event: 'THUC_DON_THAY_DOI',
+                    payload: p,
+                });
             }
         }
 
@@ -1413,14 +1440,19 @@ async function checkExpiringBatchesAndEmitKds({ tenantId, branchId = 'DEFAULT', 
     });
 
     if (batches.length > 0 && io) {
-        io.to(roomBranchKds(tenantId, cleanBranch))
-            .to(roomTen(tenantId, 'barista'))
-            .emit('kds:batch_expiring_warning', {
+        emitToBranch(io, {
+            tenantId,
+            branchId: cleanBranch,
+            roles: ['KDS', 'EXPO'],
+            station: 'ALL',
+            event: 'kds:batch_expiring_warning',
+            payload: {
                 tenantId,
                 branchId: cleanBranch,
                 batches,
                 checkedAt: new Date().toISOString(),
-            });
+            },
+        });
     }
     return batches;
 }
@@ -1461,22 +1493,23 @@ app.post('/api/kds/batches/:lotId/discard-expired', kiemTraToken, choPhepVaiTro(
                 throw new LoiNghiepVu(404, 'Không tìm thấy lô bán thành phẩm cần xuất hủy!');
             }
             const lot = lotRes.rows[0];
-            if (lot.trangthai !== 'ACTIVE' || Number(lot.soluongconlai) <= 0) {
+            if ((lot.trangthai !== 'ACTIVE' && lot.trangthai !== 'EXPIRED') || Number(lot.soluongconlai) <= 0) {
                 throw new LoiNghiepVu(409, 'Lô này đã được sử dụng hết hoặc đã xuất hủy trước đó!');
             }
 
-            const qtyDiscard = Number(lot.soluongconlai);
-            const branchId = normalizeBranchId(lot.branchid || 'DEFAULT');
-            const lockedMap = await lockBranchStockOrdered(client, { tenantId, branchId, maNLList: [lot.manl] });
-            const st = lockedMap.get(lot.manl);
+            const qtyDiscard = lam3(Number(lot.soluongconlai));
+            const rawLotBranch = lot.branchid || 'DEFAULT';
+            const docDate = await assertPeriodNotLocked(client, tenantId, rawLotBranch, todayDateVN(), LoiNghiepVu);
+            const { branchId, stockMap } = await lockBranchStockOrdered(client, tenantId, rawLotBranch, [lot.manl]);
+            const st = stockMap.get(lot.manl);
             const tonBefore = st ? Number(st.soLuongTon) : qtyDiscard;
-            const tonAfter = Math.max(0, lam4(tonBefore - qtyDiscard));
+            const tonAfter = Math.max(0, lam3(tonBefore - qtyDiscard));
             const giaVon = Number(lot.giavonlo || st?.giaVonDonVi || lot.giavondonvi || 0);
 
             await client.query(
                 `UPDATE public.lo_tonkho
-                    SET soluongconlai = 0, trangthai = 'EXPIRED', updatedat = now()
-                  WHERE id = $1 AND tenantid = $2`,
+                    SET soluongconlai = 0, trangthai = 'DISPOSED'
+                  WHERE id = $1::bigint AND tenantid = $2::text`,
                 [lotId, tenantId]
             );
 
@@ -1488,17 +1521,19 @@ app.post('/api/kds/batches/:lotId/discard-expired', kiemTraToken, choPhepVaiTro(
                 nextWac: st ? Number(st.giaVonDonVi) : giaVon,
             });
 
-            const caMo = await layCaDangMo(client, tenantId, branchId);
+            const caMo = await layCaDangMo(client, 'SHARE', tenantId, { branchId });
             const phieu = await client.query(
-                `INSERT INTO PhieuGiaoDichKho (MaNV, LoaiGD, GhiChu, TenantId, BranchId, MaCaThuNgan, NgayChungTu, TrangThaiDuyet)
-                 VALUES ($1, 4, $2, $3, $4, $5, $6::date, 'POSTED') RETURNING MaGiaoDich`,
+                `INSERT INTO public.phieugiaodichkho
+                    (manv, loaigd, ghichu, tenantid, branchid, macathungan, malydohuy, ngaychungtu, trangthaiduyet)
+                 VALUES ($1, 2, $2, $3, $4, $5, 'EXPIRED_BATCH', $6::date, 'POSTED')
+                 RETURNING magiaodich`,
                 [
                     req.user.maNV,
                     `[EXPIRED_BATCH] Hủy lô ${lot.malo} (${lot.tennl}): ${lyDo}`.slice(0, 255),
                     tenantId,
                     branchId,
                     caMo ? String(caMo.macathungan) : null,
-                    todayDateVN(),
+                    docDate,
                 ]
             );
             const maGD = phieu.rows[0].magiaodich;
@@ -1506,7 +1541,7 @@ app.post('/api/kds/batches/:lotId/discard-expired', kiemTraToken, choPhepVaiTro(
             await insertLedgerLine(client, {
                 maGiaoDich: maGD,
                 maNL: lot.manl,
-                soLuong: -qtyDiscard,
+                soLuong: qtyDiscard,
                 donGiaNhap: giaVon,
                 tinhTrang: `EXPIRED_BATCH:${lot.malo}`,
                 tonTruoc: tonBefore,
@@ -1523,7 +1558,7 @@ app.post('/api/kds/batches/:lotId/discard-expired', kiemTraToken, choPhepVaiTro(
                 doiTuong: 'LO_TONKHO',
                 maDoiTuong: String(lotId),
                 giaTriCu: { maLo: lot.malo, soLuongConLai: qtyDiscard, trangThai: lot.trangthai },
-                giaTriMoi: { maLo: lot.malo, soLuongConLai: 0, trangThai: 'EXPIRED', maGiaoDich: maGD, branchId },
+                giaTriMoi: { maLo: lot.malo, soLuongConLai: 0, trangThai: 'DISPOSED', maGiaoDich: maGD, branchId },
                 lyDo,
                 ip: req.ip,
                 batBuoc: true,
@@ -1542,15 +1577,20 @@ app.post('/api/kds/batches/:lotId/discard-expired', kiemTraToken, choPhepVaiTro(
         }, tenantId);
 
         const remaining = await checkExpiringBatchesAndEmitKds({ tenantId, branchId: ketQua.branchId, withinMinutes: 15 });
-        io.to(roomBranchKds(tenantId, ketQua.branchId))
-            .to(roomTen(tenantId, 'barista'))
-            .emit('kds:batch_expiring_warning', {
+        emitToBranch(io, {
+            tenantId,
+            branchId: ketQua.branchId,
+            roles: ['KDS', 'EXPO'],
+            station: 'ALL',
+            event: 'kds:batch_expiring_warning',
+            payload: {
                 tenantId,
                 branchId: ketQua.branchId,
                 batches: remaining,
                 discardedLotId: lotId,
                 checkedAt: new Date().toISOString(),
-            });
+            },
+        });
 
         res.json({
             message: `🗑️ Đã xuất hủy mẻ hết hạn "${ketQua.tenNL}" (${ketQua.maLo}, -${ketQua.soLuongHuy} ${ketQua.donViTinh})!`,

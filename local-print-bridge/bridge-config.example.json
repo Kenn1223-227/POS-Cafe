@@ -1,0 +1,51 @@
+{
+  "_comment": "Sao chép thành bridge-config.json hoặc đặt biến môi trường PRINT_BRIDGE_ALLOWED_ORIGINS (phân tách dấu phẩy). Localhost / 127.0.0.1 luôn được tự động cho phép.",
+  "receiptPrinter": {
+    "name": "PRIMARY_RECEIPT_K80",
+    "mode": "SIMULATOR",
+    "host": "192.168.1.200",
+    "port": 9100,
+    "shareName": "XP-80C",
+    "autoCut": true,
+    "kickDrawerOnCash": true,
+    "fallbackPrinterId": null
+  },
+  "labelPrinter": {
+    "name": "PRIMARY_LABEL_TSPL",
+    "mode": "SIMULATOR",
+    "host": "192.168.1.201",
+    "port": 9100,
+    "shareName": "XP-350B",
+    "widthMm": 50,
+    "heightMm": 30,
+    "renderMode": "BITMAP_VI",
+    "fallbackPrinterId": null
+  },
+  "fallbackPrinter": {
+    "enabled": false,
+    "name": "BACKUP_PRINTER",
+    "mode": "SIMULATOR",
+    "host": "192.168.1.202",
+    "port": 9100,
+    "shareName": "XP-BACKUP"
+  },
+  "cloudRelay": {
+    "enabled": false,
+    "backendUrl": "https://api.cafepos.vn",
+    "token": "",
+    "pollIntervalMs": 1500
+  },
+  "lanHub": {
+    "enabled": true,
+    "token": ""
+  },
+  "security": {
+    "apiToken": "",
+    "allowedOrigins": [
+      "https://pos.domain.vn",
+      "https://*.vercel.app",
+      "https://cafepos.vn",
+      "https://*.cafepos.vn"
+    ]
+  }
+}

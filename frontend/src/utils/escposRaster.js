@@ -1,8 +1,70 @@
-// [Wave 2 — P0-08] Bộ chuyển đổi Canvas/RGBA sang ESC/POS 1-bit Monochrome Raster GS v 0
-// Hỗ trợ in bill K80 tiếng Việt có dấu sắc nét 100%, kèm Logo quán & mã VietQR
+// [Wave 2 — P0-08 / Batch 5] Bộ chuyển đổi Canvas/RGBA sang ESC/POS 1-bit Monochrome Raster GS v 0
+// Hỗ trợ in bill K80 (576px) & K58 (384px) tiếng Việt có dấu sắc nét 100%, kèm Logo quán & mã VietQR
 // Tự động cắt băng dọc BAND_HEIGHT = 256px chống tràn buffer máy in Xprinter / Zywell
 
 export const RASTER_BAND_HEIGHT = 256
+
+export const PAPER_WIDTH_PX = {
+  K80: 576,
+  K58: 384,
+}
+
+export function resolvePaperWidthPx(paperWidth = 'K80') {
+  return String(paperWidth || 'K80').toUpperCase() === 'K58'
+    ? PAPER_WIDTH_PX.K58
+    : PAPER_WIDTH_PX.K80
+}
+
+export function uint8ToBase64(uint8) {
+  if (!uint8 || uint8.length === 0) return ''
+  if (typeof globalThis.Buffer !== 'undefined') {
+    return globalThis.Buffer.from(uint8).toString('base64')
+  }
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let i = 0; i < uint8.length; i += chunkSize) {
+    const slice = uint8.subarray(i, Math.min(i + chunkSize, uint8.length))
+    binary += String.fromCharCode(...slice)
+  }
+  return btoa(binary)
+}
+
+export function base64ToUint8(base64) {
+  const clean = String(base64 || '').trim()
+  if (!clean) return new Uint8Array(0)
+  if (typeof globalThis.Buffer !== 'undefined') {
+    return new Uint8Array(globalThis.Buffer.from(clean, 'base64'))
+  }
+  const binary = atob(clean)
+  const out = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i)
+  }
+  return out
+}
+
+/**
+ * Đóng gói mảng byte GS v 0 thành gói ESC/POS hoàn chỉnh cho WebSerial / WebUSB / WebBluetooth / RawBT
+ * (ESC @ Init + [tùy chọn RJ11 Kick] + ESC a 1 Center + GS v 0 Raster + Feed + [tùy chọn GS V 66 Auto-Cut])
+ */
+export function wrapEscPosRasterReceiptBytes(
+  rasterBytes,
+  { kickDrawer = false, autoCut = true } = {}
+) {
+  const payload = rasterBytes instanceof Uint8Array ? rasterBytes : new Uint8Array(rasterBytes || [])
+  const prefix = kickDrawer
+    ? [0x1b, 0x40, 0x1b, 0x70, 0x00, 0x19, 0xfa, 0x1b, 0x61, 0x01]
+    : [0x1b, 0x40, 0x1b, 0x61, 0x01]
+  const suffix = autoCut
+    ? [0x0a, 0x0a, 0x0a, 0x1d, 0x56, 0x42, 0x00]
+    : [0x0a, 0x0a, 0x0a]
+
+  const out = new Uint8Array(prefix.length + payload.length + suffix.length)
+  out.set(prefix, 0)
+  out.set(payload, prefix.length)
+  out.set(suffix, prefix.length + payload.length)
+  return out
+}
 
 /**
  * Chuyển mảng pixel RGBA (Uint8ClampedArray / Uint8Array) thành lệnh nhị phân ESC/POS GS v 0
@@ -76,15 +138,47 @@ export function canvasToEscPosRasterGsV0(
     throw new Error('Canvas không hợp lệ để chuyển đổi raster ESC/POS GS v 0')
   }
   const ctx = canvas.getContext('2d')
-  const width = Math.max(1, Number(canvas.width || 576))
+  const width = Math.max(1, Number(canvas.width || PAPER_WIDTH_PX.K80))
   const height = Math.max(1, Number(canvas.height || 1))
   const imgData = ctx.getImageData(0, 0, width, height)
   return rgbaToEscPosRasterGsV0(imgData.data, width, height, { bandHeight, threshold })
 }
 
+function formatVndVi(n) {
+  return `${Math.round(Number(n) || 0).toLocaleString('vi-VN')}đ`
+}
+
+function maskPhoneVi(sdt) {
+  const raw = String(sdt || '').trim()
+  if (!raw) return ''
+  if (raw.length < 7) {
+    if (raw.length <= 2) return '***'
+    return `${raw.slice(0, 1)}***${raw.slice(-1)}`
+  }
+  return `${raw.slice(0, 4)}***${raw.slice(-3)}`
+}
+
+function wrapCanvasText(ctx, text, maxWidth) {
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean)
+  if (words.length === 0) return []
+  const lines = []
+  let current = words[0]
+  for (let i = 1; i < words.length; i++) {
+    const candidate = `${current} ${words[i]}`
+    if (ctx.measureText(candidate).width <= maxWidth) {
+      current = candidate
+    } else {
+      lines.push(current)
+      current = words[i]
+    }
+  }
+  lines.push(current)
+  return lines
+}
+
 /**
- * Render hóa đơn K80 tiếng Việt có dấu (576px) lên Canvas kèm Logo/VietQR (nếu có)
- * và trả về cả canvas lẫn buffer GS v 0 dạng Base64 để gửi tới Local Print Bridge.
+ * Render hóa đơn K80 (576px) hoặc K58 (384px) tiếng Việt có dấu lên Canvas
+ * kèm Logo/VietQR (nếu có) và trả về canvas + rasterBytes + rasterBase64 (GS v 0).
  */
 export function renderVietnameseReceiptToCanvas(
   hoaDon,
@@ -92,96 +186,282 @@ export function renderVietnameseReceiptToCanvas(
     tenQuan = 'QUÁN CÀ PHÊ POS',
     diaChi = '',
     thuNgan = '',
+    soLanIn = 1,
+    laBanSao = false,
+    reprintBanner = null,
+    laTamTinh = false,
+    laDonOffline = false,
+    showPlgWatermark = false,
+    plgReferralUrl = '',
     logoImage = null,
     qrImage = null,
-    width = 576,
+    paperWidth = 'K80',
+    width = undefined,
   } = {}
 ) {
   if (typeof document === 'undefined') {
     throw new Error('renderVietnameseReceiptToCanvas chỉ chạy trên môi trường trình duyệt')
   }
+
+  const targetWidth = Math.max(256, Math.floor(Number(width) || resolvePaperWidthPx(paperWidth)))
+  const isCompact = targetWidth <= 400
+  const pad = isCompact ? 8 : 14
+  const fontScale = isCompact ? 0.76 : 1
+  const px = (n) => Math.max(12, Math.round(n * fontScale))
+  const fontFamily = '"Segoe UI", "Roboto", "Arial", sans-serif'
+
   const items = (hoaDon?.danhSachMon || []).filter((m) => !m.daHuy && m.trangThaiPhaChe !== 'DaHuy')
-  const lineH = 30
+  const taxBreakdown = Array.isArray(hoaDon?.taxBreakdown || hoaDon?.tax_breakdown_json)
+    ? hoaDon.taxBreakdown || hoaDon.tax_breakdown_json
+    : []
+  const payments = Array.isArray(hoaDon?.danhSachThanhToan) ? hoaDon.danhSachThanhToan : []
+
+  // Dự trù chiều cao đủ rộng rồi cắt gọn đúng theo nội dung thực tế sau khi vẽ
   const estHeight = Math.max(
-    420,
-    260 + items.length * 56 + (logoImage ? 100 : 0) + (qrImage ? 220 : 0)
+    640,
+    520 +
+      items.length * 110 +
+      taxBreakdown.length * 36 +
+      payments.length * 32 +
+      (logoImage ? 120 : 0) +
+      (qrImage ? 240 : 0) +
+      (showPlgWatermark ? 120 : 0)
   )
-  const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = estHeight
-  const ctx = canvas.getContext('2d')
+
+  const workCanvas = document.createElement('canvas')
+  workCanvas.width = targetWidth
+  workCanvas.height = estHeight
+  const ctx = workCanvas.getContext('2d')
+  if (!ctx) {
+    throw new Error('Trình duyệt không hỗ trợ Canvas 2D để dựng ảnh hóa đơn tiếng Việt')
+  }
 
   ctx.fillStyle = '#FFFFFF'
-  ctx.fillRect(0, 0, width, estHeight)
+  ctx.fillRect(0, 0, targetWidth, estHeight)
   ctx.fillStyle = '#000000'
+  ctx.textBaseline = 'top'
 
-  let y = 28
+  let y = 16
+  const drawDivider = (thick = 2) => {
+    ctx.fillRect(pad, y, targetWidth - pad * 2, thick)
+    y += thick + 10
+  }
+
+  const drawCentered = (text, size, bold = false) => {
+    ctx.font = `${bold ? 'bold ' : ''}${px(size)}px ${fontFamily}`
+    ctx.textAlign = 'center'
+    for (const line of wrapCanvasText(ctx, text, targetWidth - pad * 2)) {
+      ctx.fillText(line, targetWidth / 2, y)
+      y += Math.round(px(size) * 1.35)
+    }
+  }
+
+  const drawRow = (left, right, size = 20, bold = false) => {
+    ctx.font = `${bold ? 'bold ' : ''}${px(size)}px ${fontFamily}`
+    const rightStr = String(right || '')
+    const rightW = ctx.measureText(rightStr).width
+    const maxLeftW = Math.max(80, targetWidth - pad * 2 - rightW - 10)
+    const leftLines = wrapCanvasText(ctx, left, maxLeftW)
+    const lineStep = Math.round(px(size) * 1.35)
+    leftLines.forEach((line, idx) => {
+      ctx.textAlign = 'left'
+      ctx.fillText(line, pad, y)
+      if (idx === 0) {
+        ctx.textAlign = 'right'
+        ctx.fillText(rightStr, targetWidth - pad, y)
+      }
+      y += lineStep
+    })
+  }
+
+  // Watermark / Reprint / Tạm tính / Offline
+  const effectiveReprintBanner =
+    reprintBanner ||
+    (laBanSao || Number(soLanIn) >= 2
+      ? `*** BẢN SAO - IN LẠI LẦN ${Math.max(2, Number(soLanIn || 2))} ***`
+      : null)
+  if (effectiveReprintBanner) {
+    drawCentered(effectiveReprintBanner, 20, true)
+    y += 4
+  }
+  if (laDonOffline || hoaDon?.offline) {
+    drawCentered('*** ĐƠN OFFLINE — ĐANG CHỜ ĐỒNG BỘ ***', 19, true)
+    y += 4
+  } else if (laTamTinh) {
+    drawCentered('*** PHIẾU TẠM TÍNH (CHƯA THANH TOÁN) ***', 19, true)
+    y += 4
+  }
+
   if (logoImage) {
-    const logoW = 140
-    const logoH = 80
-    ctx.drawImage(logoImage, (width - logoW) / 2, y, logoW, logoH)
-    y += logoH + 16
+    const logoW = Math.round(140 * fontScale)
+    const logoH = Math.round(80 * fontScale)
+    ctx.drawImage(logoImage, (targetWidth - logoW) / 2, y, logoW, logoH)
+    y += logoH + 12
   }
 
-  ctx.textAlign = 'center'
-  ctx.font = 'bold 28px sans-serif'
-  ctx.fillText(String(tenQuan || 'QUÁN CÀ PHÊ POS').toUpperCase(), width / 2, y)
-  y += 32
+  drawCentered(String(tenQuan || 'QUÁN CÀ PHÊ POS').toUpperCase(), 28, true)
+  if (diaChi) drawCentered(diaChi, 18, false)
 
-  if (diaChi) {
-    ctx.font = '18px sans-serif'
-    ctx.fillText(String(diaChi), width / 2, y)
-    y += 24
+  const sttNum = Number(hoaDon?.soThuTuNgay)
+  if (Number.isInteger(sttNum) && sttNum > 0) {
+    y += 4
+    drawCentered(`SỐ #${String(sttNum).padStart(2, '0')}`, 30, true)
   }
 
-  ctx.font = 'bold 20px sans-serif'
-  ctx.fillText(`HĐ #${hoaDon?.maHoaDon || ''}`, width / 2, y)
-  y += 28
+  const maHD = hoaDon?.maHoaDon || 'TEST'
+  const tenBan = hoaDon?.ban?.map((b) => b.tenBan).join(', ') || 'Mang đi'
+  drawCentered(`HĐ #${maHD} | ${tenBan}`, 20, true)
+  y += 6
 
+  // Meta
   ctx.textAlign = 'left'
-  ctx.font = '18px sans-serif'
+  ctx.font = `${px(18)}px ${fontFamily}`
+  const gio = new Date(hoaDon?.thoiGianTao || hoaDon?.thoigiantao || Date.now()).toLocaleString('vi-VN')
+  ctx.fillText(`Giờ: ${gio}`, pad, y)
+  y += Math.round(px(18) * 1.35)
   if (thuNgan) {
-    ctx.fillText(`Thu ngân: ${thuNgan}`, 12, y)
-    y += 24
+    ctx.fillText(`Thu ngân: ${thuNgan}`, pad, y)
+    y += Math.round(px(18) * 1.35)
   }
-  ctx.fillRect(12, y, width - 24, 2)
-  y += 24
+  if (hoaDon?.khachHang) {
+    const maskedPhone = maskPhoneVi(hoaDon.khachHang.soDienThoai)
+    ctx.fillText(
+      `KH: ${hoaDon.khachHang.tenKH}${maskedPhone ? ` (${maskedPhone})` : ''}`,
+      pad,
+      y
+    )
+    y += Math.round(px(18) * 1.35)
+  }
+
+  y += 4
+  drawDivider(2)
+  drawRow('MÓN / SL', 'THÀNH TIỀN', 19, true)
+  drawDivider(1)
 
   for (const m of items) {
-    ctx.font = 'bold 20px sans-serif'
-    ctx.textAlign = 'left'
-    ctx.fillText(`${m.tenMon} (${m.kichThuoc || 'M'}) x${m.soLuong}`, 12, y)
-    ctx.textAlign = 'right'
-    ctx.fillText(`${Math.round(Number(m.thanhTien || 0)).toLocaleString('vi-VN')}đ`, width - 12, y)
-    y += lineH
+    const title = `${m.tenMon}${m.kichThuoc ? ` (${m.kichThuoc})` : ''} x${m.soLuong}`
+    drawRow(title, formatVndVi(m.thanhTien), 20, true)
+    if (m.toppings?.length) {
+      const tpStr = `+ ${m.toppings.map((t) => `${t.tenTopping} x${t.soLuong}`).join(', ')}`
+      ctx.font = `${px(17)}px ${fontFamily}`
+      ctx.textAlign = 'left'
+      for (const line of wrapCanvasText(ctx, tpStr, targetWidth - pad * 2 - 14)) {
+        ctx.fillText(line, pad + 14, y)
+        y += Math.round(px(17) * 1.32)
+      }
+    }
+    if (m.ghiChu) {
+      ctx.font = `italic ${px(17)}px ${fontFamily}`
+      ctx.textAlign = 'left'
+      for (const line of wrapCanvasText(ctx, `(${m.ghiChu})`, targetWidth - pad * 2 - 14)) {
+        ctx.fillText(line, pad + 14, y)
+        y += Math.round(px(17) * 1.32)
+      }
+    }
+    y += 4
   }
 
-  ctx.fillRect(12, y - 10, width - 24, 2)
-  y += 20
+  drawDivider(2)
 
-  const drawRow = (label, value, bold = false) => {
-    ctx.font = bold ? 'bold 24px sans-serif' : '20px sans-serif'
-    ctx.textAlign = 'left'
-    ctx.fillText(label, 12, y)
-    ctx.textAlign = 'right'
-    ctx.fillText(value, width - 12, y)
-    y += bold ? 34 : 28
-  }
-
+  const tienGiamKM = Number(hoaDon?.tienGiamKM || 0)
+  const tienGiamDiem = Number(hoaDon?.tienGiamDiem || 0)
+  const diemSuDung = Number(hoaDon?.diemSuDung || 0)
   const phiPhucVu = Number(hoaDon?.phiPhucVu ?? hoaDon?.tienPhiPhucVu ?? 0)
   const thueVAT = Number(hoaDon?.thueVAT ?? hoaDon?.tienThueVAT ?? hoaDon?.tienVat ?? 0)
-  if (phiPhucVu > 0) drawRow('Phí phục vụ:', `+${Math.round(phiPhucVu).toLocaleString('vi-VN')}đ`)
-  if (thueVAT > 0) drawRow('Thuế VAT:', `+${Math.round(thueVAT).toLocaleString('vi-VN')}đ`)
 
-  const tongCong = Number(hoaDon?.tongTienThanhToan ?? hoaDon?.tongSauGiam ?? hoaDon?.tongTamTinh ?? 0)
-  drawRow('TỔNG CỘNG:', `${Math.round(tongCong).toLocaleString('vi-VN')}đ`, true)
-
-  if (qrImage) {
-    const qrSize = 190
-    ctx.drawImage(qrImage, (width - qrSize) / 2, y + 6, qrSize, qrSize)
-    y += qrSize + 24
+  if (tienGiamKM > 0 || tienGiamDiem > 0 || phiPhucVu > 0 || thueVAT > 0 || taxBreakdown.length > 0) {
+    drawRow('Tạm tính:', formatVndVi(hoaDon?.tongTamTinh ?? 0), 19, false)
+    if (tienGiamKM > 0) {
+      const labelKm = hoaDon?.maKhuyenMai ? `Giảm KM (${hoaDon.maKhuyenMai}):` : 'Giảm khuyến mãi:'
+      drawRow(labelKm, `-${formatVndVi(tienGiamKM)}`, 19, false)
+    }
+    if (tienGiamDiem > 0) {
+      drawRow(`Đổi điểm (${diemSuDung} điểm):`, `-${formatVndVi(tienGiamDiem)}`, 19, false)
+    }
+    if (phiPhucVu > 0) {
+      const pctSrv = Number(hoaDon?.tyLePhiPhucVu || 0)
+      const srvLabel = pctSrv > 0 ? `Phí phục vụ (${pctSrv}%):` : 'Phí phục vụ:'
+      drawRow(srvLabel, `+${formatVndVi(phiPhucVu)}`, 19, false)
+    }
+    if (taxBreakdown.length > 0) {
+      for (const b of taxBreakdown) {
+        const rateLbl = b.isKct ? 'KCT (0%)' : `VAT ${Number(b.vatRate || 0)}%`
+        drawRow(
+          `  ${rateLbl} (DT ${formatVndVi(b.taxableBase || 0)}):`,
+          formatVndVi(b.vatAmount || 0),
+          17,
+          false
+        )
+      }
+    } else if (thueVAT > 0) {
+      const pctVat = Number(hoaDon?.tyLeThueVAT || 0)
+      const vatLabel = pctVat > 0 ? `Thuế VAT (${pctVat}%):` : 'Thuế VAT:'
+      drawRow(vatLabel, `+${formatVndVi(thueVAT)}`, 19, false)
+    }
   }
 
-  const rasterBytes = canvasToEscPosRasterGsV0(canvas)
-  return { canvas, rasterBytes }
+  const tongCong = Number(hoaDon?.tongTienThanhToan ?? hoaDon?.tongSauGiam ?? hoaDon?.tongTamTinh ?? 0)
+  drawRow('TỔNG CỘNG:', formatVndVi(tongCong), 25, true)
+
+  if (payments.length > 0) {
+    for (const p of payments) {
+      drawRow(`  TT (${p.phuongThucTT}):`, formatVndVi(p.soTien), 18, false)
+    }
+  }
+
+  y += 4
+  drawDivider(1)
+
+  const maDoiChieu = String(maHD).slice(-4).toUpperCase()
+  const gioIn = new Date().toLocaleTimeString('vi-VN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+  drawCentered(`MÃ ĐỐI CHIẾU: #${maDoiChieu} | GIỜ IN: ${gioIn}`, 17, true)
+  drawCentered('Quý khách vui lòng kiểm tra ĐÚNG GIỜ IN & STT', 16, false)
+
+  const einvoiceCode = String(hoaDon?.einvoiceLookupCode || hoaDon?.einvoice_lookup_code || '').trim()
+  if (einvoiceCode && !laTamTinh) {
+    y += 4
+    drawCentered(`HÓA ĐƠN ĐIỆN TỬ (MTT) - MÃ: ${einvoiceCode}`, 17, true)
+  }
+
+  if (qrImage) {
+    const qrSize = Math.round(180 * fontScale)
+    ctx.drawImage(qrImage, (targetWidth - qrSize) / 2, y + 6, qrSize, qrSize)
+    y += qrSize + 18
+  }
+
+  drawCentered('Cảm ơn Quý khách & Hẹn gặp lại!', 19, true)
+
+  if (showPlgWatermark) {
+    y += 4
+    drawDivider(1)
+    drawCentered('Phần mềm CafePOS — Mở quán trong 30s', 16, true)
+    if (plgReferralUrl) {
+      drawCentered(String(plgReferralUrl).replace(/^https?:\/\//i, ''), 15, false)
+    }
+  }
+
+  const finalHeight = Math.min(estHeight, Math.max(120, Math.ceil(y + 16)))
+  const canvas = document.createElement('canvas')
+  canvas.width = targetWidth
+  canvas.height = finalHeight
+  const finalCtx = canvas.getContext('2d')
+  if (finalCtx) {
+    finalCtx.fillStyle = '#FFFFFF'
+    finalCtx.fillRect(0, 0, targetWidth, finalHeight)
+    finalCtx.drawImage(workCanvas, 0, 0, targetWidth, finalHeight, 0, 0, targetWidth, finalHeight)
+  }
+
+  const targetCanvas = finalCtx ? canvas : workCanvas
+  const rasterBytes = canvasToEscPosRasterGsV0(targetCanvas)
+  return {
+    canvas: targetCanvas,
+    rasterBytes,
+    rasterBase64: uint8ToBase64(rasterBytes),
+    width: targetCanvas.width,
+    height: targetCanvas.height,
+  }
 }

@@ -9,7 +9,8 @@ const {
     insertLedgerLine,
 } = require('./inventoryCogsPhase4Engine');
 const { maskPhoneForRole } = require('./vnTaxAndEInvoiceService');
-const { loadBranchAvailability86Map } = require('./kdsPhase2Engine');
+const { loadBranchAvailability86Map, normalizeBranchId } = require('./kdsPhase2Engine');
+const { emitToBranch } = require('../src/core/socketRooms');
 
 // =============================================================================
 // PHÂN HỆ 8: CHIẾN LƯỢC MỞ RỘNG TỆP KHÁCH HÀNG & HỆ SINH THÁI TÍNH NĂNG
@@ -494,6 +495,8 @@ function registerEcosystemPhase8Routes(
         layTenantId,
         kiemTraToken,
         choPhepVaiTro,
+        yeuCauTinhNang,
+        layEntitlementTenant,
         ghiAuditLog,
         guiLoi,
         LoiNghiepVu,
@@ -502,6 +505,13 @@ function registerEcosystemPhase8Routes(
         taoDonHangTrongGiaoDich,
     }
 ) {
+    const gate = (flag) => (typeof yeuCauTinhNang === 'function' ? yeuCauTinhNang(flag) : (_req, _res, next) => next());
+    const gateQrOrder = gate('qr_order');
+    const gateCrmTiers = gate('crm_tiers');
+    const gateMultiBranch = gate('multi_branch');
+    const gateAggregator = gate('aggregator_hub');
+    const gateHorizontal = gate('horizontal_fnb');
+    const gateAiBi = gate('ai_forecast_upsell');
     // =========================================================================
     // A. QR ORDER TẠI BÀN + CHỐNG PHÁ HOẠI 3 LỚP (/m/:tenantSlug/:tableToken)
     // =========================================================================
@@ -523,74 +533,74 @@ function registerEcosystemPhase8Routes(
             }
         }
 
-        const [spRes, tpRes, zoneRes, bakeryMap, branch86, modData] = await Promise.all([
-            client.query(
-                `SELECT sp.MaMon, sp.TenMon, sp.NhomMon, COALESCE(sp.TamHet, FALSE) AS TamHet,
-                        sz.KichThuoc, sz.GiaBan
-                   FROM SanPham sp
-                   JOIN SanPham_Size sz ON sp.MaMon = sz.MaMon
-                  WHERE sp.DangKinhDoanh = TRUE AND COALESCE(sp.TenantId, 'DEFAULT') = $1
-                  ORDER BY sp.NhomMon, sp.TenMon, sz.GiaBan`,
+        // Thực thi tuần tự trên cùng 1 pg.Client trong transaction để tránh đụng SAVEPOINT (25P02)
+        const spRes = await client.query(
+            `SELECT sp.MaMon, sp.TenMon, sp.NhomMon, COALESCE(sp.TamHet, FALSE) AS TamHet,
+                    sz.KichThuoc, sz.GiaBan
+               FROM SanPham sp
+               JOIN SanPham_Size sz ON sp.MaMon = sz.MaMon
+              WHERE sp.DangKinhDoanh = TRUE AND COALESCE(sp.TenantId, 'DEFAULT') = $1
+              ORDER BY sp.NhomMon, sp.TenMon, sz.GiaBan`,
+            [tenantId]
+        );
+        const tpRes = await client.query(
+            `SELECT MaTopping, TenTopping,
+                    COALESCE((to_jsonb(Topping)->>'giatopping')::numeric, (to_jsonb(Topping)->>'giathem')::numeric, 0) AS GiaTopping,
+                    COALESCE(TamHet, FALSE) AS TamHet
+               FROM Topping
+              WHERE DangKinhDoanh = TRUE AND COALESCE(TenantId, 'DEFAULT') = $1
+              ORDER BY TenTopping`,
+            [tenantId]
+        );
+
+        let zoneRes = { rows: [] };
+        if (khuVucGia !== 'DEFAULT') {
+            await client.query('SAVEPOINT sp_qr_zone_prices');
+            try {
+                zoneRes = await client.query(
+                    'SELECT MaMon, KichThuoc, GiaBan FROM SanPham_GiaVung WHERE TenantId = $1 AND KhuVucGia = $2',
+                    [tenantId, khuVucGia]
+                );
+                await client.query('RELEASE SAVEPOINT sp_qr_zone_prices');
+            } catch {
+                await client.query('ROLLBACK TO SAVEPOINT sp_qr_zone_prices').catch(() => {});
+                zoneRes = { rows: [] };
+            }
+        }
+
+        const bakeryMap = await layBanDoGiamGiaLoBanhHomNay(client, tenantId);
+        const branch86 = await loadBranchAvailability86Map(client, tenantId, branchId || 'DEFAULT');
+
+        let modData = { links: [], groups: [], options: [] };
+        await client.query('SAVEPOINT sp_qr_modifiers');
+        try {
+            const linkRes = await client.query(
+                `SELECT mamon, groupid, thutuhienthi
+                   FROM public.sanpham_modifier_groups
+                  WHERE tenantid = $1
+                  ORDER BY thutuhienthi ASC, groupid ASC`,
                 [tenantId]
-            ),
-            client.query(
-                `SELECT MaTopping, TenTopping, GiaTopping, COALESCE(TamHet, FALSE) AS TamHet
-                   FROM Topping
-                  WHERE DangKinhDoanh = TRUE AND COALESCE(TenantId, 'DEFAULT') = $1
-                  ORDER BY TenTopping`,
+            );
+            const grpRes = await client.query(
+                `SELECT id, tengroup, loai, batbuoc, chontoithieu, chontoida, soluongmienphi, thutuhienthi
+                   FROM public.modifier_groups
+                  WHERE tenantid = $1 AND danghoatdong = TRUE
+                  ORDER BY thutuhienthi ASC, id ASC`,
                 [tenantId]
-            ),
-            (async () => {
-                if (khuVucGia === 'DEFAULT') return { rows: [] };
-                await client.query('SAVEPOINT sp_qr_zone_prices');
-                try {
-                    const r = await client.query(
-                        'SELECT MaMon, KichThuoc, GiaBan FROM SanPham_GiaVung WHERE TenantId = $1 AND KhuVucGia = $2',
-                        [tenantId, khuVucGia]
-                    );
-                    await client.query('RELEASE SAVEPOINT sp_qr_zone_prices');
-                    return r;
-                } catch {
-                    await client.query('ROLLBACK TO SAVEPOINT sp_qr_zone_prices').catch(() => {});
-                    return { rows: [] };
-                }
-            })(),
-            layBanDoGiamGiaLoBanhHomNay(client, tenantId),
-            loadBranchAvailability86Map(client, tenantId, branchId || 'DEFAULT'),
-            (async () => {
-                await client.query('SAVEPOINT sp_qr_modifiers');
-                try {
-                    const [linkRes, grpRes, optRes] = await Promise.all([
-                        client.query(
-                            `SELECT mamon, groupid, thutuhienthi
-                               FROM public.sanpham_modifier_groups
-                              WHERE tenantid = $1
-                              ORDER BY thutuhienthi ASC, groupid ASC`,
-                            [tenantId]
-                        ),
-                        client.query(
-                            `SELECT id, tengroup, loai, batbuoc, chontoithieu, chontoida, soluongmienphi, thutuhienthi
-                               FROM public.modifier_groups
-                              WHERE tenantid = $1 AND danghoatdong = TRUE
-                              ORDER BY thutuhienthi ASC, id ASC`,
-                            [tenantId]
-                        ),
-                        client.query(
-                            `SELECT id, groupid, tenoption, teninngan, lamacdinh, giacongthem, toidasoluong, tamhet, thutuhienthi
-                               FROM public.modifier_options
-                              WHERE tenantid = $1
-                              ORDER BY thutuhienthi ASC, id ASC`,
-                            [tenantId]
-                        ),
-                    ]);
-                    await client.query('RELEASE SAVEPOINT sp_qr_modifiers');
-                    return { links: linkRes.rows, groups: grpRes.rows, options: optRes.rows };
-                } catch {
-                    await client.query('ROLLBACK TO SAVEPOINT sp_qr_modifiers').catch(() => {});
-                    return { links: [], groups: [], options: [] };
-                }
-            })(),
-        ]);
+            );
+            const optRes = await client.query(
+                `SELECT id, groupid, tenoption, teninngan, lamacdinh, giacongthem, toidasoluong, tamhet, thutuhienthi
+                   FROM public.modifier_options
+                  WHERE tenantid = $1
+                  ORDER BY thutuhienthi ASC, id ASC`,
+                [tenantId]
+            );
+            await client.query('RELEASE SAVEPOINT sp_qr_modifiers');
+            modData = { links: linkRes.rows, groups: grpRes.rows, options: optRes.rows };
+        } catch {
+            await client.query('ROLLBACK TO SAVEPOINT sp_qr_modifiers').catch(() => {});
+            modData = { links: [], groups: [], options: [] };
+        }
 
         // Dựng bản đồ modifierGroups theo MaMon (kết hợp 86 chi nhánh từ branch_availability_86)
         const optsByGroup = new Map();
@@ -905,6 +915,7 @@ function registerEcosystemPhase8Routes(
 
                 return {
                     maDonQr,
+                    branchId: normalizeBranchId(info.branchid || 'DEFAULT'),
                     trangThai,
                     batBuocThanhToanTruoc: requirePrepay,
                     tongTienTamTinh,
@@ -918,15 +929,22 @@ function registerEcosystemPhase8Routes(
                 };
             }, tenantId);
 
-            // Bắn thông báo real-time tới POS Thu ngân & Phục vụ để bấm "Duyệt đơn QR" 1 chạm
-            io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('QR_ORDER_MOI', {
-                maDonQr: ketQua.maDonQr,
-                maBan: ketQua.maBan,
-                tenBan: ketQua.tenBan,
-                trangThai: ketQua.trangThai,
-                tongTienTamTinh: ketQua.tongTienTamTinh,
-                soMon: ketQua.danhSachMon.reduce((s, i) => s + i.soLuong, 0),
-                thoiGianTao: new Date().toISOString(),
+            // Bắn thông báo real-time tới POS Thu ngân & Phục vụ đúng phòng 3 tầng để bấm "Duyệt đơn QR" 1 chạm
+            emitToBranch(io, {
+                tenantId,
+                branchId: ketQua.branchId,
+                roles: ['POS', 'WAITER'],
+                event: 'QR_ORDER_MOI',
+                payload: {
+                    maDonQr: ketQua.maDonQr,
+                    branchId: ketQua.branchId,
+                    maBan: ketQua.maBan,
+                    tenBan: ketQua.tenBan,
+                    trangThai: ketQua.trangThai,
+                    tongTienTamTinh: ketQua.tongTienTamTinh,
+                    soMon: ketQua.danhSachMon.reduce((s, i) => s + i.soLuong, 0),
+                    thoiGianTao: new Date().toISOString(),
+                },
             });
 
             res.status(201).json({
@@ -941,7 +959,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // 3. POS lấy danh sách đơn QR chờ duyệt
-    app.get('/api/qr-orders', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) => {
+    app.get('/api/qr-orders', kiemTraToken, choPhepVaiTro(1, 3, 4), gateQrOrder, async (req, res) => {
         const tenantId = layTenantId(req);
         const status = String(req.query.trangThai || '').trim().toUpperCase();
         try {
@@ -973,7 +991,7 @@ function registerEcosystemPhase8Routes(
                     batBuocThanhToanTruoc: Boolean(x.batbuocthanhtoantruoc),
                     daThanhToanTruoc: Boolean(x.dathanhtoantruoc),
                     tongTienTamTinh: Number(x.tongtientamtinh || 0),
-                    soDienThoaiKhach: x.sodienthoaikhach,
+                    soDienThoaiKhach: maskPhoneForRole(x.sodienthoaikhach, req.user?.vaiTro),
                     tenKhach: x.tenkhach,
                     ghiChuChung: x.ghichuchung,
                     danhSachMon: Array.isArray(x.danhsachmon) ? x.danhsachmon : [],
@@ -990,7 +1008,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // 4. POS Duyệt đơn QR 1 chạm -> đẩy thẳng xuống Quầy Bar KDS + Trừ kho BOM
-    app.post('/api/qr-orders/:maDonQr/approve', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) => {
+    app.post('/api/qr-orders/:maDonQr/approve', kiemTraToken, choPhepVaiTro(1, 3, 4), gateQrOrder, async (req, res) => {
         const tenantId = layTenantId(req);
         const maDonQr = String(req.params.maDonQr || '').trim();
         const { daXacNhanVietQr = false, allowNegativeStock = true } = req.body || {};
@@ -1022,11 +1040,13 @@ function registerEcosystemPhase8Routes(
                     maKH = khFound.rows[0]?.makh || null;
                 }
 
+                const qrBranchId = normalizeBranchId(qrOrder.branchid || req.user?.branchId || 'DEFAULT');
                 const orderRes = await taoDonHangTrongGiaoDich(client, {
                     maBan: qrOrder.maban,
                     maKH,
                     maNV: req.user.maNV,
                     tenantId,
+                    branchId: qrBranchId,
                     allowNegativeStock: Boolean(allowNegativeStock),
                     danhSachMon: items.map((m) => ({
                         maMon: m.maMon,
@@ -1034,6 +1054,9 @@ function registerEcosystemPhase8Routes(
                         soLuong: m.soLuong,
                         ghiChu: m.ghiChu || (qrOrder.ghichuchung ? `[QR] ${qrOrder.ghichuchung}` : '[QR Order]'),
                         toppings: (m.toppings || []).map((t) => ({ maTopping: t.maTopping, soLuong: t.soLuong || 1 })),
+                        modifiers: Array.isArray(m.modifiers) ? m.modifiers : [],
+                        ...(Number(m.donGia) >= 0 ? { donGia: Number(m.donGia) } : {}),
+                        ...(Number(m.giaModifiers) >= 0 ? { giaModifiers: Number(m.giaModifiers) } : {}),
                     })),
                 });
 
@@ -1059,24 +1082,58 @@ function registerEcosystemPhase8Routes(
                     ip: req.ip,
                 });
 
-                return { maDonQr, maBan: qrOrder.maban, tenBan: qrOrder.tenban, ...orderRes };
+                return { maDonQr, branchId: orderRes.branchId || qrBranchId, maBan: qrOrder.maban, tenBan: qrOrder.tenban, ...orderRes };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'barista')).emit('DON_MOI', {
-                maHoaDon: ketQua.maHoaDon,
-                maBan: ketQua.maBan,
-                nguon: 'QR_ORDER',
-                soLuongMon: ketQua.soMonMoi,
-            });
-            io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('QR_ORDER_CAP_NHAT', {
-                maDonQr,
-                trangThai: 'APPROVED',
-                maHoaDon: ketQua.maHoaDon,
+            if (ketQua.kdsEmitPlan && typeof ketQua.kdsEmitPlan.flush === 'function') {
+                ketQua.kdsEmitPlan.flush();
+            } else {
+                const kdsOrderPayload = {
+                    maHoaDon: ketQua.maHoaDon,
+                    branchId: ketQua.branchId,
+                    maBan: ketQua.maBan,
+                    tenBan: ketQua.tenBan,
+                    nguon: 'QR_ORDER',
+                    soLuongMon: ketQua.soMonMoi,
+                };
+                emitToBranch(io, {
+                    tenantId,
+                    branchId: ketQua.branchId,
+                    roles: ['KDS', 'EXPO'],
+                    station: 'ALL',
+                    event: 'order:new',
+                    payload: kdsOrderPayload,
+                });
+                emitToBranch(io, {
+                    tenantId,
+                    branchId: ketQua.branchId,
+                    roles: ['KDS', 'EXPO'],
+                    station: 'ALL',
+                    event: 'CO_DON_MOI',
+                    payload: kdsOrderPayload,
+                });
+            }
+            emitToBranch(io, {
+                tenantId,
+                branchId: ketQua.branchId,
+                roles: ['POS', 'WAITER'],
+                event: 'QR_ORDER_CAP_NHAT',
+                payload: {
+                    maDonQr,
+                    trangThai: 'APPROVED',
+                    maHoaDon: ketQua.maHoaDon,
+                },
             });
             if (ketQua.maBan) {
-                io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', {
-                    maBan: ketQua.maBan,
-                    trangThai: 2,
+                emitToBranch(io, {
+                    tenantId,
+                    branchId: ketQua.branchId,
+                    roles: ['POS', 'WAITER'],
+                    event: 'BAN_THAY_DOI',
+                    payload: {
+                        maBan: ketQua.maBan,
+                        trangThai: 2,
+                    },
                 });
             }
 
@@ -1091,7 +1148,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // 5. POS Từ chối đơn QR spam
-    app.post('/api/qr-orders/:maDonQr/reject', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) => {
+    app.post('/api/qr-orders/:maDonQr/reject', kiemTraToken, choPhepVaiTro(1, 3, 4), gateQrOrder, async (req, res) => {
         const tenantId = layTenantId(req);
         const maDonQr = String(req.params.maDonQr || '').trim();
         const lyDo = String(req.body?.lyDo || 'Đơn không hợp lệ / Khách không có tại bàn').trim().slice(0, 200);
@@ -1101,13 +1158,19 @@ function registerEcosystemPhase8Routes(
                 `UPDATE DonQrChoDuyet
                     SET TrangThai = 'REJECTED', LyDoTuChoi = $3, NguoiDuyet = $4, ThoiGianXuLy = now()
                   WHERE MaDonQr = $1 AND TenantId = $2 AND TrangThai IN ('PENDING_APPROVAL', 'AWAITING_PAYMENT')
-                  RETURNING MaDonQr`,
+                  RETURNING MaDonQr, BranchId`,
                 [maDonQr, tenantId, lyDo, req.user.maNV]
             );
             if (upd.rows.length === 0) {
                 return res.status(404).json({ message: 'Không tìm thấy đơn QR đang chờ để từ chối!' });
             }
-            io.to(roomTen(tenantId, 'thungan')).emit('QR_ORDER_CAP_NHAT', { maDonQr, trangThai: 'REJECTED' });
+            emitToBranch(io, {
+                tenantId,
+                branchId: normalizeBranchId(upd.rows[0].branchid || req.user?.branchId || 'DEFAULT'),
+                roles: ['POS', 'WAITER'],
+                event: 'QR_ORDER_CAP_NHAT',
+                payload: { maDonQr, trangThai: 'REJECTED' },
+            });
             res.json({ message: `Đã từ chối đơn QR ${maDonQr}!` });
         } catch (error) {
             guiLoi(res, error, 'Lỗi API Từ chối đơn QR:');
@@ -1115,7 +1178,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // 6. Xoay QrToken động & Cấu hình Anti-Spam 3 lớp cho từng bàn
-    app.post('/api/ban/:maBan/qr-rotate', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) => {
+    app.post('/api/ban/:maBan/qr-rotate', kiemTraToken, choPhepVaiTro(1, 3, 4), gateQrOrder, async (req, res) => {
         const tenantId = layTenantId(req);
         const maBan = String(req.params.maBan || '').trim();
         const { rotateToken = true, qrYeuCauMoBan, qrBatBuocVietQR } = req.body || {};
@@ -1168,7 +1231,7 @@ function registerEcosystemPhase8Routes(
     // B. CRM PHÂN HẠNG (ĐỒNG/BẠC/VÀNG/KIM CƯƠNG) + VÍ TRẢ TRƯỚC + ZALO ZNS
     // =========================================================================
 
-    app.get('/api/crm/customers', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {
+    app.get('/api/crm/customers', kiemTraToken, choPhepVaiTro(1, 4), gateCrmTiers, async (req, res) => {
         const tenantId = layTenantId(req);
         const search = String(req.query.q || '').trim();
         const isManager = Number(req.user?.vaiTro) === 1;
@@ -1383,7 +1446,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // Nạp Ví trả trước / Tặng Cashback cho khách hàng + cập nhật ngày sinh
-    app.post('/api/crm/customers/:maKH/wallet-topup', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {
+    app.post('/api/crm/customers/:maKH/wallet-topup', kiemTraToken, choPhepVaiTro(1, 4), gateCrmTiers, async (req, res) => {
         const tenantId = layTenantId(req);
         const maKH = String(req.params.maKH || '').trim();
         const soTien = Number(req.body?.soTien || 0);
@@ -1435,7 +1498,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // Hàng đợi Zalo ZNS & Kích hoạt chúc mừng sinh nhật tự động
-    app.get('/api/crm/zns/outbox', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.get('/api/crm/zns/outbox', kiemTraToken, choPhepVaiTro(1), gateCrmTiers, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const r = await qTenant(
@@ -1464,7 +1527,7 @@ function registerEcosystemPhase8Routes(
         }
     });
 
-    app.post('/api/crm/zns/trigger-birthday', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/crm/zns/trigger-birthday', kiemTraToken, choPhepVaiTro(1), gateCrmTiers, async (req, res) => {
         const tenantId = layTenantId(req);
         const giftCashback = Math.max(0, Number(req.body?.tangCashback ?? 30000));
         try {
@@ -1612,6 +1675,40 @@ function registerEcosystemPhase8Routes(
         }
 
         try {
+            // [Batch 6 — SaaS Entitlement] Kiểm tra hạn mức maxBranches & quyền multi_branch trên BE trước khi tạo chi nhánh mới
+            const ent =
+                typeof layEntitlementTenant === 'function'
+                    ? await layEntitlementTenant(pool, tenantId)
+                    : null;
+            if (ent) {
+                const cntRes = await qTenant(
+                    req,
+                    `SELECT COUNT(*) AS cnt FROM ChiNhanh WHERE TenantId = $1 AND COALESCE(TrangThai, 'ACTIVE') <> 'DELETED'`,
+                    [tenantId]
+                );
+                const currentBranches = Number(cntRes.rows[0]?.cnt || 0);
+                const maxBranches =
+                    ent.flags?.maxBranches !== undefined && ent.flags?.maxBranches !== null
+                        ? Number(ent.flags.maxBranches)
+                        : 1;
+                const multiBranchEnabled = ent.flags?.multi_branch !== false;
+                if (
+                    (maxBranches > 0 && currentBranches >= maxBranches) ||
+                    (currentBranches >= 1 && !multiBranchEnabled)
+                ) {
+                    const effectiveLimit = maxBranches > 0 ? maxBranches : 1;
+                    return res.status(403).json({
+                        code: 'MAX_BRANCHES_EXCEEDED',
+                        feature: 'multi_branch',
+                        currentBranches,
+                        maxBranches: effectiveLimit,
+                        currentPlan: ent.goiCuoc,
+                        requiredPlan: 'CHAIN',
+                        message: `Gói ${ent.goiCuoc} chỉ cho phép tối đa ${effectiveLimit} chi nhánh (hiện có ${currentBranches}). Vui lòng nâng cấp lên gói CHAIN (499k/CN — tối thiểu 3 điểm bán) để mở rộng thêm chi nhánh!`,
+                    });
+                }
+            }
+
             const branchId = `${tenantId}_${cleanCode}`;
             const ketQua = await chayGiaoDich(async (client) => {
                 const ins = await client.query(
@@ -1663,7 +1760,7 @@ function registerEcosystemPhase8Routes(
         }
     });
 
-    app.post('/api/branches/:branchId/terminals', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/branches/:branchId/terminals', kiemTraToken, choPhepVaiTro(1), gateMultiBranch, async (req, res) => {
         const tenantId = layTenantId(req);
         const branchId = String(req.params.branchId || '').trim();
         const tenQuay = String(req.body?.tenQuay || '').trim();
@@ -1688,7 +1785,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // Báo cáo hợp nhất chuỗi đa chi nhánh + Tự động tính Phí bản quyền Nhượng quyền (% doanh thu thuần)
-    app.get('/api/branches/consolidated-report', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.get('/api/branches/consolidated-report', kiemTraToken, choPhepVaiTro(1), gateMultiBranch, async (req, res) => {
         const tenantId = layTenantId(req);
         const { dateISO } = layGioHienTaiVN();
         const tuNgay = String(req.query.tuNgay || `${dateISO.slice(0, 8)}01`);
@@ -1750,7 +1847,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // Menu tập trung đẩy theo vùng giá (VD: DA_NANG 39k / HCM 45k)
-    app.get('/api/branches/regional-prices', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.get('/api/branches/regional-prices', kiemTraToken, choPhepVaiTro(1), gateMultiBranch, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const r = await qTenant(
@@ -1778,7 +1875,7 @@ function registerEcosystemPhase8Routes(
         }
     });
 
-    app.post('/api/branches/regional-prices/push', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/branches/regional-prices/push', kiemTraToken, choPhepVaiTro(1), gateMultiBranch, async (req, res) => {
         const tenantId = layTenantId(req);
         const { khuVucGia, items = [] } = req.body || {};
         const cleanZone = String(khuVucGia || '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
@@ -1816,7 +1913,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // Kho tổng & Điều chuyển nội bộ giữa các chi nhánh (Phân hệ 4: 3 trạng thái PENDING -> IN_TRANSIT -> COMPLETED + Chênh lệch vận chuyển)
-    app.get('/api/branches/transfers', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.get('/api/branches/transfers', kiemTraToken, choPhepVaiTro(1), gateMultiBranch, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const [pRes, ctRes] = await Promise.all([
@@ -1881,7 +1978,7 @@ function registerEcosystemPhase8Routes(
         }
     });
 
-    app.post('/api/branches/transfers', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/branches/transfers', kiemTraToken, choPhepVaiTro(1), gateMultiBranch, async (req, res) => {
         const tenantId = layTenantId(req);
         const { tuBranchId, denBranchId, ghiChu = '', items = [] } = req.body || {};
         if (!tuBranchId || !denBranchId || tuBranchId === denBranchId) {
@@ -1926,7 +2023,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // Bước 2: Xuất xe giao hàng (PENDING -> IN_TRANSIT): trừ ngay kho nguồn, cộng TonDangChuyen ở chi nhánh đích & đóng băng DonGiaVon!
-    app.post('/api/branches/transfers/:maPhieu/dispatch', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/branches/transfers/:maPhieu/dispatch', kiemTraToken, choPhepVaiTro(1), gateMultiBranch, async (req, res) => {
         const tenantId = layTenantId(req);
         const maPhieu = String(req.params.maPhieu || '').trim();
         try {
@@ -2030,7 +2127,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // Bước 3: Kiểm nhận hàng tại Chi nhánh đích (IN_TRANSIT/PENDING -> COMPLETED + xử lý thiếu hụt vận chuyển DAMAGED_DELIVERY)
-    app.post('/api/branches/transfers/:maPhieu/complete', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/branches/transfers/:maPhieu/complete', kiemTraToken, choPhepVaiTro(1), gateMultiBranch, async (req, res) => {
         const tenantId = layTenantId(req);
         const maPhieu = String(req.params.maPhieu || '').trim();
         const receivedItems = Array.isArray(req.body?.receivedItems) ? req.body.receivedItems : [];
@@ -2244,7 +2341,7 @@ function registerEcosystemPhase8Routes(
     // D. AGGREGATOR HUB (GRABFOOD / SHOPEEFOOD / BEFOOD)
     // =========================================================================
 
-    app.get('/api/aggregators/orders', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) => {
+    app.get('/api/aggregators/orders', kiemTraToken, choPhepVaiTro(1, 3, 4), gateAggregator, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const r = await qTenant(
@@ -2295,7 +2392,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // Mô phỏng / Nhận đơn từ sàn GrabFood / ShopeeFood / BeFood trực tiếp vào POS
-    app.post('/api/aggregators/simulate', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {
+    app.post('/api/aggregators/simulate', kiemTraToken, choPhepVaiTro(1, 4), gateAggregator, async (req, res) => {
         const tenantId = layTenantId(req);
         const nenTang = ['GRABFOOD', 'SHOPEEFOOD', 'BEFOOD'].includes(String(req.body?.nenTang || 'GRABFOOD').toUpperCase())
             ? String(req.body?.nenTang || 'GRABFOOD').toUpperCase()
@@ -2357,7 +2454,13 @@ function registerEcosystemPhase8Routes(
                 return { maDonSan, nenTang, maDonNgoai, tongTienHang, phiChietKhauSan, doanhThuThucNhan, danhSachMon: items };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan')).emit('AGGREGATOR_ORDER_MOI', ketQua);
+            emitToBranch(io, {
+                tenantId,
+                branchId: normalizeBranchId(req.body?.branchId || req.user?.branchId || 'DEFAULT'),
+                roles: ['POS'],
+                event: 'AGGREGATOR_ORDER_MOI',
+                payload: ketQua,
+            });
             res.status(201).json({
                 message: `🛵 Có đơn mới từ ${ketQua.nenTang} (${ketQua.maDonNgoai}) — Bấm Nhận đơn 1 chạm để đẩy thẳng xuống Bar!`,
                 order: ketQua,
@@ -2368,7 +2471,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // Nhận đơn từ Sàn -> 1 chạm tự tạo Hóa đơn POS + đẩy thẳng xuống KDS Barista (không phải gõ tay lại!)
-    app.post('/api/aggregators/orders/:maDonSan/accept', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {
+    app.post('/api/aggregators/orders/:maDonSan/accept', kiemTraToken, choPhepVaiTro(1, 4), gateAggregator, async (req, res) => {
         const tenantId = layTenantId(req);
         const maDonSan = String(req.params.maDonSan || '').trim();
         try {
@@ -2384,11 +2487,13 @@ function registerEcosystemPhase8Routes(
                 }
 
                 const items = Array.isArray(agg.danhsachmon) ? agg.danhsachmon : [];
+                const aggBranchId = normalizeBranchId(agg.branchid || req.body?.branchId || req.user?.branchId || 'DEFAULT');
                 const orderRes = await taoDonHangTrongGiaoDich(client, {
                     maBan: null,
                     maKH: null,
                     maNV: req.user.maNV,
                     tenantId,
+                    branchId: aggBranchId,
                     allowNegativeStock: true,
                     danhSachMon: items.map((i) => ({
                         maMon: i.maMon,
@@ -2406,18 +2511,53 @@ function registerEcosystemPhase8Routes(
                     [maDonSan, tenantId, String(orderRes.maHoaDon)]
                 );
 
-                return { maDonSan, nenTang: agg.nentang, maDonNgoai: agg.madonngoai, maHoaDonPos: orderRes.maHoaDon, soMon: orderRes.soMonMoi };
+                return {
+                    maDonSan,
+                    branchId: orderRes.branchId || aggBranchId,
+                    nenTang: agg.nentang,
+                    maDonNgoai: agg.madonngoai,
+                    maHoaDonPos: orderRes.maHoaDon,
+                    soMon: orderRes.soMonMoi,
+                    kdsEmitPlan: orderRes.kdsEmitPlan || null,
+                };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'barista')).emit('DON_MOI', {
-                maHoaDon: ketQua.maHoaDonPos,
-                nguon: ketQua.nenTang,
-                soLuongMon: ketQua.soMon,
-            });
-            io.to(roomTen(tenantId, 'thungan')).emit('AGGREGATOR_ORDER_CAP_NHAT', {
-                maDonSan,
-                trangThai: 'ACCEPTED',
-                maHoaDonPos: ketQua.maHoaDonPos,
+            if (ketQua.kdsEmitPlan && typeof ketQua.kdsEmitPlan.flush === 'function') {
+                ketQua.kdsEmitPlan.flush();
+            } else {
+                const aggKdsPayload = {
+                    maHoaDon: ketQua.maHoaDonPos,
+                    branchId: ketQua.branchId,
+                    nguon: ketQua.nenTang,
+                    soLuongMon: ketQua.soMon,
+                };
+                emitToBranch(io, {
+                    tenantId,
+                    branchId: ketQua.branchId,
+                    roles: ['KDS', 'EXPO'],
+                    station: 'ALL',
+                    event: 'order:new',
+                    payload: aggKdsPayload,
+                });
+                emitToBranch(io, {
+                    tenantId,
+                    branchId: ketQua.branchId,
+                    roles: ['KDS', 'EXPO'],
+                    station: 'ALL',
+                    event: 'CO_DON_MOI',
+                    payload: aggKdsPayload,
+                });
+            }
+            emitToBranch(io, {
+                tenantId,
+                branchId: ketQua.branchId,
+                roles: ['POS'],
+                event: 'AGGREGATOR_ORDER_CAP_NHAT',
+                payload: {
+                    maDonSan,
+                    trangThai: 'ACCEPTED',
+                    maHoaDonPos: ketQua.maHoaDonPos,
+                },
             });
 
             res.json({
@@ -2429,7 +2569,7 @@ function registerEcosystemPhase8Routes(
         }
     });
 
-    app.put('/api/aggregators/orders/:maDonSan/status', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {
+    app.put('/api/aggregators/orders/:maDonSan/status', kiemTraToken, choPhepVaiTro(1, 4), gateAggregator, async (req, res) => {
         const tenantId = layTenantId(req);
         const maDonSan = String(req.params.maDonSan || '').trim();
         const trangThai = String(req.body?.trangThai || '').toUpperCase();
@@ -2454,7 +2594,7 @@ function registerEcosystemPhase8Routes(
     // E. ĐA MÔ HÌNH F&B NGANG: TÍNH GIỜ (BIDA/BOARDGAME/COWORKING) & LÔ BÁNH 19H
     // =========================================================================
 
-    app.get('/api/time-billing/active', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) => {
+    app.get('/api/time-billing/active', kiemTraToken, choPhepVaiTro(1, 3, 4), gateHorizontal, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const r = await qTenant(
@@ -2509,7 +2649,7 @@ function registerEcosystemPhase8Routes(
         }
     });
 
-    app.post('/api/time-billing/start', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) => {
+    app.post('/api/time-billing/start', kiemTraToken, choPhepVaiTro(1, 3, 4), gateHorizontal, async (req, res) => {
         const tenantId = layTenantId(req);
         const {
             maBan,
@@ -2575,12 +2715,26 @@ function registerEcosystemPhase8Routes(
                     ]
                 );
 
-                return { maPhien, maBan, tenBan: banRes.rows[0].tenban, maHoaDon, loaiDichVu: svcType, donGiaTheoGio: rate };
+                return {
+                    maPhien,
+                    branchId: normalizeBranchId(banRes.rows[0].branchid || req.user?.branchId || 'DEFAULT'),
+                    maBan,
+                    tenBan: banRes.rows[0].tenban,
+                    maHoaDon,
+                    loaiDichVu: svcType,
+                    donGiaTheoGio: rate,
+                };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', {
-                maBan: ketQua.maBan,
-                trangThai: 2,
+            emitToBranch(io, {
+                tenantId,
+                branchId: ketQua.branchId,
+                roles: ['POS', 'WAITER'],
+                event: 'BAN_THAY_DOI',
+                payload: {
+                    maBan: ketQua.maBan,
+                    trangThai: 2,
+                },
             });
 
             res.status(201).json({
@@ -2592,7 +2746,7 @@ function registerEcosystemPhase8Routes(
         }
     });
 
-    app.post('/api/time-billing/:maPhien/stop', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) => {
+    app.post('/api/time-billing/:maPhien/stop', kiemTraToken, choPhepVaiTro(1, 3, 4), gateHorizontal, async (req, res) => {
         const tenantId = layTenantId(req);
         const maPhien = String(req.params.maPhien || '').trim();
         try {
@@ -2653,7 +2807,7 @@ function registerEcosystemPhase8Routes(
     });
 
     // Quản lý Lô bánh trong ngày (Tự động giảm giá 50% sau 19h cho Bakery)
-    app.get('/api/bakery/batches', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
+    app.get('/api/bakery/batches', kiemTraToken, choPhepVaiTro(1, 2, 4), gateHorizontal, async (req, res) => {
         const tenantId = layTenantId(req);
         const { dateISO } = layGioHienTaiVN();
         const ngay = String(req.query.ngay || dateISO);
@@ -2691,7 +2845,7 @@ function registerEcosystemPhase8Routes(
         }
     });
 
-    app.post('/api/bakery/batches', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
+    app.post('/api/bakery/batches', kiemTraToken, choPhepVaiTro(1, 2, 4), gateHorizontal, async (req, res) => {
         const tenantId = layTenantId(req);
         const { maMon, soLuongSanXuat = 20, gioGiamGia = 19, phanTramGiam = 50 } = req.body || {};
         if (!maMon || !(Number(soLuongSanXuat) > 0)) {
@@ -2733,7 +2887,7 @@ function registerEcosystemPhase8Routes(
         }
     });
 
-    app.put('/api/bakery/batches/:maLo', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
+    app.put('/api/bakery/batches/:maLo', kiemTraToken, choPhepVaiTro(1, 2, 4), gateHorizontal, async (req, res) => {
         const tenantId = layTenantId(req);
         const maLo = String(req.params.maLo || '').trim();
         const { soLuongConLai, trangThai } = req.body || {};
@@ -2763,7 +2917,7 @@ function registerEcosystemPhase8Routes(
     // F. AI DEMAND FORECASTING (60 NGÀY + THỨ TRONG TUẦN) & SMART UPSELL
     // =========================================================================
 
-    app.get('/api/ai/demand-forecast', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.get('/api/ai/demand-forecast', kiemTraToken, choPhepVaiTro(1), gateAiBi, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const [histRes, stockRes] = await Promise.all([
@@ -2800,7 +2954,7 @@ function registerEcosystemPhase8Routes(
         }
     });
 
-    app.get('/api/ai/smart-upsell', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res) => {
+    app.get('/api/ai/smart-upsell', kiemTraToken, choPhepVaiTro(1, 3, 4), gateAiBi, async (req, res) => {
         const tenantId = layTenantId(req);
         const rawCart = String(req.query.cartMaMon || '').trim();
         const cartMaMonList = rawCart ? rawCart.split(',').map((s) => s.trim()).filter(Boolean) : [];

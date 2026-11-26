@@ -13,6 +13,7 @@ const {
     computePreCloseChecklist,
     computeEndOfDayReconciliation,
 } = require('./paymentShiftPhase3Engine');
+const { emitToBranch } = require('../src/core/socketRooms');
 
 function registerPaymentShiftPhase3Routes(app, deps) {
     const {
@@ -305,7 +306,13 @@ function registerPaymentShiftPhase3Routes(app, deps) {
                 };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan')).emit('CA_THAY_DOI', { trangThai: 'SAFE_DROP_UPDATED', ...updated });
+            emitToBranch(io, {
+                tenantId,
+                branchId: req.body?.branchId || req.user?.branchId || 'DEFAULT',
+                roles: ['POS'],
+                event: 'CA_THAY_DOI',
+                payload: { trangThai: 'SAFE_DROP_UPDATED', ...updated },
+            });
             res.json({
                 message:
                     status === 'CONFIRMED'
@@ -450,11 +457,24 @@ function registerPaymentShiftPhase3Routes(app, deps) {
                 return { ...ttRes, webhookEventId: Number(webhookEventId), maGiaoDichNgoai: ev.magiaodichngoai };
             }, tenantId);
 
+            const matchBranchId = ketQua.branchId || ketQua.hoaDon?.branchId || req.body?.branchId || req.user?.branchId || 'DEFAULT';
             for (const maBan of ketQua.banDaTrong || []) {
-                io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', { maBan, trangThai: 3 });
+                emitToBranch(io, {
+                    tenantId,
+                    branchId: matchBranchId,
+                    roles: ['POS', 'WAITER'],
+                    event: 'BAN_THAY_DOI',
+                    payload: { maBan, trangThai: 3 },
+                });
             }
             if (ketQua.daHoanTat) {
-                io.to(roomTen(tenantId, 'thungan')).emit('HOADON_DA_TT', { maHoaDon });
+                emitToBranch(io, {
+                    tenantId,
+                    branchId: matchBranchId,
+                    roles: ['POS'],
+                    event: 'HOADON_DA_TT',
+                    payload: { maHoaDon },
+                });
             }
 
             res.json({
@@ -570,7 +590,13 @@ function registerPaymentShiftPhase3Routes(app, deps) {
                 return { webhookEventId: Number(webhookEventId), action: act, soTienDu, maPhieuTC, soDuViMoi };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan')).emit('CA_THAY_DOI', { trangThai: 'OVERPAY_RESOLVED', ...ketQua });
+            emitToBranch(io, {
+                tenantId,
+                branchId: req.body?.branchId || req.user?.branchId || 'DEFAULT',
+                roles: ['POS'],
+                event: 'CA_THAY_DOI',
+                payload: { trangThai: 'OVERPAY_RESOLVED', ...ketQua },
+            });
             res.json({
                 message:
                     act === 'CASH_RETURNED'

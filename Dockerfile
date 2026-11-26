@@ -14,6 +14,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Copy mã nguồn sạch (đã lọc qua .dockerignore)
 COPY server.js db.js config.js middleware.js password.js ./
 COPY modules ./modules
+COPY src ./src
 COPY db ./db
 
 RUN chown -R node:node /app

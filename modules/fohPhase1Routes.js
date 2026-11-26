@@ -5,6 +5,7 @@ const {
     capSoThuTuNgayKhongTrung,
 } = require('./fohEngineService');
 const { emitScopedKdsEvent, normalizeBranchId } = require('./kdsPhase2Engine');
+const { emitToBranch, emitToTenant } = require('../src/core/socketRooms');
 
 function layGioHienTaiHHMMVN() {
     const parts = new Intl.DateTimeFormat('en-GB', {
@@ -342,15 +343,17 @@ function registerFohPhase1Routes(app, deps) {
                 return upd.rows[0];
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan'))
-                .to(roomTen(tenantId, 'phucvu'))
-                .to(roomTen(tenantId, 'barista'))
-                .emit('MODIFIER_TAM_HET', {
+            emitToTenant(io, {
+                tenantId,
+                roles: ['POS', 'WAITER', 'KDS'],
+                event: 'MODIFIER_TAM_HET',
+                payload: {
                     optionId: Number(row.id),
                     groupId: Number(row.groupid),
                     tenOption: row.tenoption,
                     tamHet: Boolean(row.tamhet),
-                });
+                },
+            });
 
             res.json({
                 message: row.tamhet
@@ -588,7 +591,7 @@ function registerFohPhase1Routes(app, deps) {
                 await client.query(
                     `INSERT INTO combo (macombo, tenantid, tencombo, giabancombo, khunggiotu, khunggioden, dangkinhdoanh)
                      VALUES ($1, $2, $3, $4, $5, $6, $7)
-                     ON CONFLICT (macombo) DO UPDATE SET
+                     ON CONFLICT (tenantid, macombo) DO UPDATE SET
                         tencombo = EXCLUDED.tencombo,
                         giabancombo = EXCLUDED.giabancombo,
                         khunggiotu = EXCLUDED.khunggiotu,
@@ -668,28 +671,46 @@ function registerFohPhase1Routes(app, deps) {
     });
 
     // =========================================================================
-    // 3. CẤU HÌNH VẬT TƯ ĐÓNG GÓI MANG ĐI (cauhinh_vattu_mangdi)
+    // 3. CẤU HÌNH VẬT TƯ ĐÓNG GÓI MANG ĐI THEO KÊNH BÁN (cauhinh_vattu_mangdi)
     // =========================================================================
+    const normalizePackagingChannel = (raw) => {
+        const up = String(raw || 'ALL').trim().toUpperCase();
+        if (!up || up === 'ALL') return 'ALL';
+        if (up === 'APP' || up === 'APP_SAN' || up === 'DELIVERY_APP') return 'APP_SAN';
+        if (up === 'MANG_DI' || up === 'TAKEAWAY') return 'MANG_DI';
+        if (up === 'GIAO_HANG' || up === 'DELIVERY') return 'GIAO_HANG';
+        if (up === 'TAI_QUAN' || up === 'DINE_IN') return 'TAI_QUAN';
+        return 'ALL';
+    };
+
     app.get('/api/kho/vattu-mangdi', kiemTraToken, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const r = await qTenant(
                 req,
-                `SELECT c.kichthuoc, c.manl, c.soluongtieuhao, nl.tennl, nl.donvitinh
+                `SELECT COALESCE(to_jsonb(c)->>'kenhdung', 'ALL') AS kenhdung,
+                        c.kichthuoc, c.manl, c.soluongtieuhao, nl.tennl, nl.donvitinh
                    FROM cauhinh_vattu_mangdi c
                    LEFT JOIN nguyenlieu nl ON nl.manl = c.manl
                   WHERE c.tenantid = $1
-                  ORDER BY c.kichthuoc, c.manl`,
+                  ORDER BY COALESCE(to_jsonb(c)->>'kenhdung', 'ALL'), c.kichthuoc, c.manl`,
                 [tenantId]
             );
             res.json(
-                r.rows.map((x) => ({
-                    kichThuoc: x.kichthuoc,
-                    maNL: x.manl,
-                    tenNL: x.tennl || x.manl,
-                    donViTinh: x.donvitinh || '',
-                    soLuongTieuHao: Number(x.soluongtieuhao),
-                }))
+                r.rows.map((x) => {
+                    const kenhDung = normalizePackagingChannel(x.kenhdung);
+                    const qty = Number(x.soluongtieuhao);
+                    return {
+                        kenhDung,
+                        loaiDonHang: kenhDung,
+                        kichThuoc: x.kichthuoc,
+                        maNL: x.manl,
+                        tenNL: x.tennl || x.manl,
+                        donViTinh: x.donvitinh || '',
+                        soLuongTieuHao: qty,
+                        soLuongMoiLy: qty,
+                    };
+                })
             );
         } catch (error) {
             guiLoi(res, error, 'Lỗi API Lấy cấu hình vật tư mang đi:');
@@ -704,26 +725,68 @@ function registerFohPhase1Routes(app, deps) {
             ? [req.body]
             : [];
         if (items.length === 0) {
-            return res.status(400).json({ message: 'Thiếu danh sách vật tư đóng gói (kichThuoc, maNL, soLuongTieuHao)!' });
+            return res.status(400).json({ message: 'Thiếu danh sách vật tư đóng gói (kichThuoc, maNL, soLuongMoiLy/soLuongTieuHao)!' });
+        }
+        const normalized = [];
+        for (const it of items) {
+            const maNL = String(it?.maNL || '').trim();
+            const sz = String(it?.kichThuoc || 'ALL').trim().toUpperCase();
+            const kenhDung = normalizePackagingChannel(it?.kenhDung ?? it?.loaiDonHang ?? 'ALL');
+            const rawSl = it?.soLuongTieuHao !== undefined ? it.soLuongTieuHao : it?.soLuongMoiLy;
+            const sl = Number(rawSl);
+            if (!maNL || !(sl > 0)) continue;
+            normalized.push({ kenhDung, kichThuoc: sz, maNL, soLuongTieuHao: sl });
+        }
+        if (normalized.length === 0) {
+            return res.status(400).json({
+                message: 'Không có dòng vật tư đóng gói hợp lệ (yêu cầu maNL và soLuongMoiLy/soLuongTieuHao > 0)!',
+            });
         }
         try {
             await chayGiaoDich(async (client) => {
-                for (const it of items) {
-                    const sz = String(it.kichThuoc || 'ALL').trim().toUpperCase();
-                    const sl = Number(it.soLuongTieuHao);
-                    if (!it.maNL || !(sl > 0)) continue;
+                for (const it of normalized) {
                     await client.query(
-                        `INSERT INTO cauhinh_vattu_mangdi (tenantid, kichthuoc, manl, soluongtieuhao)
-                         VALUES ($1, $2, $3, $4)
-                         ON CONFLICT (tenantid, kichthuoc, manl)
+                        `INSERT INTO cauhinh_vattu_mangdi (tenantid, kenhdung, kichthuoc, manl, soluongtieuhao)
+                         VALUES ($1, $2, $3, $4, $5)
+                         ON CONFLICT (tenantid, kenhdung, kichthuoc, manl)
                          DO UPDATE SET soluongtieuhao = EXCLUDED.soluongtieuhao`,
-                        [tenantId, sz, String(it.maNL).trim(), sl]
+                        [tenantId, it.kenhDung, it.kichThuoc, it.maNL, it.soLuongTieuHao]
                     );
                 }
             }, tenantId);
-            res.status(201).json({ message: 'Đã cập nhật định mức vật tư đóng gói mang đi!' });
+            res.status(201).json({
+                message: 'Đã cập nhật định mức vật tư đóng gói theo kênh bán!',
+                savedCount: normalized.length,
+                items: normalized.map((x) => ({
+                    ...x,
+                    loaiDonHang: x.kenhDung,
+                    soLuongMoiLy: x.soLuongTieuHao,
+                })),
+            });
         } catch (error) {
             guiLoi(res, error, 'Lỗi API Cập nhật vật tư mang đi:');
+        }
+    });
+
+    app.delete('/api/kho/vattu-mangdi', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+        const tenantId = layTenantId(req);
+        const src = { ...(req.query || {}), ...(req.body || {}) };
+        const maNL = String(src.maNL || '').trim();
+        const kichThuoc = String(src.kichThuoc || 'ALL').trim().toUpperCase();
+        const kenhDung = normalizePackagingChannel(src.kenhDung ?? src.loaiDonHang ?? 'ALL');
+        if (!maNL) {
+            return res.status(400).json({ message: 'Thiếu mã nguyên liệu (maNL) cần xóa khỏi cấu hình bao bì!' });
+        }
+        try {
+            const del = await qTenant(
+                req,
+                `DELETE FROM cauhinh_vattu_mangdi
+                  WHERE tenantid = $1 AND kenhdung = $2 AND kichthuoc = $3 AND manl = $4`,
+                [tenantId, kenhDung, kichThuoc, maNL]
+            );
+            res.json({ message: 'Đã xóa cấu hình vật tư đóng gói!', deletedCount: del.rowCount || 0 });
+        } catch (error) {
+            guiLoi(res, error, 'Lỗi API Xóa vật tư mang đi:');
         }
     });
 
@@ -826,10 +889,16 @@ function registerFohPhase1Routes(app, deps) {
                 return { row: ins.rows[0], tenBan: bRes.rows[0].tenban };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('DATBAN_CAP_NHAT', {
-                maDatBan,
-                maBan,
-                trangThai: 'CONFIRMED',
+            emitToBranch(io, {
+                tenantId,
+                branchId: req.body?.branchId || req.user?.branchId || 'DEFAULT',
+                roles: ['POS', 'WAITER'],
+                event: 'DATBAN_CAP_NHAT',
+                payload: {
+                    maDatBan,
+                    maBan,
+                    trangThai: 'CONFIRMED',
+                },
             });
 
             res.status(201).json({
@@ -891,7 +960,13 @@ function registerFohPhase1Routes(app, deps) {
                 return { maDatBan, maBan: d.maban, trangThai };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('DATBAN_CAP_NHAT', out);
+            emitToBranch(io, {
+                tenantId,
+                branchId: req.body?.branchId || req.user?.branchId || 'DEFAULT',
+                roles: ['POS', 'WAITER'],
+                event: 'DATBAN_CAP_NHAT',
+                payload: out,
+            });
             res.json({ message: `Đã cập nhật lịch đặt bàn #${maDatBan} sang ${trangThai}!`, ...out });
         } catch (error) {
             guiLoi(res, error, 'Lỗi API Cập nhật Đặt bàn:');
@@ -1115,59 +1190,155 @@ function registerFohPhase1Routes(app, deps) {
 
         try {
             const parked = await chayGiaoDich(async (client) => {
-                const hdRes = await client.query(
-                    `INSERT INTO HoaDon (MaNV, MaKH, TrangThaiTT, TenantId, LoaiDonHang, TenKhachVangLai, DiaChiGiao)
-                     VALUES ($1, $2, -1, $3, $4, $5, $6)
-                     RETURNING MaHoaDon, ThoiGianTao`,
-                    [
-                        req.user.maNV,
-                        maKH || null,
-                        tenantId,
-                        ['TAI_QUAN', 'MANG_DI', 'GIAO_HANG', 'APP_SAN'].includes(loaiDonHang) ? loaiDonHang : 'MANG_DI',
-                        label ? String(label).trim().slice(0, 100) : null,
-                        diaChiGiao ? String(diaChiGiao).trim().slice(0, 500) : null,
-                    ]
-                );
-                const maHoaDon = hdRes.rows[0].mahoadon;
-
-                for (const m of danhSachMon) {
-                    const qty = Math.max(1, Math.floor(Number(m.soLuong || 1)));
-                    const cIns = await client.query(
-                        `INSERT INTO ChiTietHoaDon
-                            (MaHoaDon, MaMon, TenMonSnapshot, KichThuoc, SoLuong, DonGia, GiaModifiers,
-                             ModifiersSnapshot, GhiChu, TrangThaiPhaChe, IsTakeaway, CourseNo, FireStatus)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 'ChoPhaChe', $10, $11, 'HELD')
-                         RETURNING MaCTHD`,
+                let hdRes;
+                await client.query('SAVEPOINT sp_ins_parked_hd');
+                try {
+                    hdRes = await client.query(
+                        `INSERT INTO HoaDon (MaNV, MaKH, TrangThaiTT, lifecycle_status, TenantId, LoaiDonHang, TenKhachVangLai, DiaChiGiao)
+                         VALUES ($1, $2, -1, 'PARKED', $3, $4, $5, $6)
+                         RETURNING MaHoaDon, ThoiGianTao`,
                         [
-                            maHoaDon,
-                            m.maMon,
-                            m.tenMon || m.maMon,
-                            m.kichThuoc || 'M',
-                            qty,
-                            Number(m.donGia || 0),
-                            Number(m.giaModifiers || 0),
-                            JSON.stringify(Array.isArray(m.modifiers) ? m.modifiers : []),
-                            m.ghiChu ? String(m.ghiChu).slice(0, 255) : null,
-                            Boolean(m.isTakeaway),
-                            Math.max(1, Math.floor(Number(m.courseNo || 1))),
+                            req.user.maNV,
+                            maKH || null,
+                            tenantId,
+                            ['TAI_QUAN', 'MANG_DI', 'GIAO_HANG', 'APP_SAN'].includes(loaiDonHang) ? loaiDonHang : 'MANG_DI',
+                            label ? String(label).trim().slice(0, 100) : null,
+                            diaChiGiao ? String(diaChiGiao).trim().slice(0, 500) : null,
                         ]
                     );
+                    await client.query('RELEASE SAVEPOINT sp_ins_parked_hd');
+                } catch {
+                    await client.query('ROLLBACK TO SAVEPOINT sp_ins_parked_hd').catch(() => {});
+                    hdRes = await client.query(
+                        `INSERT INTO HoaDon (MaNV, MaKH, TrangThaiTT, TenantId, LoaiDonHang, TenKhachVangLai, DiaChiGiao)
+                         VALUES ($1, $2, -1, $3, $4, $5, $6)
+                         RETURNING MaHoaDon, ThoiGianTao`,
+                        [
+                            req.user.maNV,
+                            maKH || null,
+                            tenantId,
+                            ['TAI_QUAN', 'MANG_DI', 'GIAO_HANG', 'APP_SAN'].includes(loaiDonHang) ? loaiDonHang : 'MANG_DI',
+                            label ? String(label).trim().slice(0, 100) : null,
+                            diaChiGiao ? String(diaChiGiao).trim().slice(0, 500) : null,
+                        ]
+                    );
+                }
+                const maHoaDon = hdRes.rows[0].mahoadon;
+
+                // Tra cứu giá dự phòng từ SanPham_Size nếu client thiếu donGia (chống lưu 0đ)
+                const maMonList = [...new Set(danhSachMon.map((x) => x?.maMon).filter(Boolean))];
+                const fallbackPriceMap = new Map();
+                const fallbackNameMap = new Map();
+                if (maMonList.length > 0) {
+                    const pRes = await client.query(
+                        `SELECT sz.MaMon, sz.KichThuoc, sz.GiaBan, sp.TenMon
+                           FROM SanPham_Size sz
+                           JOIN SanPham sp ON sp.MaMon = sz.MaMon
+                          WHERE COALESCE(sp.TenantId, 'DEFAULT') = $2
+                            AND sz.MaMon = ANY($1::varchar[])`,
+                        [maMonList, tenantId]
+                    );
+                    for (const pr of pRes.rows) {
+                        fallbackPriceMap.set(`${pr.mamon}|${pr.kichthuoc}`, Number(pr.giaban || 0));
+                        fallbackNameMap.set(pr.mamon, pr.tenmon);
+                    }
+                }
+
+                let tongTamTinhSaved = 0;
+                for (const m of danhSachMon) {
+                    const qty = Math.max(1, Math.floor(Number(m.soLuong || 1)));
+                    const sz = m.kichThuoc || 'M';
+                    const resolvedDonGia =
+                        m.donGia !== undefined && m.donGia !== null && Number(m.donGia) > 0
+                            ? Number(m.donGia)
+                            : fallbackPriceMap.get(`${m.maMon}|${sz}`) ?? Number(m.donGia || 0);
+                    const resolvedGiaMods = Number(m.giaModifiers || 0);
+                    const resolvedTenMon = m.tenMon || fallbackNameMap.get(m.maMon) || m.maMon;
+                    const resolvedWeight =
+                        m.trongLuongGram !== undefined && m.trongLuongGram !== null && Number(m.trongLuongGram) > 0
+                            ? Number(m.trongLuongGram)
+                            : null;
+                    const resolvedCustomName = m.tenMonTuyChinh ? String(m.tenMonTuyChinh).trim().slice(0, 160) : null;
+                    const resolvedMaCombo = m.maCombo ? String(m.maCombo).trim().slice(0, 64) : null;
+                    const resolvedTenCombo = m.tenComboSnapshot ? String(m.tenComboSnapshot).trim().slice(0, 160) : null;
+
+                    let cIns;
+                    await client.query('SAVEPOINT sp_ins_parked_cthd');
+                    try {
+                        cIns = await client.query(
+                            `INSERT INTO ChiTietHoaDon
+                                (MaHoaDon, MaMon, TenMonSnapshot, TenMonTuyChinh, KichThuoc, SoLuong, DonGia, GiaModifiers,
+                                 ModifiersSnapshot, TrongLuongGram, MaCombo, TenComboSnapshot,
+                                 GhiChu, TrangThaiPhaChe, IsTakeaway, CourseNo, FireStatus)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, 'ChoPhaChe', $14, $15, 'HELD')
+                             RETURNING MaCTHD`,
+                            [
+                                maHoaDon,
+                                m.maMon,
+                                resolvedTenMon,
+                                resolvedCustomName,
+                                sz,
+                                qty,
+                                resolvedDonGia,
+                                resolvedGiaMods,
+                                JSON.stringify(Array.isArray(m.modifiers) ? m.modifiers : []),
+                                resolvedWeight,
+                                resolvedMaCombo,
+                                resolvedTenCombo,
+                                m.ghiChu ? String(m.ghiChu).slice(0, 255) : null,
+                                Boolean(m.isTakeaway),
+                                Math.max(1, Math.floor(Number(m.courseNo || 1))),
+                            ]
+                        );
+                        await client.query('RELEASE SAVEPOINT sp_ins_parked_cthd');
+                    } catch {
+                        await client.query('ROLLBACK TO SAVEPOINT sp_ins_parked_cthd').catch(() => {});
+                        cIns = await client.query(
+                            `INSERT INTO ChiTietHoaDon
+                                (MaHoaDon, MaMon, TenMonSnapshot, KichThuoc, SoLuong, DonGia, GiaModifiers,
+                                 ModifiersSnapshot, GhiChu, TrangThaiPhaChe, IsTakeaway, CourseNo, FireStatus)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 'ChoPhaChe', $10, $11, 'HELD')
+                             RETURNING MaCTHD`,
+                            [
+                                maHoaDon,
+                                m.maMon,
+                                resolvedTenMon,
+                                sz,
+                                qty,
+                                resolvedDonGia,
+                                resolvedGiaMods,
+                                JSON.stringify(Array.isArray(m.modifiers) ? m.modifiers : []),
+                                m.ghiChu ? String(m.ghiChu).slice(0, 255) : null,
+                                Boolean(m.isTakeaway),
+                                Math.max(1, Math.floor(Number(m.courseNo || 1))),
+                            ]
+                        );
+                    }
+                    tongTamTinhSaved += (resolvedDonGia + resolvedGiaMods) * qty;
                     const maCTHD = cIns.rows[0].macthd;
                     for (const tp of m.toppings || []) {
                         if (!tp?.maTopping) continue;
                         const perCup = Math.max(1, Math.floor(Number(tp.soLuongMoiLy ?? tp.soLuong ?? 1)));
+                        const tpPrice = Number(tp.donGia || 0);
+                        tongTamTinhSaved += tpPrice * perCup * qty;
                         await client.query(
                             `INSERT INTO ChiTietHoaDon_Topping
                                 (MaCTHD, MaTopping, TenToppingSnapshot, SoLuong, SoLuongMoiLy, DonGia)
                              VALUES ($1, $2, $3, $4, $5, $6)`,
-                            [maCTHD, tp.maTopping, tp.tenTopping || null, perCup * qty, perCup, Number(tp.donGia || 0)]
+                            [maCTHD, tp.maTopping, tp.tenTopping || null, perCup * qty, perCup, tpPrice]
                         );
                     }
                 }
-                return { maHoaDon, thoiGianTao: hdRes.rows[0].thoigiantao };
+                return { maHoaDon, tongTamTinh: tongTamTinhSaved, thoiGianTao: hdRes.rows[0].thoigiantao };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan')).emit('PARKED_ORDERS_UPDATED', { maHoaDon: parked.maHoaDon });
+            emitToBranch(io, {
+                tenantId,
+                branchId: req.body?.branchId || req.user?.branchId || 'DEFAULT',
+                roles: ['POS'],
+                event: 'PARKED_ORDERS_UPDATED',
+                payload: { maHoaDon: parked.maHoaDon },
+            });
             res.status(201).json({
                 message: `⏸️ Đã lưu tạm đơn #${parked.maHoaDon} lên máy chủ (khôi phục được từ mọi máy POS)!`,
                 ...parked,
@@ -1219,6 +1390,16 @@ function registerFohPhase1Routes(app, deps) {
                         ghiChu: m.ghiChu || '',
                         isTakeaway: Boolean(m.isTakeaway),
                         courseNo: m.courseNo || 1,
+                        fireStatus: m.fireStatus === 'HELD' && Number(m.courseNo || 1) > 1 ? 'HELD' : 'FIRED',
+                        ...(m.trongLuongGram ? { trongLuongGram: Number(m.trongLuongGram) } : {}),
+                        ...(m.tenMonTuyChinh ? { tenMonTuyChinh: m.tenMonTuyChinh } : {}),
+                        ...(m.maCombo
+                            ? {
+                                  maCombo: m.maCombo,
+                                  tenComboSnapshot: m.tenComboSnapshot || null,
+                                  comboInstanceId: m.comboGroupUid || `CMB-RESTORED-${maHoaDon}-${m.maCombo}`,
+                              }
+                            : {}),
                         toppings: (m.toppings || []).map((t) => ({
                             maTopping: t.maTopping,
                             tenTopping: t.tenTopping,
@@ -1230,7 +1411,13 @@ function registerFohPhase1Routes(app, deps) {
                 };
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan')).emit('PARKED_ORDERS_UPDATED', { maHoaDon });
+            emitToBranch(io, {
+                tenantId,
+                branchId: req.body?.branchId || req.user?.branchId || 'DEFAULT',
+                roles: ['POS'],
+                event: 'PARKED_ORDERS_UPDATED',
+                payload: { maHoaDon },
+            });
             res.json({ message: `▶️ Đã khôi phục đơn tạm #${maHoaDon} về giỏ hàng!`, ...restored });
         } catch (error) {
             guiLoi(res, error, 'Lỗi API Khôi phục đơn tạm:');
@@ -1255,7 +1442,13 @@ function registerFohPhase1Routes(app, deps) {
                 await client.query(`DELETE FROM HoaDon WHERE MaHoaDon = $1 AND TrangThaiTT = -1`, [maHoaDon]);
             }, tenantId);
 
-            io.to(roomTen(tenantId, 'thungan')).emit('PARKED_ORDERS_UPDATED', { maHoaDon });
+            emitToBranch(io, {
+                tenantId,
+                branchId: req.body?.branchId || req.user?.branchId || 'DEFAULT',
+                roles: ['POS'],
+                event: 'PARKED_ORDERS_UPDATED',
+                payload: { maHoaDon },
+            });
             res.json({ message: `Đã xóa đơn lưu tạm #${maHoaDon}!` });
         } catch (error) {
             guiLoi(res, error, 'Lỗi API Xóa đơn lưu tạm:');
@@ -1273,7 +1466,10 @@ function registerFohPhase1Routes(app, deps) {
             toMaHoaDon = null,
             items = [],
             expectedVersion = null,
+            destExpectedVersion = null,
+            toExpectedVersion = null,
         } = req.body || {};
+        const finalDestExpectedVersion = destExpectedVersion ?? toExpectedVersion ?? null;
 
         if (!fromMaHoaDon || (!toMaBan && !toMaHoaDon) || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({
@@ -1492,7 +1688,14 @@ function registerFohPhase1Routes(app, deps) {
                 if (movedCups === 0) throw new LoiNghiepVu(400, 'Không có món hợp lệ nào để chuyển!');
 
                 // Tăng version hóa đơn đích & tính lại KM/Tổng tiền cả 2 hóa đơn
-                await kiemTraVaTangVersionHoaDon(client, { maHoaDon: destMaHoaDon, tenantId, LoiNghiepVu });
+                await kiemTraVaTangVersionHoaDon(client, {
+                    maHoaDon: destMaHoaDon,
+                    tenantId,
+                    expectedVersion: finalDestExpectedVersion,
+                    mandatory: Boolean(finalDestExpectedVersion),
+                    layHoaDonChiTiet,
+                    LoiNghiepVu,
+                });
                 await recalculateInvoiceTotals(client, {
                     tenantId,
                     maHoaDon: destMaHoaDon,
@@ -1585,19 +1788,33 @@ function registerFohPhase1Routes(app, deps) {
                 };
             }, tenantId);
 
+            const transferBranchId = normalizeBranchId(
+                ketQua.hoaDonDich?.branchId || ketQua.hoaDonNguon?.branchId || req.user?.branchId || 'DEFAULT'
+            );
             for (const mb of ketQua.freedSourceTables) {
-                io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', {
-                    maBan: mb,
-                    trangThai: 1,
+                emitToBranch(io, {
+                    tenantId,
+                    branchId: transferBranchId,
+                    roles: ['POS', 'WAITER'],
+                    event: 'BAN_THAY_DOI',
+                    payload: {
+                        maBan: mb,
+                        trangThai: 1,
+                    },
                 });
             }
             if (ketQua.destBanOpened) {
-                io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'phucvu')).emit('BAN_THAY_DOI', {
-                    maBan: ketQua.destBanOpened,
-                    trangThai: 2,
+                emitToBranch(io, {
+                    tenantId,
+                    branchId: transferBranchId,
+                    roles: ['POS', 'WAITER'],
+                    event: 'BAN_THAY_DOI',
+                    payload: {
+                        maBan: ketQua.destBanOpened,
+                        trangThai: 2,
+                    },
                 });
             }
-            const transferBranchId = normalizeBranchId(req.user?.branchId || 'DEFAULT');
             emitScopedKdsEvent(io, {
                 tenantId,
                 branchId: transferBranchId,

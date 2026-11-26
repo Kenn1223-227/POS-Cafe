@@ -1033,10 +1033,11 @@ export default function SuperAdminPage() {
                   onChange={(e) => handlePlanChangeInModal(e.target.value)}
                   className="w-full px-3 py-2 rounded-xl border border-slate-300 font-bold"
                 >
-                  <option value="FREE">FREE (0đ • 400 đơn/T)</option>
-                  <option value="STARTER">STARTER (149k • Không giới hạn)</option>
-                  <option value="PRO">PRO / GROWTH (399k)</option>
-                  <option value="ENTERPRISE">ENTERPRISE (990k + 250k/CN)</option>
+                  <option value="FREE">FREE (0đ • 350 đơn/T)</option>
+                  <option value="STARTER">STARTER (169k • Không giới hạn)</option>
+                  <option value="PRO">PRO / GROWTH (349k)</option>
+                  <option value="CHAIN">CHAIN (499k/CN • từ 3 CN)</option>
+                  <option value="ENTERPRISE">ENTERPRISE (499k/CN • từ 3 CN)</option>
                 </select>
               </div>
 

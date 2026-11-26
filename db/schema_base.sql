@@ -51,9 +51,11 @@ CREATE TABLE IF NOT EXISTS public.SanPham_Size (
 CREATE TABLE IF NOT EXISTS public.Topping (
     MaTopping      VARCHAR(64) PRIMARY KEY,
     TenTopping     VARCHAR(120) NOT NULL,
+    GiaTopping     NUMERIC(15, 2) NOT NULL DEFAULT 0,
     GiaThem        NUMERIC(15, 2) NOT NULL DEFAULT 0,
     DangKinhDoanh  BOOLEAN NOT NULL DEFAULT TRUE
 );
+ALTER TABLE public.Topping ADD COLUMN IF NOT EXISTS GiaTopping NUMERIC(15, 2) NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS public.NguyenLieu (
     MaNL           VARCHAR(64) PRIMARY KEY,
@@ -127,11 +129,13 @@ CREATE TABLE IF NOT EXISTS public.ChiTietHoaDon (
     KichThuoc        VARCHAR(20) NOT NULL DEFAULT 'M',
     SoLuong          INT NOT NULL DEFAULT 1,
     DonGia           NUMERIC(15, 2) NOT NULL DEFAULT 0,
+    GiaGiam          NUMERIC(15, 2) NOT NULL DEFAULT 0,
     GhiChu           TEXT,
     TrangThaiPhaChe  VARCHAR(32) NOT NULL DEFAULT 'ChoPha',
     ThoiGianGoi      TIMESTAMPTZ NOT NULL DEFAULT now(),
     ThoiGianHoanThanh TIMESTAMPTZ
 );
+ALTER TABLE public.ChiTietHoaDon ADD COLUMN IF NOT EXISTS GiaGiam NUMERIC(15, 2) NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS public.ChiTietHoaDon_Topping (
     Id         BIGSERIAL PRIMARY KEY,

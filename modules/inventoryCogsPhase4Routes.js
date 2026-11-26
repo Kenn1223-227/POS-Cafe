@@ -32,6 +32,7 @@ const {
     computePointInTimeValuation,
     computeShiftAvtReport,
 } = require('./inventoryCogsPhase4Engine');
+const { emitToBranch } = require('../src/core/socketRooms');
 
 function registerInventoryCogsPhase4Routes(app, deps) {
     const {
@@ -398,6 +399,145 @@ function registerInventoryCogsPhase4Routes(app, deps) {
     // =========================================================================
     // 4. KIỂM KHO MÙ 60 GIÂY (BLIND STOCKTAKE + COMPOUND UOM + IN-FLIGHT DELTA)
     // =========================================================================
+    app.get('/api/kho/kiem-ke/items', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
+        const tenantId = layTenantId(req);
+        const branchId = normalizeInventoryBranch(tenantId, req.query.branchId || req.user.branchId || null);
+        const keyOnly = String(req.query.keyOnly ?? '1') !== '0' && String(req.query.keyOnly ?? 'true') !== 'false';
+        const forceBlind = String(req.query.forceBlind || '') === '1' || String(req.query.forceBlind || '') === 'true';
+        const isManager = Number(req.user.vaiTro) === 1;
+        const canViewSystemStock =
+            isManager || (typeof coQuyenHan === 'function' && coQuyenHan(req.user, 'inventory.view_system_stock'));
+        const isBlind = !canViewSystemStock || forceBlind;
+
+        try {
+            const payload = await pool.withTenant(tenantId, async (client) => {
+                let nlRes = await client.query(
+                    `SELECT nl.manl, nl.tennl, nl.donvitinh, COALESCE(nl.iskeyitem, FALSE) AS iskeyitem,
+                            COALESCE(tk.soluongton, CASE WHEN $3::boolean THEN nl.soluongton ELSE 0 END, 0) AS ton_he_thong
+                       FROM public.nguyenlieu nl
+                       LEFT JOIN public.tonkhochinhanh tk
+                         ON tk.tenantid = $1::text AND tk.branchid = $2::text AND tk.manl = nl.manl
+                      WHERE COALESCE(nl.tenantid::text, 'DEFAULT') = $1::text
+                        AND nl.daxoa = FALSE
+                        AND ($4::boolean = FALSE OR COALESCE(nl.iskeyitem, FALSE) = TRUE)
+                      ORDER BY nl.tennl ASC`,
+                    [tenantId, branchId, branchId === `${tenantId}_MAIN`, keyOnly]
+                );
+                if (nlRes.rows.length === 0 && keyOnly) {
+                    nlRes = await client.query(
+                        `SELECT nl.manl, nl.tennl, nl.donvitinh, COALESCE(nl.iskeyitem, FALSE) AS iskeyitem,
+                                COALESCE(tk.soluongton, CASE WHEN $3::boolean THEN nl.soluongton ELSE 0 END, 0) AS ton_he_thong
+                           FROM public.nguyenlieu nl
+                           LEFT JOIN public.tonkhochinhanh tk
+                             ON tk.tenantid = $1::text AND tk.branchid = $2::text AND tk.manl = nl.manl
+                          WHERE COALESCE(nl.tenantid::text, 'DEFAULT') = $1::text
+                            AND nl.daxoa = FALSE
+                          ORDER BY nl.tennl ASC
+                          LIMIT 10`,
+                        [tenantId, branchId, branchId === `${tenantId}_MAIN`]
+                    );
+                }
+
+                const uomRes = await client.query(
+                    `SELECT id, manl, tendonvi, hesoquydoi, mavachdonvi, lamacdinhkiem
+                       FROM public.nguyenlieu_donviquydoi
+                      WHERE tenantid = $1::text
+                      ORDER BY hesoquydoi DESC`,
+                    [tenantId]
+                );
+                const uomByNl = new Map();
+                for (const u of uomRes.rows) {
+                    if (!uomByNl.has(u.manl)) uomByNl.set(u.manl, []);
+                    uomByNl.get(u.manl).push({
+                        id: Number(u.id),
+                        tenDonVi: u.tendonvi,
+                        heSoQuyDoi: Number(u.hesoquydoi),
+                        maVachDonVi: u.mavachdonvi || null,
+                        laMacDinhKiem: Boolean(u.lamacdinhkiem),
+                    });
+                }
+
+                // TUYỆT ĐỐI KHÔNG trả tồn hệ thống hoặc giá vốn cho nhân viên ca (Blind Stocktake!)
+                const items = nlRes.rows.map((r) => ({
+                    maNL: r.manl,
+                    tenNL: r.tennl,
+                    donViTinh: r.donvitinh,
+                    isKeyItem: Boolean(r.iskeyitem),
+                    donViQuyDoi: uomByNl.get(r.manl) || [],
+                    ...(!isBlind ? { tonKhoHeThong: Number(r.ton_he_thong) } : {}),
+                }));
+
+                return { branchId, isBlind, items };
+            });
+
+            res.status(200).json(payload);
+        } catch (error) {
+            guiLoi(res, error, 'Lỗi API Tải danh sách kiểm kho mù:');
+        }
+    });
+
+    app.get('/api/kho/kiem-ke/pending', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+        const tenantId = layTenantId(req);
+        const branchId = req.query.branchId ? normalizeInventoryBranch(tenantId, req.query.branchId) : null;
+        try {
+            const rows = await pool.withTenant(tenantId, async (client) => {
+                const pRes = await client.query(
+                    `SELECT p.magiaodich, p.manv, p.ghichu, p.branchid, p.macathungan,
+                            p.trangthaiduyet, p.ngaychungtu, p.thoigiantao, p.thoidiemkiemke
+                       FROM public.phieugiaodichkho p
+                      WHERE COALESCE(p.tenantid::text, 'DEFAULT') = $1::text
+                        AND p.loaigd = 3
+                        AND p.trangthaiduyet = 'PENDING_APPROVAL'
+                        AND ($2::text IS NULL OR COALESCE(NULLIF(NULLIF(p.branchid::text, ''), 'DEFAULT'), $1::text || '_MAIN') = $2::text)
+                      ORDER BY p.thoigiantao DESC
+                      LIMIT 50`,
+                    [tenantId, branchId]
+                );
+                const result = [];
+                for (const p of pRes.rows) {
+                    const ctRes = await client.query(
+                        `SELECT ct.manl, nl.tennl, nl.donvitinh, ct.soluong, ct.dongianhap, ct.tontruoc, ct.tonsau, ct.tinhtrang
+                           FROM public.chitietgiaodichkho ct
+                           LEFT JOIN public.nguyenlieu nl ON nl.manl = ct.manl
+                          WHERE ct.magiaodich = $1
+                          ORDER BY ct.manl ASC`,
+                        [p.magiaodich]
+                    );
+                    const items = ctRes.rows.map((c) => {
+                        const diff = lam3(c.soluong || 0);
+                        const wac = Number(c.dongianhap || 0);
+                        return {
+                            maNL: c.manl,
+                            tenNL: c.tennl || c.manl,
+                            donViTinh: c.donvitinh || '',
+                            systemBefore: lam3(c.tontruoc || 0),
+                            diff,
+                            giaVonDonVi: wac,
+                            absDiffVal: Math.round(Math.abs(diff) * wac),
+                            tinhTrang: c.tinhtrang || '',
+                        };
+                    });
+                    result.push({
+                        maGiaoDich: p.magiaodich,
+                        maNV: p.manv,
+                        branchId: p.branchid,
+                        maCaThuNgan: p.macathungan,
+                        ghiChu: p.ghichu,
+                        trangThaiDuyet: p.trangthaiduyet,
+                        ngayChungTu: p.ngaychungtu,
+                        thoiGianTao: p.thoigiantao,
+                        totalAbsVarianceValue: items.reduce((s, it) => s + it.absDiffVal, 0),
+                        items,
+                    });
+                }
+                return result;
+            });
+            res.status(200).json(rows);
+        } catch (error) {
+            guiLoi(res, error, 'Lỗi API Danh sách phiếu kiểm kho chờ duyệt:');
+        }
+    });
+
     app.post('/api/kho/kiem-ke/start', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
         const tenantId = layTenantId(req);
         const branchId = normalizeInventoryBranch(tenantId, req.body?.branchId || req.user.branchId || null);
@@ -595,8 +735,9 @@ function registerInventoryCogsPhase4Routes(app, deps) {
                         const dRes = await client.query(
                             `SELECT COALESCE(SUM(
                                       CASE
-                                        WHEN p.loaigd IN (1, 7, 10) THEN ct.soluong
-                                        WHEN p.loaigd IN (2, 6) THEN -ct.soluong
+                                        WHEN p.loaigd IN (1, 5, 7, 10) THEN ct.soluong
+                                        WHEN p.loaigd IN (2, 4, 6) THEN -ct.soluong
+                                        WHEN p.loaigd = 9 THEN -ABS(ct.soluong)
                                         ELSE 0
                                       END
                                     ), 0) AS delta_trong_luc_kiem
@@ -756,7 +897,7 @@ function registerInventoryCogsPhase4Routes(app, deps) {
                     maGiaoDich: maGD,
                     branchId,
                     trangThaiDuyet: statusDuyet,
-                    totalAbsVarianceValue,
+                    ...(isManager ? { totalAbsVarianceValue } : {}),
                     items: evaluated.map((e) => ({
                         maNL: e.maNL,
                         tenNL: e.st.tenNL,
@@ -781,7 +922,9 @@ function registerInventoryCogsPhase4Routes(app, deps) {
             res.json({
                 message:
                     out.trangThaiDuyet === 'PENDING_APPROVAL'
-                        ? `⏳ Đã gửi phiếu kiểm kho #${out.maGiaoDich} chờ Chủ quán duyệt (lệch > 200.000đ)!`
+                        ? isManager
+                            ? `⏳ Đã gửi phiếu kiểm kho #${out.maGiaoDich} chờ Chủ quán duyệt (lệch > 200.000đ)!`
+                            : `⏳ Đã gửi phiếu kiểm kho #${out.maGiaoDich} chờ Quản lý duyệt!`
                         : `✅ Đã hoàn tất kiểm kho mù #${out.maGiaoDich} (đã bù trừ tiêu hao bán hàng giữa chừng)!`,
                 ...out,
             });
@@ -1419,10 +1562,16 @@ function registerInventoryCogsPhase4Routes(app, deps) {
                 return { maPO, maGiaoDich: maGD, trangThaiPO: nextPoStatus, totalCogsAdj, priceSpikeAlerts, autoUnlocked };
             }, tenantId);
 
-            if (out.autoUnlocked && io && roomTen) {
-                io.to(roomTen(tenantId, 'thungan')).to(roomTen(tenantId, 'barista')).emit('menu:86_updated', {
-                    type: 'AUTO_UN86_GRN',
-                    ...out.autoUnlocked,
+            if (out.autoUnlocked && io) {
+                emitToBranch(io, {
+                    tenantId,
+                    branchId: out.branchId || req.body?.branchId || req.user?.branchId || 'DEFAULT',
+                    roles: ['POS', 'WAITER', 'KDS', 'EXPO'],
+                    event: 'menu:86_updated',
+                    payload: {
+                        type: 'AUTO_UN86_GRN',
+                        ...out.autoUnlocked,
+                    },
                 });
             }
 

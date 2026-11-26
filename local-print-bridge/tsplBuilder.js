@@ -237,6 +237,9 @@ function buildCupLabelsTspl({
     const rawCups = [];
     for (const m of items) {
         const qty = Math.max(1, Number(m.soLuong || 1));
+        const isRemake = Boolean(m.isRemake || m.remakeOfCTHD);
+        const isRush = !isRemake && (Boolean(m.isRush) || Number(m.mucDoUuTien || 0) >= 2);
+        const isSwap = !isRemake && !isRush && (String(m.ghiChu || '').includes('[ĐỔI') || Number(m.mucDoUuTien) === 1);
         for (let i = 1; i <= qty; i++) {
             rawCups.push({
                 cupLabelId: `${maHD}-${m.maCTHD || m.maMon}-${i}`,
@@ -248,8 +251,9 @@ function buildCupLabelsTspl({
                 modifiersSnapshot: m.modifiersSnapshot || [],
                 toppings: m.toppings || [],
                 isTakeaway: Boolean(m.isTakeaway) || isOrderTakeaway,
-                isRemake: Boolean(m.remakeOfCTHD) || Number(m.mucDoUuTien) === 2,
-                isSwap: String(m.ghiChu || '').includes('[ĐỔI') || Number(m.mucDoUuTien) === 1,
+                isRemake,
+                isRush,
+                isSwap,
                 trongLuongGram: m.trongLuongGram || null,
             });
         }
@@ -282,6 +286,8 @@ function buildCupLabelsTspl({
 
         const badge = cup.isRemake
             ? '[LAM LAI]'
+            : cup.isRush
+            ? '[GAP/RUSH]'
             : cup.isSwap
             ? '[DOI MON]'
             : cup.isTakeaway

@@ -16,9 +16,9 @@ describe('Wave 1 Unit — Local Print Bridge Security (P0-04)', () => {
     });
 
     it('tự sinh 32-byte random token (64 hex chars) khi khởi chạy lần đầu và từ chối HTTP 401 khi sai token', async () => {
-        const tmpBase = path.join(__dirname, '..', '.tmp');
+        const tmpBase = path.join(__dirname, '..', '..', 'node_modules', '.cache', 'bridge-security');
         fs.mkdirSync(tmpBase, { recursive: true });
-        const tmpDir = fs.mkdtempSync(path.join(tmpBase, 'print-bridge-test-'));
+        const tmpDir = fs.mkdtempSync(path.join(tmpBase, 'inst-'));
         const tmpCfg = path.join(tmpDir, 'bridge-config.json');
         const tmpSpool = path.join(tmpDir, 'spool-queue.json');
         fs.writeFileSync(tmpCfg, JSON.stringify({ security: { apiToken: '' } }), 'utf8');
@@ -66,6 +66,11 @@ describe('Wave 1 Unit — Local Print Bridge Security (P0-04)', () => {
             else process.env.PRINT_BRIDGE_TOKEN = prevToken;
             delete require.cache[bridgeModulePath];
             fs.rmSync(tmpDir, { recursive: true, force: true });
+            try {
+                if (fs.existsSync(tmpBase) && fs.readdirSync(tmpBase).length === 0) {
+                    fs.rmdirSync(tmpBase);
+                }
+            } catch (_) {}
         }
     });
 });

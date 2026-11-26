@@ -1,6 +1,32 @@
 'use strict';
 
 const crypto = require('crypto');
+
+// [Batch 6 — NĐ 13/2023] Che số điện thoại khách hàng (giữ 3 số cuối: *******789)
+// Chỉ trả số đầy đủ cho vai trò có thẩm quyền (Quản lý = 1) hoặc mục đích xuất HĐĐT / CSKH được cấp phép,
+// và LUÔN che khi tạo payload gửi sang Print Bridge (forPrint: true).
+function maskPhoneForInvoice(sdt, options = {}) {
+    if (sdt === null || sdt === undefined) return null;
+    const raw = String(sdt).trim();
+    if (!raw) return null;
+
+    const opts = options && typeof options === 'object' ? options : {};
+    const forPrint = Boolean(opts.forPrint);
+    const purpose = String(opts.purpose || '').trim().toUpperCase();
+    const roleVal = opts.vaiTro ?? opts.role ?? opts.user?.vaiTro ?? null;
+    const isAuthorizedRole = roleVal !== null && roleVal !== undefined && Number(roleVal) === 1;
+    const isAuthorizedPurpose =
+        opts.allowFullPhone === true ||
+        purpose === 'EINVOICE' ||
+        purpose === 'CSKH_AUTHORIZED';
+
+    if (!forPrint && (isAuthorizedRole || isAuthorizedPurpose)) {
+        return raw;
+    }
+
+    if (raw.length <= 3) return '***';
+    return `${'*'.repeat(raw.length - 3)}${raw.slice(-3)}`;
+}
 const {
     SIZE_HOP_LE,
     TRAM_CHE_BIEN_HOP_LE,
@@ -239,49 +265,59 @@ const SQL_MON_PHA_CHE = `
       FROM ChiTietHoaDon cthd
       JOIN SanPham sp ON sp.MaMon = cthd.MaMon`;
 
-const mapMonPhaChe = (r) => ({
-    maCTHD: r.macthd,
-    maHoaDon: r.mahoadon,
-    branchId: r.branchid || 'DEFAULT',
-    clientOrderUid: r.clientorderuid || null,
-    soThuTuNgay: r.sothutungay ? Number(r.sothutungay) : null,
-    soThuTuHienThi: r.sothutuhienthi || (r.sothutungay ? String(r.sothutungay).padStart(3, '0') : null),
-    soTheRung: r.sotherung || null,
-    tenKhachVangLai: r.tenkhachvanglai || null,
-    loaiDonHang: r.loaidonhang || (r.maban ? 'TAI_QUAN' : 'MANG_DI'),
-    maMon: r.mamon,
-    tenMon: r.tenmon,
-    tenMonTuyChinh: r.tenmontuychinh || null,
-    laMonThoiGia: Boolean(r.lamonthoigia),
-    inTemCoc: r.intemcoc !== false,
-    trongLuongGram: r.trongluonggram !== null && r.trongluonggram !== undefined ? Number(r.trongluonggram) : null,
-    nhomMon: r.nhommon || null,
-    tramCheBien: suyLuanTramCheBien({ tramCheBien: r.tramchebien, nhomMon: r.nhommon, tenMon: r.tenmon }),
-    kichThuoc: r.kichthuoc,
-    soLuong: r.soluong,
-    ghiChu: r.ghichu,
-    dotGoi: Number(r.dotgoi || 1),
-    isTakeaway: Boolean(r.istakeaway) || !r.maban,
-    courseNo: Number(r.courseno || 1),
-    fireStatus: r.firestatus || 'FIRED',
-    firedAt: r.firedat || null,
-    mucDoUuTien: Number(r.mucdouutien || 0),
-    remakeOfCTHD: r.remakeofcthd || null,
-    modifiersSnapshot: Array.isArray(r.modifierssnapshot) ? r.modifierssnapshot : [],
-    comboGroupUid: r.combogroupuid || null,
-    maCombo: r.macombo || null,
-    tenComboSnapshot: r.tencombosnapshot || null,
-    trangThaiPhaChe: r.trangthaiphache,
-    thoiGianGoi: r.thoigiangoi,
-    thoiGianBatDauLam: r.thoigianbatdaulam || null,
-    thoiGianXong: r.thoigianxong || null,
-    thoiGianPhucVu: r.thoigianphucvu || null,
-    maNVPhaChe: r.manvphache || null,
-    maBan: r.maban || null,
-    tenBan: r.tenban || null,
-    mangDi: !r.maban || Boolean(r.istakeaway),
-    toppings: r.toppings,
-});
+const mapMonPhaChe = (r) => {
+    const mucDoUuTien = Number(r.mucdouutien || 0);
+    const remakeOfCTHD = r.remakeofcthd || null;
+    const isRemake = Boolean(remakeOfCTHD);
+    const isRush = !isRemake && mucDoUuTien >= 2;
+    const priorityLabel = isRemake ? 'REMAKE' : isRush ? 'RUSH' : 'NORMAL';
+    return {
+        maCTHD: r.macthd,
+        maHoaDon: r.mahoadon,
+        branchId: r.branchid || 'DEFAULT',
+        clientOrderUid: r.clientorderuid || null,
+        soThuTuNgay: r.sothutungay ? Number(r.sothutungay) : null,
+        soThuTuHienThi: r.sothutuhienthi || (r.sothutungay ? String(r.sothutungay).padStart(3, '0') : null),
+        soTheRung: r.sotherung || null,
+        tenKhachVangLai: r.tenkhachvanglai || null,
+        loaiDonHang: r.loaidonhang || (r.maban ? 'TAI_QUAN' : 'MANG_DI'),
+        maMon: r.mamon,
+        tenMon: r.tenmon,
+        tenMonTuyChinh: r.tenmontuychinh || null,
+        laMonThoiGia: Boolean(r.lamonthoigia),
+        inTemCoc: r.intemcoc !== false,
+        trongLuongGram: r.trongluonggram !== null && r.trongluonggram !== undefined ? Number(r.trongluonggram) : null,
+        nhomMon: r.nhommon || null,
+        tramCheBien: suyLuanTramCheBien({ tramCheBien: r.tramchebien, nhomMon: r.nhommon, tenMon: r.tenmon }),
+        kichThuoc: r.kichthuoc,
+        soLuong: r.soluong,
+        ghiChu: r.ghichu,
+        dotGoi: Number(r.dotgoi || 1),
+        isTakeaway: Boolean(r.istakeaway) || !r.maban,
+        courseNo: Number(r.courseno || 1),
+        fireStatus: r.firestatus || 'FIRED',
+        firedAt: r.firedat || null,
+        mucDoUuTien,
+        remakeOfCTHD,
+        isRemake,
+        isRush,
+        priorityLabel,
+        modifiersSnapshot: Array.isArray(r.modifierssnapshot) ? r.modifierssnapshot : [],
+        comboGroupUid: r.combogroupuid || null,
+        maCombo: r.macombo || null,
+        tenComboSnapshot: r.tencombosnapshot || null,
+        trangThaiPhaChe: r.trangthaiphache,
+        thoiGianGoi: r.thoigiangoi,
+        thoiGianBatDauLam: r.thoigianbatdaulam || null,
+        thoiGianXong: r.thoigianxong || null,
+        thoiGianPhucVu: r.thoigianphucvu || null,
+        maNVPhaChe: r.manvphache || null,
+        maBan: r.maban || null,
+        tenBan: r.tenban || null,
+        mangDi: !r.maban || Boolean(r.istakeaway),
+        toppings: r.toppings,
+    };
+};
 
 async function layMonTheoMa(db, dsMaCTHD) {
     if (!Array.isArray(dsMaCTHD) || dsMaCTHD.length === 0) return [];
@@ -309,7 +345,7 @@ async function layMonTheoTrangThai(db, dsTrangThai, tenantId = 'DEFAULT', { incl
 }
 
 // ---- Hóa đơn chi tiết (dùng cho xem bàn, thanh toán, in bill — Single Source of Truth) ----------------
-async function layHoaDonChiTiet(db, maHoaDon) {
+async function layHoaDonChiTiet(db, maHoaDon, options = {}) {
     const hdRes = await db.query(
         `SELECT hd.MaHoaDon, hd.MaKH, COALESCE(to_jsonb(kh)->>'tenkh', to_jsonb(kh)->>'hoten') AS TenKH, kh.SoDienThoai, kh.DiemTichLuy,
                 hd.TrangThaiTT, hd.PhuongThucTT, hd.TongTienThanhToan, hd.ThoiGianTao, hd.ThoiGianThanhToan,
@@ -337,6 +373,9 @@ async function layHoaDonChiTiet(db, maHoaDon) {
                 COALESCE((to_jsonb(hd)->>'phiphucvuphantram')::numeric, 0) AS PhiPhucVuPhanTram,
                 COALESCE((to_jsonb(hd)->>'tienphiphucvu')::numeric, 0) AS TienPhiPhucVu,
                 COALESCE((to_jsonb(hd)->>'tienlamtron')::numeric, 0) AS TienLamTron,
+                to_jsonb(hd)->'tax_breakdown_json' AS TaxBreakdownJson,
+                to_jsonb(hd)->>'einvoice_lookup_code' AS EInvoiceLookupCode,
+                COALESCE(NULLIF(to_jsonb(hd)->>'branchid', ''), 'DEFAULT') AS BranchId,
                 COALESCE(hd.TenantId, 'DEFAULT') AS TenantId
            FROM HoaDon hd
            LEFT JOIN KhachHang kh ON kh.MaKH = hd.MaKH
@@ -368,6 +407,8 @@ async function layHoaDonChiTiet(db, maHoaDon) {
                 COALESCE((to_jsonb(c)->>'courseno')::int, 1) AS CourseNo,
                 COALESCE(to_jsonb(c)->>'firestatus', 'FIRED') AS FireStatus,
                 to_jsonb(c)->>'firedat' AS FiredAt,
+                COALESCE((to_jsonb(c)->>'mucdouutien')::int, 0) AS MucDoUuTien,
+                to_jsonb(c)->>'remakeofcthd' AS RemakeOfCTHD,
                 COALESCE((to_jsonb(c)->>'chietkhaumon')::numeric, 0) AS ChietKhauMon,
                 COALESCE((to_jsonb(c)->>'lamontang')::boolean, FALSE) AS LaMonTang,
                 to_jsonb(c)->>'lydotang' AS LyDoTang,
@@ -431,6 +472,11 @@ async function layHoaDonChiTiet(db, maHoaDon) {
             courseNo: Number(r.courseno || 1),
             fireStatus: r.firestatus || 'FIRED',
             firedAt: r.firedat || null,
+            mucDoUuTien: Number(r.mucdouutien || 0),
+            remakeOfCTHD: r.remakeofcthd || null,
+            isRemake: Boolean(r.remakeofcthd),
+            isRush: !r.remakeofcthd && Number(r.mucdouutien || 0) >= 2,
+            priorityLabel: r.remakeofcthd ? 'REMAKE' : Number(r.mucdouutien || 0) >= 2 ? 'RUSH' : 'NORMAL',
             giaVon: Number(r.giavonsnapshot || 0),
             ghiChu: r.ghichu,
             trangThaiPhaChe: r.trangthaiphache,
@@ -513,6 +559,10 @@ async function layHoaDonChiTiet(db, maHoaDon) {
         thueVATPhanTram: Number(hd.thuevatphantram || 0),
     });
 
+    const taxBreakdown = Array.isArray(hd.taxbreakdownjson) ? hd.taxbreakdownjson : null;
+    const hasMixedTaxBreakdown = Array.isArray(taxBreakdown) && taxBreakdown.length > 0;
+    const tienThueVAT = hasMixedTaxBreakdown ? Number(hd.tienthuevat || 0) : keToan.tienThueVAT;
+
     const tongTamTinh = keToan.tamTinhMon;
     const tongGiamGia = keToan.tongGiamGia;
     const tongSauGiam = keToan.sauGiamGia;
@@ -541,9 +591,15 @@ async function layHoaDonChiTiet(db, maHoaDon) {
         thoiGianMoBan: hd.thoigianmoban || hd.thoigiantao,
         mergedIntoMaHoaDon: hd.mergedintomahoadon || null,
         parentMaHoaDon: hd.parentmahoadon || null,
+        branchId: hd.branchid || 'DEFAULT',
         tenantId: hd.tenantid || 'DEFAULT',
         khachHang: hd.makh
-            ? { maKH: hd.makh, tenKH: hd.tenkh, soDienThoai: hd.sodienthoai, diemTichLuy: hd.diemtichluy }
+            ? {
+                  maKH: hd.makh,
+                  tenKH: hd.tenkh,
+                  soDienThoai: maskPhoneForInvoice(hd.sodienthoai, options),
+                  diemTichLuy: hd.diemtichluy,
+              }
             : null,
         trangThaiTT: hd.trangthaitt,
         phuongThucTT: hd.phuongthuctt,
@@ -570,7 +626,9 @@ async function layHoaDonChiTiet(db, maHoaDon) {
         tienPhiPhucVu: keToan.tienPhiPhucVu,
         cachTinhThue: keToan.cachTinhThue,
         thueVATPhanTram: keToan.thueVATPhanTram,
-        tienThueVAT: keToan.tienThueVAT,
+        tienThueVAT,
+        taxBreakdown,
+        einvoiceLookupCode: hd.einvoicelookupcode || null,
         tienLamTron: Number(hd.tienlamtron || keToan.tienLamTron || 0),
         tongPhaiTra,
         daThanhToan,
@@ -973,6 +1031,8 @@ async function taoOrderTrongGiaoDich(
         }
     }
     const bakeryMap = await layBanDoGiamGiaLoBanhHomNay(client, tenantId);
+    const effective86BranchId = normalizeBranchId(branchId || 'DEFAULT');
+    const branch86 = await loadBranchAvailability86Map(client, tenantId, effective86BranchId);
 
     // 0.5. Mở rộng danh sách Combo (nếu có) thành các dòng món con kèm giá phân bổ Pro-rata 0đ sai số
     const expandedInputItems = [...(Array.isArray(danhSachMon) ? danhSachMon : [])];
@@ -1018,7 +1078,9 @@ async function taoOrderTrongGiaoDich(
             if (!cmbDef || !cmbDef.dangkinhdoanh) {
                 throw new LoiNghiepVu(400, `Combo "${code}" không tồn tại hoặc đã ngừng kinh doanh!`);
             }
-            if (cmbDef.tamhet && !laOfflineSync) {
+            const bCmb = branch86.combos.get(String(code));
+            const comboTamHet = bCmb !== undefined ? Boolean(bCmb.isSoldOut) : Boolean(cmbDef.tamhet);
+            if (comboTamHet && !laOfflineSync) {
                 throw new LoiNghiepVu(409, `Combo "${cmbDef.tencombo}" hiện đang tạm hết (86'd do thiếu món con)!`, {
                     maLoi: 'COMBO_TAM_HET',
                 });
@@ -1093,10 +1155,12 @@ async function taoOrderTrongGiaoDich(
     const bangGia = new Map();
     const monCountdownMap = new Map();
     for (const r of giaRes.rows) {
+        const bProd = branch86.products.get(String(r.mamon));
+        const prodTamHet = bProd !== undefined ? Boolean(bProd.isSoldOut) : Boolean(r.tamhet);
         bangGia.set(`${r.mamon}|${r.kichthuoc}`, {
             giaBan: Number(r.giaban),
             tenMon: r.tenmon,
-            tamHet: Boolean(r.tamhet),
+            tamHet: prodTamHet,
             soLuongGioiHan86: r.soluonggioihan86 !== null && r.soluonggioihan86 !== undefined ? Number(r.soluonggioihan86) : null,
             laMonThoiGia: Boolean(r.lamonthoigia),
             donViBanHang: r.donvibanhang || 'LY',
@@ -1176,6 +1240,8 @@ async function taoOrderTrongGiaoDich(
                     [tenantId]
                 );
                 for (const o of oRes.rows) {
+                    const bMod = branch86.modifiers.get(String(o.id));
+                    const modTamHet = bMod !== undefined ? Boolean(bMod.isSoldOut) : Boolean(o.tamhet);
                     modOptionMap.set(Number(o.id), {
                         id: Number(o.id),
                         groupId: Number(o.groupid),
@@ -1184,7 +1250,7 @@ async function taoOrderTrongGiaoDich(
                         laMacDinh: Boolean(o.lamacdinh),
                         giaCongThem: Number(o.giacongthem || 0),
                         toiDaSoLuong: Number(o.toidasoluong || 1),
-                        tamHet: Boolean(o.tamhet),
+                        tamHet: modTamHet,
                         thuTuHienThi: Number(o.thutuhienthi || 0),
                     });
                 }
@@ -1255,6 +1321,8 @@ async function taoOrderTrongGiaoDich(
             [cacTopping, tenantId]
         );
         for (const r of tpRes.rows) {
+            const bTp = branch86.toppings.get(String(r.matopping));
+            const tpTamHet = bTp !== undefined ? Boolean(bTp.isSoldOut) : Boolean(r.tamhet);
             bangTopping.set(r.matopping, {
                 tenTopping: r.tentopping,
                 giaTopping: Number(r.giatopping),
@@ -1263,7 +1331,7 @@ async function taoOrderTrongGiaoDich(
                 maNL: r.manl,
                 khoiLuong: Number(r.khoiluongtieuhao),
                 giaVonDonVi: Number(r.giavondonvi || 0),
-                tamHet: Boolean(r.tamhet),
+                tamHet: tpTamHet,
             });
         }
         try {
@@ -1308,12 +1376,13 @@ async function taoOrderTrongGiaoDich(
         });
     }
 
-    const loaiDonFinal =
-        loaiDonHang && ['TAI_QUAN', 'MANG_DI', 'GIAO_HANG', 'APP_SAN'].includes(String(loaiDonHang).toUpperCase())
-            ? String(loaiDonHang).toUpperCase()
-            : maBan
-            ? 'TAI_QUAN'
-            : 'MANG_DI';
+    const rawLoaiDonUpper = loaiDonHang ? String(loaiDonHang).trim().toUpperCase() : '';
+    const normalizedLoaiDon = rawLoaiDonUpper === 'APP' ? 'APP_SAN' : rawLoaiDonUpper;
+    const loaiDonFinal = ['TAI_QUAN', 'MANG_DI', 'GIAO_HANG', 'APP_SAN'].includes(normalizedLoaiDon)
+        ? normalizedLoaiDon
+        : maBan
+        ? 'TAI_QUAN'
+        : 'MANG_DI';
 
     // Chuẩn hóa từng dòng + Modifiers + Clamped Substitution BOM + Takeaway Packaging + Giá vốn snapshot
     const tieuHao = new Map();
@@ -1470,19 +1539,46 @@ async function taoOrderTrongGiaoDich(
             };
         });
 
-        // Vật tư đóng gói mang đi theo kênh bán (ALL / MANG_DI / GIAO_HANG / APP_SAN)
+        // Vật tư đóng gói theo kênh bán (ALL / MANG_DI / GIAO_HANG / APP_SAN / TAI_QUAN)
+        // - Mang đi / Giao hàng / App sàn (hoặc món isTakeaway): áp dụng cấu hình kênh tương ứng + cấu hình chung 'ALL'
+        //   (ưu tiên kênh cụ thể và size cụ thể nếu cùng maNL, tránh cộng đúp vật tư).
+        // - Tại chỗ (TAI_QUAN & !mon.isTakeaway): KHÔNG trừ bao bì mang về, chỉ trừ nếu có cấu hình riêng kenhdung = 'TAI_QUAN'.
         const isItemTakeaway = loaiDonFinal !== 'TAI_QUAN' || Boolean(mon.isTakeaway);
         const packagingBomPerCup = [];
+        const itemSizeUpper = String(mon.kichThuoc || 'M').toUpperCase();
+        const sizeBuckets = [
+            { sz: itemSizeUpper, scoreSz: 1, rows: packagingBySize.get(itemSizeUpper) || [] },
+            ...(itemSizeUpper !== 'ALL' ? [{ sz: 'ALL', scoreSz: 0, rows: packagingBySize.get('ALL') || [] }] : []),
+        ];
+        const bestPackByNl = new Map();
         if (isItemTakeaway) {
             takeawayCupsCount += mon.soLuong;
             const channelTarget = loaiDonFinal === 'TAI_QUAN' ? 'MANG_DI' : loaiDonFinal;
-            const specificPack = (packagingBySize.get(String(mon.kichThuoc).toUpperCase()) || []).filter(
-                (p) => p.kenhDung === 'ALL' || p.kenhDung === channelTarget
-            );
-            const allPack = (packagingBySize.get('ALL') || []).filter(
-                (p) => p.kenhDung === 'ALL' || p.kenhDung === channelTarget
-            );
-            packagingBomPerCup.push(...specificPack, ...allPack);
+            for (const bucket of sizeBuckets) {
+                for (const p of bucket.rows) {
+                    const normKenh = p.kenhDung === 'APP' ? 'APP_SAN' : p.kenhDung;
+                    if (normKenh !== 'ALL' && normKenh !== channelTarget) continue;
+                    const score = (normKenh === channelTarget ? 2 : 0) + bucket.scoreSz;
+                    const prev = bestPackByNl.get(p.maNL);
+                    if (!prev || score > prev.score) {
+                        bestPackByNl.set(p.maNL, { score, rule: p });
+                    }
+                }
+            }
+        } else {
+            for (const bucket of sizeBuckets) {
+                for (const p of bucket.rows) {
+                    if (p.kenhDung !== 'TAI_QUAN') continue;
+                    const score = 2 + bucket.scoreSz;
+                    const prev = bestPackByNl.get(p.maNL);
+                    if (!prev || score > prev.score) {
+                        bestPackByNl.set(p.maNL, { score, rule: p });
+                    }
+                }
+            }
+        }
+        for (const entry of bestPackByNl.values()) {
+            packagingBomPerCup.push(entry.rule);
         }
 
         // Tính BOM 5 lớp (Base Size + Modifier Substitution + Topping + Packaging) & lưu BomSnapshotJson!
@@ -2095,21 +2191,45 @@ async function congDinhLuongNguyenLieuDongMon(client, tenantId, { maCTHD, maMon,
     }
 
     const packagingBomRows = [];
-    if (isTakeaway) {
-        await client.query('SAVEPOINT sp_bom_pack_void');
-        try {
-            const pkRes = await client.query(
-                `SELECT manl, soluongtieuhao FROM cauhinh_vattu_mangdi
-                  WHERE tenantid = $1 AND kichthuoc IN ($2, 'ALL')`,
-                [tenantId, String(kichThuoc || 'M').toUpperCase()]
-            );
-            for (const r of pkRes.rows) {
-                packagingBomRows.push({ maNL: r.manl, khoiLuong: Number(r.soluongtieuhao) });
+    await client.query('SAVEPOINT sp_bom_pack_void');
+    try {
+        const hdChRes = await client.query(
+            `SELECT COALESCE(to_jsonb(hd)->>'loaidonhang', 'TAI_QUAN') AS loaidonhang
+               FROM HoaDon hd
+               JOIN ChiTietHoaDon c ON c.MaHoaDon = hd.MaHoaDon
+              WHERE c.MaCTHD = $1 LIMIT 1`,
+            [maCTHD]
+        );
+        const rawOrderCh = String(hdChRes.rows[0]?.loaidonhang || (isTakeaway ? 'MANG_DI' : 'TAI_QUAN')).toUpperCase();
+        const orderCh = rawOrderCh === 'APP' ? 'APP_SAN' : rawOrderCh;
+        const effectiveTakeaway = orderCh !== 'TAI_QUAN' || isTakeaway;
+        const targetCh = effectiveTakeaway ? (orderCh === 'TAI_QUAN' ? 'MANG_DI' : orderCh) : 'TAI_QUAN';
+        const allowedChannels = effectiveTakeaway ? ['ALL', targetCh] : ['TAI_QUAN'];
+        const itemSz = String(kichThuoc || 'M').toUpperCase();
+
+        const pkRes = await client.query(
+            `SELECT manl, kichthuoc, soluongtieuhao,
+                    COALESCE(to_jsonb(cauhinh_vattu_mangdi)->>'kenhdung', 'ALL') AS kenhdung
+               FROM cauhinh_vattu_mangdi
+              WHERE tenantid = $1 AND kichthuoc IN ($2, 'ALL')`,
+            [tenantId, itemSz]
+        );
+        const bestByNl = new Map();
+        for (const r of pkRes.rows) {
+            const normKenh = String(r.kenhdung || 'ALL').toUpperCase() === 'APP' ? 'APP_SAN' : String(r.kenhdung || 'ALL').toUpperCase();
+            if (!allowedChannels.includes(normKenh)) continue;
+            const score = (normKenh === targetCh ? 2 : 0) + (String(r.kichthuoc || '').toUpperCase() === itemSz ? 1 : 0);
+            const prev = bestByNl.get(r.manl);
+            if (!prev || score > prev.score) {
+                bestByNl.set(r.manl, { score, maNL: r.manl, khoiLuong: Number(r.soluongtieuhao) });
             }
-            await client.query('RELEASE SAVEPOINT sp_bom_pack_void');
-        } catch {
-            await client.query('ROLLBACK TO SAVEPOINT sp_bom_pack_void').catch(() => {});
         }
+        for (const e of bestByNl.values()) {
+            packagingBomRows.push({ maNL: e.maNL, khoiLuong: e.khoiLuong });
+        }
+        await client.query('RELEASE SAVEPOINT sp_bom_pack_void');
+    } catch {
+        await client.query('ROLLBACK TO SAVEPOINT sp_bom_pack_void').catch(() => {});
     }
 
     const perCupCalc = tinhBomMotLySauSubstitution({
@@ -2436,6 +2556,27 @@ async function ghiNhanThanhToanTrongGiaoDich(
         cachTinhThue: chiTietTruoc.cachTinhThue,
         thueVATPhanTram: chiTietTruoc.thueVATPhanTram,
     });
+    // [Batch 4 - Mixed-Rate VAT] Tính lại thuế VAT đa mức theo từng dòng sau khi áp KM/Điểm, không ghi đè bằng thuế phẳng
+    let mixedTaxPay = null;
+    await client.query('SAVEPOINT sp_pay_mixed_tax');
+    try {
+        mixedTaxPay = await applyMixedRateTaxToOrder(client, {
+            tenantId: hdTenantId,
+            maHoaDon,
+            orderDiscountTotal: tienGiamKMFinal + tienGiamDiemFinal,
+            serviceChargePct: chiTietTruoc.loaiDonHang === 'TAI_QUAN' ? Number(chiTietTruoc.phiPhucVuPhanTram || 0) : 0,
+            taxMode: chiTietTruoc.cachTinhThue || 'INCLUDED',
+        });
+        await client.query('RELEASE SAVEPOINT sp_pay_mixed_tax');
+    } catch {
+        await client.query('ROLLBACK TO SAVEPOINT sp_pay_mixed_tax').catch(() => {});
+    }
+    const tienThueVATFinal =
+        mixedTaxPay !== null && mixedTaxPay !== undefined
+            ? Number(mixedTaxPay.totalTax || 0)
+            : Array.isArray(chiTietTruoc.taxBreakdown) && chiTietTruoc.taxBreakdown.length > 0
+              ? Number(chiTietTruoc.tienThueVAT || 0)
+              : keToanPay.tienThueVAT;
     const tongTien = keToanPay.tongPhaiTra;
     const daThuTruoc = chiTietTruoc.daThanhToan;
     const conLaiTruoc = Math.max(0, Math.round((tongTien - daThuTruoc) * 100) / 100);
@@ -2626,7 +2767,7 @@ async function ghiNhanThanhToanTrongGiaoDich(
                     ca ? ca.macathungan : null,
                     maKH || null,
                     keToanPay.tienPhiPhucVu,
-                    keToanPay.tienThueVAT,
+                    tienThueVATFinal,
                     keToanPay.tienLamTron,
                 ]
             );
@@ -2675,7 +2816,7 @@ async function ghiNhanThanhToanTrongGiaoDich(
                 const { branchId: lockedBranchId, stockMap } = await lockBranchStockOrdered(client, hdTenantId, settleBranchId, dsNL);
                 const phieu = await client.query(
                     `INSERT INTO PhieuGiaoDichKho (MaNV, LoaiGD, GhiChu, TenantId, BranchId, MaCaThuNgan, NgayChungTu, TrangThaiDuyet)
-                     VALUES ($1, 3, $2, $3, $4, $5, $6::date, 'POSTED') RETURNING MaGiaoDich`,
+                     VALUES ($1, 6, $2, $3, $4, $5, $6::date, 'POSTED') RETURNING MaGiaoDich`,
                     [
                         maNV || 'WEBHOOK',
                         `Tiêu hao bán hàng (VietQR PAID) - HĐ ${maHoaDon}`,
@@ -2817,8 +2958,10 @@ async function ghiNhanThanhToanTrongGiaoDich(
         });
     }
 
+    const hoaDonFinal = await layHoaDonChiTiet(client, maHoaDon);
     return {
         tenantId: hdTenantId,
+        branchId: hoaDonFinal?.branchId || normalizeBranchId(branchId || ca?.branchid || 'DEFAULT'),
         maCaThuNgan: ca ? ca.macathungan : null,
         daHoanTat,
         tongTien,
@@ -2830,7 +2973,7 @@ async function ghiNhanThanhToanTrongGiaoDich(
         diemCong,
         banDaTrong,
         kdsEmitPlan,
-        hoaDon: await layHoaDonChiTiet(client, maHoaDon),
+        hoaDon: hoaDonFinal,
     };
 }
 
@@ -2975,6 +3118,7 @@ async function kiemTraVaPhatAllStationsReady(mon, tenantId = 'DEFAULT') {
         mapMonPhaChe,
         layMonTheoMa,
         layMonTheoTrangThai,
+        maskPhoneForInvoice,
         layHoaDonChiTiet,
         layHoaDonMoCuaBan,
         tinhDoiSoatCa,
@@ -2991,4 +3135,4 @@ async function kiemTraVaPhatAllStationsReady(mon, tenantId = 'DEFAULT') {
     };
 }
 
-module.exports = { createOrderHelpers };
+module.exports = { createOrderHelpers, maskPhoneForInvoice };

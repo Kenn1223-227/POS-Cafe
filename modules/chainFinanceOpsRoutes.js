@@ -33,15 +33,21 @@ function registerChainFinanceOpsRoutes(app, deps) {
         chayGiaoDich,
         kiemTraToken,
         choPhepVaiTro,
+        yeuCauTinhNang,
         layTenantId,
         layChiNhanhHienTai,
         ghiAuditLog,
     } = deps;
+    const gate = (flag) => (typeof yeuCauTinhNang === 'function' ? yeuCauTinhNang(flag) : (_req, _res, next) => next());
+    const gateHouseAccount = gate('crm_tiers');
+    const gateVietQr = gate('vietqr_webhook');
+    const gateAggregator = gate('aggregator_hub');
+    const gateSupplierAp = gate('inventory_bom');
 
     // -------------------------------------------------------------------------
     // 1. HOUSE ACCOUNTS B2B
     // -------------------------------------------------------------------------
-    app.get('/api/finance/house-accounts', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) => {
+    app.get('/api/finance/house-accounts', kiemTraToken, choPhepVaiTro(1, 4), gateHouseAccount, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const accounts = await chayGiaoDich(
@@ -54,7 +60,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/finance/house-accounts', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/finance/house-accounts', kiemTraToken, choPhepVaiTro(1), gateHouseAccount, async (req, res) => {
         const tenantId = layTenantId(req);
         const branchId = layChiNhanhHienTai ? layChiNhanhHienTai(req) : null;
         try {
@@ -68,7 +74,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/finance/house-accounts/:id/charge', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) => {
+    app.post('/api/finance/house-accounts/:id/charge', kiemTraToken, choPhepVaiTro(1, 4), gateHouseAccount, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const result = await chayGiaoDich(
@@ -89,7 +95,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/finance/house-accounts/:id/repayment', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) => {
+    app.post('/api/finance/house-accounts/:id/repayment', kiemTraToken, choPhepVaiTro(1, 4), gateHouseAccount, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const result = await chayGiaoDich(
@@ -109,7 +115,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
         }
     });
 
-    app.get('/api/finance/house-accounts/:id/statement', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) => {
+    app.get('/api/finance/house-accounts/:id/statement', kiemTraToken, choPhepVaiTro(1, 4), gateHouseAccount, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const statement = await chayGiaoDich(
@@ -131,7 +137,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
     // -------------------------------------------------------------------------
     // 2. VIETQR PAYMENT ATTEMPTS (TTL 5 PHÚT)
     // -------------------------------------------------------------------------
-    app.post('/api/finance/vietqr-attempts', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
+    app.post('/api/finance/vietqr-attempts', kiemTraToken, choPhepVaiTro(1, 2, 4), gateVietQr, async (req, res) => {
         const tenantId = layTenantId(req);
         const branchId = layChiNhanhHienTai ? layChiNhanhHienTai(req) : null;
         try {
@@ -153,7 +159,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
         }
     });
 
-    app.get('/api/finance/vietqr-attempts/:transferCode/resolve', kiemTraToken, choPhepVaiTro(1, 2, 4), async (req, res) => {
+    app.get('/api/finance/vietqr-attempts/:transferCode/resolve', kiemTraToken, choPhepVaiTro(1, 2, 4), gateVietQr, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const result = await chayGiaoDich(
@@ -173,7 +179,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
     // -------------------------------------------------------------------------
     // 3. DUAL-PIN SHIFT HANDOVER
     // -------------------------------------------------------------------------
-    app.post('/api/shifts/:maCa/handover', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) => {
+    app.post('/api/shifts/:maCa/handover', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {
         const tenantId = layTenantId(req);
         const branchId = layChiNhanhHienTai ? layChiNhanhHienTai(req) : null;
         try {
@@ -201,7 +207,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
         }
     });
 
-    app.get('/api/shifts/:maCa/handovers', kiemTraToken, choPhepVaiTro(1, 2), async (req, res) => {
+    app.get('/api/shifts/:maCa/handovers', kiemTraToken, choPhepVaiTro(1, 4), async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const handovers = await chayGiaoDich(async (client) => {
@@ -223,7 +229,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
     // -------------------------------------------------------------------------
     // 4. AGGREGATOR SETTLEMENTS (ĐỐI SOÁT SÀN)
     // -------------------------------------------------------------------------
-    app.get('/api/finance/aggregator-settlements', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.get('/api/finance/aggregator-settlements', kiemTraToken, choPhepVaiTro(1), gateAggregator, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const settlements = await chayGiaoDich(
@@ -236,7 +242,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/finance/aggregator-settlements', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/finance/aggregator-settlements', kiemTraToken, choPhepVaiTro(1), gateAggregator, async (req, res) => {
         const tenantId = layTenantId(req);
         const branchId = layChiNhanhHienTai ? layChiNhanhHienTai(req) : null;
         try {
@@ -259,7 +265,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
     // -------------------------------------------------------------------------
     // 5. SUPPLIER AP INVOICES & PAYMENTS (CÔNG NỢ NCC)
     // -------------------------------------------------------------------------
-    app.get('/api/finance/supplier-ap', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.get('/api/finance/supplier-ap', kiemTraToken, choPhepVaiTro(1), gateSupplierAp, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const invoices = await chayGiaoDich(
@@ -272,7 +278,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/finance/supplier-ap', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/finance/supplier-ap', kiemTraToken, choPhepVaiTro(1), gateSupplierAp, async (req, res) => {
         const tenantId = layTenantId(req);
         const branchId = layChiNhanhHienTai ? layChiNhanhHienTai(req) : null;
         try {
@@ -292,7 +298,7 @@ function registerChainFinanceOpsRoutes(app, deps) {
         }
     });
 
-    app.post('/api/finance/supplier-ap/:id/payments', kiemTraToken, choPhepVaiTro(1), async (req, res) => {
+    app.post('/api/finance/supplier-ap/:id/payments', kiemTraToken, choPhepVaiTro(1), gateSupplierAp, async (req, res) => {
         const tenantId = layTenantId(req);
         try {
             const result = await chayGiaoDich(
