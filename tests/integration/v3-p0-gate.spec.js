@@ -214,7 +214,7 @@ async function seedAll(dbPool) {
         );
 
         await client.query(
-            `INSERT INTO public.CongThuc (MaMon, MaNL, KichThuoc, DinhLuong, TenantId)
+            `INSERT INTO public.CongThuc (MaMon, MaNL, KichThuoc, KhoiLuongTieuHao, TenantId)
              VALUES ($1, $2, 'M', 25, $3)`,
             [IDS.monBom, IDS.nlBom, TENANT_MAIN]
         );
@@ -493,9 +493,9 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
             })
         );
         assert.equal(
-            Number(summary.net_revenue),
+            Number(summary.netSales),
             60000,
-            `businessDaySummaryService net_revenue phải đúng 60.000đ, nhận ${summary.net_revenue}`
+            `businessDaySummaryService netSales phải đúng 60.000đ, nhận ${summary.netSales}`
         );
     });
 
@@ -604,7 +604,7 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
             token: cashierToken,
             body: {
                 loaiDonHang: 'MANG_DI',
-                taxMode: 'EXCLUDED',
+                cachTinhThue: 'EXCLUDED',
                 danhSachMon: [{ maMon: IDS.mon100Vat, kichThuoc: 'M', soLuong: 1 }],
             },
         });
@@ -647,7 +647,7 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
             token: cashierToken,
             body: {
                 loaiDonHang: 'MANG_DI',
-                taxMode: 'EXCLUDED',
+                cachTinhThue: 'EXCLUDED',
                 danhSachMon: [{ maMon: IDS.mon100Vat, kichThuoc: 'M', soLuong: 1 }],
             },
         });
