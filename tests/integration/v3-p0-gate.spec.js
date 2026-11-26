@@ -633,6 +633,14 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
         assert.ok(unpaidRes.ok, `Tạo đơn VAT EXCLUDED thất bại: ${JSON.stringify(unpaidRes.data)}`);
         const maHdUnpaid = unpaidRes.data.maHoaDon;
 
+        const detailUnpaid = await apiReq(`/api/order/${maHdUnpaid}`, {
+            method: 'GET',
+            token: cashierToken,
+        });
+        assert.ok(detailUnpaid.ok, `GET /api/order/${maHdUnpaid} thất bại: ${JSON.stringify(detailUnpaid.data)}`);
+        assert.equal(Number(detailUnpaid.data?.tongPhaiTra), 108000, 'tongPhaiTra phải = 108000 với VAT EXCLUDED 8%');
+        assert.equal(Number(detailUnpaid.data?.tienThueVAT), 8000, 'TienThueVAT phải = 8000 với VAT EXCLUDED 8%');
+
         const lookupUnpaid = `LK_U_${RUN_TAG}`;
         const lookupPaid = `LK_P_${RUN_TAG}`;
 
@@ -642,12 +650,12 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
                 lookupUnpaid,
             ]);
             return client.query(
-                `SELECT TongPhaiTra, TienThueVAT, TrangThaiTT FROM public.HoaDon WHERE MaHoaDon = $1`,
+                `SELECT TienThueVAT, TrangThaiTT FROM public.HoaDon WHERE MaHoaDon = $1`,
                 [maHdUnpaid]
             );
         });
-        assert.equal(Number(unpaidDb.rows[0].tongphaitra), 108000, 'tongPhaiTra phải = 108000 với VAT EXCLUDED 8%');
-        assert.equal(Number(unpaidDb.rows[0].tienthuevat), 8000, 'TienThueVAT phải = 8000 với VAT EXCLUDED 8%');
+        assert.equal(Number(unpaidDb.rows[0].tienthuevat), 8000, 'DB TienThueVAT phải = 8000 với VAT EXCLUDED 8%');
+        assert.equal(Number(unpaidDb.rows[0].trangthaitt), 0);
 
         // fn_public_request_einvoice cho đơn TrangThaiTT = 0 phải bị từ chối
         await assert.rejects(
