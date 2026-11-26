@@ -6,12 +6,15 @@ const path = require('node:path');
 
 describe('Wave 1 Unit — Local Print Bridge Security (P0-04)', () => {
     it('bridge-config.json trong repo KHÔNG chứa apiToken hardcode', () => {
-        const cfgPath = path.join(__dirname, '..', '..', 'local-print-bridge', 'bridge-config.json');
+        const baseDir = path.join(__dirname, '..', '..', 'local-print-bridge');
+        const cfgPath = fs.existsSync(path.join(baseDir, 'bridge-config.json'))
+            ? path.join(baseDir, 'bridge-config.json')
+            : path.join(baseDir, 'bridge-config.example.json');
         const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
         assert.equal(
             String(cfg?.security?.apiToken || '').trim(),
             '',
-            'bridge-config.json không được chứa apiToken hardcode!'
+            'bridge-config không được chứa apiToken hardcode!'
         );
     });
 

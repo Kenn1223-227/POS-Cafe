@@ -75,6 +75,7 @@ jobs:
           FRONTEND_URL=http://localhost:5173
           SKIP_AUTO_DDL=true
           EOF
+          cp local-print-bridge/bridge-config.example.json local-print-bridge/bridge-config.json
 
       - name: Initialize role app_runtime (NOBYPASSRLS)
         run: |

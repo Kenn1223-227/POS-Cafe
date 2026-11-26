@@ -236,12 +236,14 @@ describe('Batch 5 Unit — Phân hệ 6: Print Bridge CORS, Z-Report, Vietnamese
 
     it('3. CORS middleware bridge-server.js trả 200/204 cho origin hợp lệ (localhost, Vercel HTTPS, custom domain) và 403 cho origin lạ', async () => {
         // Kiểm tra file config gốc trong repo không còn allowedOrigins: [] và có file example
-        const repoCfg = JSON.parse(
-            fs.readFileSync(path.join(ROOT, 'local-print-bridge', 'bridge-config.json'), 'utf8')
-        );
+        const bridgeDir = path.join(ROOT, 'local-print-bridge');
+        const configPath = fs.existsSync(path.join(bridgeDir, 'bridge-config.json'))
+            ? path.join(bridgeDir, 'bridge-config.json')
+            : path.join(bridgeDir, 'bridge-config.example.json');
+        const repoCfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
         assert.ok(
             Array.isArray(repoCfg.security?.allowedOrigins) && repoCfg.security.allowedOrigins.length > 0,
-            'bridge-config.json không được để allowedOrigins rỗng []'
+            'bridge-config không được để allowedOrigins rỗng []'
         );
         assert.equal(String(repoCfg.security?.apiToken || '').trim(), '', 'Không hardcode apiToken trong repo');
         assert.ok(
