@@ -49,9 +49,9 @@ function invokeBridgeHandler(handleBridgeRequest, { method, url, headers = {}, b
 
 describe('Wave 2 E2E [Tầng 4] — TC-W2-05: Local Print Bridge Security (401 khi sai token) & Raster GS v 0', () => {
     it('Local Print Bridge trả 401 khi sai token và chấp nhận 202 khi đúng token kèm rasterBase64 GS v 0', async () => {
-        const tmpBase = path.join(__dirname, '..', '.tmp');
+        const tmpBase = path.join(__dirname, '..', '..', 'node_modules', '.cache', 'w2-print-bridge');
         fs.mkdirSync(tmpBase, { recursive: true });
-        const tmpDir = fs.mkdtempSync(path.join(tmpBase, 'w2-print-bridge-'));
+        const tmpDir = fs.mkdtempSync(path.join(tmpBase, 'inst-'));
         const cfgPath = path.join(tmpDir, 'bridge-config.json');
         const spoolPath = path.join(tmpDir, 'spool-queue.json');
         const testToken = 'wave2_test_secret_token_64chars_0123456789abcdef0123456789abcdef';
@@ -96,6 +96,7 @@ describe('Wave 2 E2E [Tầng 4] — TC-W2-05: Local Print Bridge Security (401 k
                 body: {
                     hoaDon: { maHoaDon: 'HD-RASTER-OK', danhSachMon: [] },
                     rasterBase64: gsV0Buf.toString('base64'),
+                    sync: true,
                 },
             });
             assert.ok(
