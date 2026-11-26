@@ -221,11 +221,20 @@ function registerPaymentShiftPhase3Routes(app, deps) {
             );
             if (r.rows.length === 0) return res.status(404).json({ message: 'Không tìm thấy ảnh chứng từ!' });
             const row = r.rows[0];
-            if (req.query.raw === '1' && row.storage_provider === 'LOCAL' && row.storage_key) {
-                const buf = await readLocalReceiptPhoto(row.storage_key);
-                if (buf) {
-                    res.setHeader('Content-Type', row.mimetype || 'image/webp');
-                    return res.send(buf);
+            if (req.query.raw === '1') {
+                if (row.storage_provider === 'LOCAL' && row.storage_key) {
+                    const buf = await readLocalReceiptPhoto(row.storage_key);
+                    if (buf) {
+                        res.setHeader('Content-Type', row.mimetype || 'image/webp');
+                        return res.send(buf);
+                    }
+                }
+                if (row.dataurl && String(row.dataurl).startsWith('data:')) {
+                    const match = String(row.dataurl).match(/^data:([^;]+);base64,(.+)$/);
+                    if (match) {
+                        res.setHeader('Content-Type', match[1] || row.mimetype || 'image/jpeg');
+                        return res.send(Buffer.from(match[2], 'base64'));
+                    }
                 }
             }
             res.json(row);

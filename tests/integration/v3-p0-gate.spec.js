@@ -465,10 +465,15 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
         assert.ok(createRes.ok, `Tạo đơn 100k thất bại: ${JSON.stringify(createRes.data)}`);
         const maHoaDon = createRes.data.maHoaDon;
 
-        const payRes = await apiReq(`/api/order/${maHoaDon}/thanh-toan`, {
+        const payRes = await apiReq('/api/order/thanhtoan', {
             method: 'POST',
             token: cashierToken,
-            body: { phuongThucTT: 'TIEN_MAT', tienKhachDua: 100000 },
+            body: {
+                maHoaDon,
+                phuongThucTT: 'TIEN_MAT',
+                tienKhachDua: 100000,
+                expectedVersion: Number(createRes.data?.hoaDon?.version || 1),
+            },
         });
         assert.ok(payRes.ok, `Thanh toán đơn 100k thất bại: ${JSON.stringify(payRes.data)}`);
 
@@ -578,10 +583,15 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
         assert.ok(bomOrder.ok);
         const maHdBom = bomOrder.data.maHoaDon;
 
-        const payBom = await apiReq(`/api/order/${maHdBom}/thanh-toan`, {
+        const payBom = await apiReq('/api/order/thanhtoan', {
             method: 'POST',
             token: cashierToken,
-            body: { phuongThucTT: 'TIEN_MAT', tienKhachDua: 50000 },
+            body: {
+                maHoaDon: maHdBom,
+                phuongThucTT: 'TIEN_MAT',
+                tienKhachDua: 50000,
+                expectedVersion: Number(bomOrder.data?.hoaDon?.version || 1),
+            },
         });
         assert.ok(payBom.ok);
 
@@ -633,13 +643,13 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
         assert.ok(unpaidRes.ok, `Tạo đơn VAT EXCLUDED thất bại: ${JSON.stringify(unpaidRes.data)}`);
         const maHdUnpaid = unpaidRes.data.maHoaDon;
 
-        const detailUnpaid = await apiReq(`/api/order/${maHdUnpaid}`, {
+        const detailUnpaid = await apiReq(`/api/hoadon/${maHdUnpaid}`, {
             method: 'GET',
             token: cashierToken,
         });
-        assert.ok(detailUnpaid.ok, `GET /api/order/${maHdUnpaid} thất bại: ${JSON.stringify(detailUnpaid.data)}`);
-        assert.equal(Number(detailUnpaid.data?.tongPhaiTra), 108000, 'tongPhaiTra phải = 108000 với VAT EXCLUDED 8%');
-        assert.equal(Number(detailUnpaid.data?.tienThueVAT), 8000, 'TienThueVAT phải = 8000 với VAT EXCLUDED 8%');
+        assert.ok(detailUnpaid.ok, `GET /api/hoadon/${maHdUnpaid} thất bại: ${JSON.stringify(detailUnpaid.data)}`);
+        assert.equal(Number(detailUnpaid.data?.hoaDon?.tongPhaiTra), 108000, 'tongPhaiTra phải = 108000 với VAT EXCLUDED 8%');
+        assert.equal(Number(detailUnpaid.data?.hoaDon?.tienThueVAT), 8000, 'TienThueVAT phải = 8000 với VAT EXCLUDED 8%');
 
         const lookupUnpaid = `LK_U_${RUN_TAG}`;
         const lookupPaid = `LK_P_${RUN_TAG}`;
@@ -684,10 +694,15 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
         assert.ok(paidOrderRes.ok);
         const maHdPaid = paidOrderRes.data.maHoaDon;
 
-        const payPaidRes = await apiReq(`/api/order/${maHdPaid}/thanh-toan`, {
+        const payPaidRes = await apiReq('/api/order/thanhtoan', {
             method: 'POST',
             token: cashierToken,
-            body: { phuongThucTT: 'TIEN_MAT', tienKhachDua: 108000 },
+            body: {
+                maHoaDon: maHdPaid,
+                phuongThucTT: 'TIEN_MAT',
+                tienKhachDua: 108000,
+                expectedVersion: Number(paidOrderRes.data?.hoaDon?.version || 1),
+            },
         });
         assert.ok(payPaidRes.ok);
 

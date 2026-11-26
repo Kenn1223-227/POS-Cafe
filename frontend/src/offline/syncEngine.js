@@ -216,6 +216,20 @@ export async function saveOfflineOrder(params) {
 let isFlushing = false
 const CLOCK_DRIFT_WARN_MS = 10 * 60 * 1000
 
+function resolveBackendReadyUrl() {
+  const base = String(axiosClient?.defaults?.baseURL || import.meta?.env?.VITE_API_URL || '').trim()
+  if (base) {
+    try {
+      const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost'
+      const parsed = new URL(base, origin)
+      return `${parsed.origin}/api/ready`
+    } catch {
+      // Fallback sang relative URL nếu cấu hình không hợp lệ
+    }
+  }
+  return '/api/ready'
+}
+
 /**
  * [Wave 3B — P1-02] So sánh đồng hồ thiết bị với header Date của Server trước khi sync Offline.
  * Nếu lệch > 10 phút -> trả cảnh báo rõ để thu ngân kiểm tra lại giờ thiết bị (tránh bị từ chối Happy Hour).
@@ -225,7 +239,7 @@ export async function checkServerClockDrift() {
     return { drifted: false, driftMs: 0, warning: null }
   }
   try {
-    const res = await fetch('/api/ready', { method: 'GET', cache: 'no-store' })
+    const res = await fetch(resolveBackendReadyUrl(), { method: 'GET', cache: 'no-store' })
     const serverDateHeader = res?.headers?.get('date')
     if (!serverDateHeader) return { drifted: false, driftMs: 0, warning: null }
     const serverMs = Date.parse(serverDateHeader)

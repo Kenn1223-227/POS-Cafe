@@ -90,7 +90,14 @@ export default function ThuChiModal({ isOpen, onClose, onSuccess }) {
     if (url.startsWith('/api/')) {
       try {
         const apiPath = url.replace(/^\/api(?=\/)/, '')
-        const blob = await axiosClient.get(apiPath, { responseType: 'blob' })
+        const rawApiPath = apiPath.includes('?') ? `${apiPath}&raw=1` : `${apiPath}?raw=1`
+        const blob = await axiosClient.get(rawApiPath, { responseType: 'blob' })
+        if (blob?.type && blob.type.includes('application/json')) {
+          const text = await blob.text()
+          const json = JSON.parse(text)
+          setPreviewImg(json.dataurl || json.dataUrl || json.url || null)
+          return
+        }
         const objUrl = URL.createObjectURL(blob)
         previewBlobRef.current = objUrl
         setPreviewImg(objUrl)
