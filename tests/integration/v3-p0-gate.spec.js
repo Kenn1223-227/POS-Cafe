@@ -202,14 +202,23 @@ async function seedAll(dbPool) {
         );
 
         await client.query(
-            `INSERT INTO public.SanPham
-                (MaMon, TenMon, DanhMuc, DonGia, CoSize, TrangThaiBan, DaXoa, TenantId, LoaiSanPham, VatRate)
+            `INSERT INTO public.tax_categories (tenant_id, code, name, vat_rate, is_kct, is_default)
              VALUES
-                ($1, 'Mon 60k', 'Cafe', 60000, FALSE, 1, FALSE, $2, 'PHA_CHE', 0),
-                ($3, 'Mon 40k', 'Cafe', 40000, FALSE, 1, FALSE, $2, 'PHA_CHE', 0),
-                ($4, 'Mon 100k VAT 8%', 'Cafe', 100000, FALSE, 1, FALSE, $2, 'PHA_CHE', 8),
-                ($5, 'Mon BOM Restock', 'Cafe', 50000, FALSE, 1, FALSE, $2, 'PHA_CHE', 0),
-                ($6, 'Mon Exp', 'Cafe', 50000, FALSE, 1, FALSE, $7, 'PHA_CHE', 0)`,
+                ($1, 'VAT_8_FB', 'VAT 8% F&B', 8, FALSE, TRUE),
+                ($1, 'VAT_0_FB', 'VAT 0%', 0, FALSE, FALSE)
+             ON CONFLICT (tenant_id, code, effective_from) DO NOTHING`,
+            [TENANT_MAIN]
+        );
+
+        await client.query(
+            `INSERT INTO public.SanPham
+                (MaMon, TenMon, DanhMuc, DonGia, CoSize, TrangThaiBan, DaXoa, TenantId, LoaiSanPham, tax_category_code)
+             VALUES
+                ($1, 'Mon 60k', 'Cafe', 60000, FALSE, 1, FALSE, $2, 'PHA_CHE', 'VAT_0_FB'),
+                ($3, 'Mon 40k', 'Cafe', 40000, FALSE, 1, FALSE, $2, 'PHA_CHE', 'VAT_0_FB'),
+                ($4, 'Mon 100k VAT 8%', 'Cafe', 100000, FALSE, 1, FALSE, $2, 'PHA_CHE', 'VAT_8_FB'),
+                ($5, 'Mon BOM Restock', 'Cafe', 50000, FALSE, 1, FALSE, $2, 'PHA_CHE', 'VAT_0_FB'),
+                ($6, 'Mon Exp', 'Cafe', 50000, FALSE, 1, FALSE, $7, 'PHA_CHE', 'VAT_0_FB')`,
             [IDS.mon60, TENANT_MAIN, IDS.mon40, IDS.mon100Vat, IDS.monBom, IDS.monExp, TENANT_EXP]
         );
 
@@ -253,6 +262,7 @@ async function cleanupAll(dbPool) {
         await client.query('DELETE FROM public.TonKhoChiNhanh WHERE TenantId = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.KhuyenMai WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.SanPham WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
+        await client.query('DELETE FROM public.tax_categories WHERE tenant_id = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.NguyenLieu WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.Ban WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.NhanVien WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
@@ -526,7 +536,7 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
             client.query(
                 `SELECT COALESCE(SUM(adjustment_amount), 0)::numeric AS total_adj
                    FROM public.cogs_adjustment_journal
-                  WHERE tenant_id = $1 AND branch_id = $2 AND manl = $3`,
+                  WHERE tenant_id = $1 AND branch_id = $2 AND ma_nl = $3`,
                 [TENANT_MAIN, BRANCH_MAIN, IDS.nlWac]
             )
         );
