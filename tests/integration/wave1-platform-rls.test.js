@@ -5,15 +5,17 @@ const {
     getRuntimeConnectionString,
     createRuntimePool,
     createMigrationPool,
+    createPlatformPool,
     assertAppRuntimeNoBypassRls,
     withTenantTx,
 } = require('../helpers/dbHarness');
 
 const HAS_DB = Boolean(getRuntimeConnectionString());
 
-describe('Wave 1 Integration — QA-13 (Super Admin SECURITY DEFINER dưới app_runtime NOBYPASSRLS & Tenant Isolation)', { skip: !HAS_DB ? 'Chưa cấu hình TEST_APP_RUNTIME_URL (.env.test)' : false }, () => {
+describe('Wave 1 Integration — QA-13 (Chặn app_runtime gọi RPC Super Admin 42501 & Xác thực platformPool tách biệt)', { skip: !HAS_DB ? 'Chưa cấu hình TEST_APP_RUNTIME_URL (.env.test)' : false }, () => {
     let runtimePool;
     let ownerPool;
+    let platformPool;
     const suffix = crypto.randomBytes(3).toString('hex').toUpperCase();
     const tenantA = `W1_PA_${suffix}`;
     const tenantB = `W1_PB_${suffix}`;
@@ -24,6 +26,7 @@ describe('Wave 1 Integration — QA-13 (Super Admin SECURITY DEFINER dưới app
     before(async () => {
         runtimePool = createRuntimePool();
         ownerPool = createMigrationPool();
+        platformPool = createPlatformPool();
         await assertAppRuntimeNoBypassRls(runtimePool);
 
         await ownerPool.query(
@@ -61,6 +64,7 @@ describe('Wave 1 Integration — QA-13 (Super Admin SECURITY DEFINER dưới app
             await ownerPool.query(`DELETE FROM Tenants WHERE TenantId IN ($1, $2)`, [tenantA, tenantB]).catch(() => {});
             await ownerPool.end();
         }
+        if (platformPool) await platformPool.end();
         if (runtimePool) await runtimePool.end();
     });
 
@@ -72,20 +76,34 @@ describe('Wave 1 Integration — QA-13 (Super Admin SECURITY DEFINER dưới app
         assert.equal(leakRows.length, 0, 'Tenant A tuyệt đối không được thấy hóa đơn của Tenant B');
     });
 
-    it('QA-13: Super Admin RPCs dưới app_runtime đọc được KPI thật > 0, duyệt gói Tenant B và Impersonate có ghi Audit_Logs', async () => {
-        const ovRes = await runtimePool.query('SELECT * FROM public.fn_platform_overview_tenants()');
+    it('QA-13 [Chiều âm — Security Proof]: app_runtime gọi fn_platform_overview_tenants() BẮT BUỘC bị từ chối với mã lỗi 42501 (Migration 039)', async () => {
+        await assert.rejects(
+            () => runtimePool.query('SELECT * FROM public.fn_platform_overview_tenants()'),
+            (err) => {
+                assert.equal(
+                    err?.code,
+                    '42501',
+                    `app_runtime phải bị chặn bằng mã lỗi PostgreSQL 42501 (insufficient_privilege), nhận được: ${err?.code} - ${err?.message}`
+                );
+                return true;
+            }
+        );
+    });
+
+    it('QA-13 [Chiều dương — Functional Proof]: platformPool đọc được KPI thật > 0, duyệt gói Tenant B và Impersonate có ghi Audit_Logs', async () => {
+        const ovRes = await platformPool.query('SELECT * FROM public.fn_platform_overview_tenants()');
         const rowB = ovRes.rows.find((r) => r.tenantid === tenantB);
-        assert.ok(rowB, 'fn_platform_overview_tenants phải thấy Tenant B dưới NOBYPASSRLS');
+        assert.ok(rowB, 'fn_platform_overview_tenants qua platformPool phải thấy Tenant B');
         assert.ok(Number(rowB.so_don) >= 1, 'KPI so_don của Tenant B phải >= 1');
 
-        const approveRes = await runtimePool.query(
+        const approveRes = await platformPool.query(
             `SELECT * FROM public.fn_platform_manual_approve_billing($1, $2, $3, $4::jsonb, $5, $6)`,
             [maDonSub, `FT_BANK_${suffix}`, 'Test duyet goi Wave 1', '{"inventory_bom":true}', 'superadmin_test', '127.0.0.1']
         );
         assert.equal(approveRes.rows[0]?.status, 'APPROVED');
         assert.equal(approveRes.rows[0]?.target_tenant_id, tenantB);
 
-        const impRes = await runtimePool.query(
+        const impRes = await platformPool.query(
             `SELECT * FROM public.fn_platform_impersonate_prepare($1, $2, $3, now() + interval '15 minutes', $4)`,
             [tenantB, 'superadmin_test', 'Kiem thu Impersonate Wave 1', '127.0.0.1']
         );

@@ -9,6 +9,7 @@ require('dotenv').config();
 const pool = require('./db');
 const {
     reportPool,
+    platformPool,
     isReadReplicaConfigured,
     chayTruyVanBaoCao,
     shouldRunAutoDdl,
@@ -371,6 +372,7 @@ registerPromotionAndPinRoutes(app, {
 
 registerPlatformAdminRoutes(app, {
     pool,
+    platformPool,
     chayGiaoDich,
     gioiHanDangNhap,
     ghiNhanDangNhapSai,
@@ -713,6 +715,9 @@ function gracefulShutdown(signal) {
             }
         });
         await closeRedisClients().catch(() => {});
+        if (platformPool && platformPool !== pool) {
+            await platformPool.end().catch(() => {});
+        }
         if (reportPool && reportPool !== pool) {
             await reportPool.end().catch(() => {});
         }

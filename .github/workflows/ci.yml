@@ -68,6 +68,7 @@ jobs:
           cat << 'EOF' > .env.test
           NODE_ENV=test
           MIGRATION_DATABASE_URL=postgres://postgres:test_owner_password@127.0.0.1:5433/cafe_pos_test
+          PLATFORM_DATABASE_URL=postgres://postgres:test_owner_password@127.0.0.1:5433/cafe_pos_test
           TEST_APP_RUNTIME_URL=postgres://app_runtime:app_runtime_test_pass@127.0.0.1:5433/cafe_pos_test
           TEST_REDIS_URL=redis://127.0.0.1:6380
           JWT_SECRET=test_jwt_secret_minimum_64_chars_for_automated_wave1_wave4_test_suite_0001

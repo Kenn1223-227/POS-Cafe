@@ -1,5 +1,5 @@
 {
-  "_comment": "Sao chép thành bridge-config.json hoặc đặt biến môi trường PRINT_BRIDGE_ALLOWED_ORIGINS (phân tách dấu phẩy). Localhost / 127.0.0.1 luôn được tự động cho phép.",
+  "_comment": "Sao chép thành bridge-config.json hoặc đặt biến môi trường PRINT_BRIDGE_ALLOWED_ORIGINS (phân tách dấu phẩy). Localhost / 127.0.0.1 luôn được tự động cho phép. CẢNH BÁO BẢO MẬT: Không dùng wildcard https://*.vercel.app trên máy thu ngân thật; chỉ khai báo đúng domain POS của quán.",
   "receiptPrinter": {
     "name": "PRIMARY_RECEIPT_K80",
     "mode": "SIMULATOR",
@@ -43,9 +43,7 @@
     "apiToken": "",
     "allowedOrigins": [
       "https://pos.domain.vn",
-      "https://*.vercel.app",
-      "https://cafepos.vn",
-      "https://*.cafepos.vn"
+      "http://localhost:5173"
     ]
   }
 }

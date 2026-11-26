@@ -527,6 +527,7 @@ function registerPlatformAdminRoutes(
     app,
     {
         pool,
+        platformPool,
         chayGiaoDich,
         gioiHanDangNhap,
         ghiNhanDangNhapSai,
@@ -539,7 +540,10 @@ function registerPlatformAdminRoutes(
         guiLoi,
     }
 ) {
-    const kiemTraPlatformAdmin = taoMiddlewarePlatformAdmin(pool, jwt, JWT_VERIFY_OPTIONS);
+    // [Batch 8.6 — Phương án A] Dùng platformPool tách biệt cho toàn bộ truy vấn/RPC Super Admin (sau Migration 039).
+    // Không bao giờ chia sẻ adminPool này sang route nghiệp vụ tenant.
+    const adminPool = platformPool || pool;
+    const kiemTraPlatformAdmin = taoMiddlewarePlatformAdmin(adminPool, jwt, JWT_VERIFY_OPTIONS);
 
     // 1. Đăng nhập riêng cho Platform Super Admin (tách biệt 100% khỏi /api/auth/login của quán)
     app.post('/api/platform/auth/login', gioiHanDangNhap, async (req, res) => {
@@ -550,7 +554,7 @@ function registerPlatformAdminRoutes(
         }
 
         try {
-            const r = await pool.query(
+            const r = await adminPool.query(
                 `SELECT Id, Username, FullName, PasswordHash, Role, IsActive
                    FROM Platform_Admins
                   WHERE LOWER(Username) = $1`,
@@ -565,14 +569,14 @@ function registerPlatformAdminRoutes(
             xoaDangNhapSai(req, `platform:${username}`);
 
             if (canBamLai) {
-                await pool
+                await adminPool
                     .query('UPDATE Platform_Admins SET PasswordHash = $1 WHERE Id = $2', [
                         await hashPassword(password),
                         admin.id,
                     ])
                     .catch(() => {});
             }
-            await pool.query('UPDATE Platform_Admins SET LastLoginAt = now() WHERE Id = $1', [admin.id]);
+            await adminPool.query('UPDATE Platform_Admins SET LastLoginAt = now() WHERE Id = $1', [admin.id]);
 
             const token = jwt.sign(
                 {
@@ -618,14 +622,14 @@ function registerPlatformAdminRoutes(
             return res.status(400).json({ message: 'Mật khẩu mới của Platform Admin phải dài ít nhất 8 ký tự!' });
         }
         try {
-            const r = await pool.query('SELECT PasswordHash FROM Platform_Admins WHERE Id = $1', [
+            const r = await adminPool.query('SELECT PasswordHash FROM Platform_Admins WHERE Id = $1', [
                 req.platformAdmin.adminId,
             ]);
             const { ok } = await verifyPassword(currentPassword, r.rows[0]?.passwordhash || null);
             if (!ok) {
                 return res.status(401).json({ message: 'Mật khẩu hiện tại không đúng!' });
             }
-            await pool.query('UPDATE Platform_Admins SET PasswordHash = $1 WHERE Id = $2', [
+            await adminPool.query('UPDATE Platform_Admins SET PasswordHash = $1 WHERE Id = $2', [
                 await hashPassword(newPassword),
                 req.platformAdmin.adminId,
             ]);
@@ -638,10 +642,10 @@ function registerPlatformAdminRoutes(
     // 4. Tổng quan sức khỏe toàn nền tảng SaaS (Overview KPIs + Churn Radar 3 Màu + Upsell Signals)
     app.get('/api/platform/overview', kiemTraPlatformAdmin, async (req, res) => {
         try {
-            // [Wave 1 — P0-04] Dùng SECURITY DEFINER RPCs để chạy chuẩn xác dưới app_runtime (NOBYPASSRLS + FORCE RLS)
+            // [Batch 8.6] Chạy 6 RPC public.fn_platform_* qua adminPool (platformPool) sau Migration 039
             const [tRes, billRes] = await Promise.all([
-                pool.query('SELECT * FROM public.fn_platform_overview_tenants()'),
-                pool.query('SELECT * FROM public.fn_platform_overview_billing()'),
+                adminPool.query('SELECT * FROM public.fn_platform_overview_tenants()'),
+                adminPool.query('SELECT * FROM public.fn_platform_overview_billing()'),
             ]);
 
             let activePaid = 0;
@@ -750,7 +754,7 @@ function registerPlatformAdminRoutes(
     // 5. Danh sách toàn bộ Tenants kèm Health Metrics 3 màu, Offline Telemetry & Feature Flags
     app.get('/api/platform/tenants', kiemTraPlatformAdmin, async (req, res) => {
         try {
-            const r = await pool.query('SELECT * FROM public.fn_platform_list_tenants($1)', [200]);
+            const r = await adminPool.query('SELECT * FROM public.fn_platform_list_tenants($1)', [200]);
 
             res.json(
                 r.rows.map((row) => {
@@ -932,7 +936,7 @@ function registerPlatformAdminRoutes(
     app.get('/api/platform/billing/orders', kiemTraPlatformAdmin, async (req, res) => {
         try {
             const statusFilter = req.query?.status ? String(req.query.status).trim().toUpperCase() : null;
-            const r = await pool.query('SELECT * FROM public.fn_platform_list_billing_orders($1, $2)', [statusFilter, 100]);
+            const r = await adminPool.query('SELECT * FROM public.fn_platform_list_billing_orders($1, $2)', [statusFilter, 100]);
             res.json(
                 r.rows.map((o) => ({
                     maDonThanhToan: o.madonthanhtoan,
@@ -970,13 +974,13 @@ function registerPlatformAdminRoutes(
         }
 
         try {
-            // [Wave 1 — P0-04] Dùng SECURITY DEFINER RPC fn_platform_manual_approve_billing (hoạt động an toàn dưới app_runtime NOBYPASSRLS + ghi Audit_Logs)
-            const lookup = await pool.query('SELECT * FROM public.fn_lookup_billing_order($1)', [maDonThanhToan]);
+            // [Batch 8.6] Dùng adminPool (platformPool) cho RPC duyệt gói sau Migration 039
+            const lookup = await adminPool.query('SELECT * FROM public.fn_lookup_billing_order($1)', [maDonThanhToan]);
             if (lookup.rows.length === 0) {
                 return res.status(404).json({ message: 'Không tìm thấy đơn thanh toán!' });
             }
             const flags = hopNhatFeatureFlags(lookup.rows[0].goicuoc, null);
-            const rpcRes = await pool.query(
+            const rpcRes = await adminPool.query(
                 `SELECT * FROM public.fn_platform_manual_approve_billing($1, $2, $3, $4::jsonb, $5, $6)`,
                 [
                     maDonThanhToan,
@@ -1025,8 +1029,8 @@ function registerPlatformAdminRoutes(
             const expiresInSeconds = 15 * 60;
             const impersonatedExpiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
 
-            // [Wave 1 — P0-04] Dùng SECURITY DEFINER RPC fn_platform_impersonate_prepare (tra cứu NV + ghi Audit_Logs dưới NOBYPASSRLS)
-            const impRes = await pool.query(
+            // [Batch 8.6] Dùng adminPool (platformPool) cho RPC Impersonate sau Migration 039
+            const impRes = await adminPool.query(
                 `SELECT * FROM public.fn_platform_impersonate_prepare($1, $2, $3, $4::timestamptz, $5)`,
                 [tenantId, req.platformAdmin.username, lyDo, impersonatedExpiresAt, req.ip || null]
             );
@@ -1156,7 +1160,7 @@ function registerPlatformAdminRoutes(
     // 11. [PHÂN HỆ 9] Danh sách yêu cầu Combo Phần cứng / Zalo ZNS / Fintech Soundbox toàn nền tảng
     app.get('/api/platform/expansion/requests', kiemTraPlatformAdmin, async (req, res) => {
         try {
-            const r = await pool.query(`
+            const r = await adminPool.query(`
                 SELECT r.Id, r.TenantId, t.TenQuan, r.LoaiDichVu, r.GoiQuanTam, r.SoLuong,
                        r.LienHe, r.GhiChu, r.TrangThai, r.ThoiGianTao
                   FROM Tenant_Expansion_Requests r

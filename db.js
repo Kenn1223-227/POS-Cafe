@@ -140,6 +140,34 @@ if (isReadReplicaConfigured) {
   });
 }
 
+// [Batch 8.6 — Phương án A] Platform Admin Pool tách biệt cho 6 RPC public.fn_platform_*
+// Migration 039 thu hồi EXECUTE của app_runtime; tuyệt đối không dùng pool này cho route nghiệp vụ tenant.
+const platformDbUrl = String(process.env.PLATFORM_DATABASE_URL || process.env.MIGRATION_DATABASE_URL || '').trim();
+const isPlatformPoolConfigured = Boolean(platformDbUrl);
+
+let platformPool = null;
+if (isPlatformPoolConfigured) {
+  const isPlatformPgBouncer = detectPgBouncer(platformDbUrl);
+  const platformPoolConfig = {
+    connectionString: platformDbUrl,
+    ssl: buildSslConfig(platformDbUrl),
+    max: Math.max(1, Math.min(Number(process.env.PLATFORM_DB_POOL_MAX || 3), 5)),
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: Number(process.env.DB_CONN_TIMEOUT_MS || 30000),
+  };
+  if (!isPlatformPgBouncer) {
+    platformPoolConfig.statement_timeout = Number(process.env.PLATFORM_DB_STATEMENT_TIMEOUT_MS || 15000);
+  }
+  platformPool = new Pool(platformPoolConfig);
+  instrumentPoolQuery(platformPool, 'platform_admin');
+  platformPool.on('connect', () => {
+    logger.info('Đã kết nối Platform Admin Pool tách biệt (PLATFORM_DATABASE_URL / MIGRATION_DATABASE_URL)', {
+      event: 'DB_PLATFORM_POOL_CONNECTED',
+      pgBouncer: isPlatformPgBouncer,
+    });
+  });
+}
+
 // Chuẩn hóa lớp truy vấn Tenant-Aware tương thích Fail-Closed RLS (SET LOCAL trong transaction ngắn)
 pool.withTenant = async function withTenant(tenantId, fn) {
   const client = await pool.connect();
@@ -196,6 +224,9 @@ async function chayTruyVanBaoCao(tenantId, callback, targetPool = reportPool) {
 
 async function closeAllPools() {
   const tasks = [];
+  if (platformPool && platformPool !== pool) {
+    tasks.push(platformPool.end().catch(() => {}));
+  }
   if (reportPool && reportPool !== pool) {
     tasks.push(reportPool.end().catch(() => {}));
   }
@@ -205,7 +236,9 @@ async function closeAllPools() {
 
 pool.pool = pool;
 pool.reportPool = reportPool;
+pool.platformPool = platformPool;
 pool.isReadReplicaConfigured = isReadReplicaConfigured;
+pool.isPlatformPoolConfigured = isPlatformPoolConfigured;
 pool.chayTruyVanBaoCao = chayTruyVanBaoCao;
 pool.closeAllPools = closeAllPools;
 pool.shouldRunAutoDdl = shouldRunAutoDdl;

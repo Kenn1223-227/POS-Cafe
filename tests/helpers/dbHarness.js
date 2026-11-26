@@ -19,6 +19,12 @@ function getMigrationConnectionString() {
     return String(process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL || '').trim();
 }
 
+function getPlatformConnectionString() {
+    return String(
+        process.env.PLATFORM_DATABASE_URL || process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL || ''
+    ).trim();
+}
+
 function buildSsl(connStr) {
     if (!connStr) return false;
     return connStr.includes('localhost') || connStr.includes('127.0.0.1') ? false : { rejectUnauthorized: false };
@@ -43,6 +49,19 @@ function createMigrationPool() {
     const connStr = getMigrationConnectionString();
     if (!connStr) {
         throw new Error('Thiếu MIGRATION_DATABASE_URL hoặc DATABASE_URL!');
+    }
+    return new Pool({
+        connectionString: connStr,
+        ssl: buildSsl(connStr),
+        max: 3,
+        connectionTimeoutMillis: 8000,
+    });
+}
+
+function createPlatformPool() {
+    const connStr = getPlatformConnectionString();
+    if (!connStr) {
+        throw new Error('Thiếu PLATFORM_DATABASE_URL hoặc MIGRATION_DATABASE_URL!');
     }
     return new Pool({
         connectionString: connStr,
@@ -92,8 +111,10 @@ async function withTenantTx(pool, tenantId, fn) {
 module.exports = {
     getRuntimeConnectionString,
     getMigrationConnectionString,
+    getPlatformConnectionString,
     createRuntimePool,
     createMigrationPool,
+    createPlatformPool,
     assertAppRuntimeNoBypassRls,
     withTenantTx,
 };
