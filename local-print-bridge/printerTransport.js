@@ -193,9 +193,6 @@ async function queryTsplStatus(printerConfig, { cupIndex = null } = {}) {
 function sendViaWindowsShare(buffer, { shareName }) {
     return new Promise((resolve, reject) => {
         if (!shareName) return reject(new Error('Chưa nhập tên chia sẻ máy in Windows (shareName)!'));
-        if (process.platform !== 'win32') {
-            return reject(new Error('Chế độ WINDOWS_SHARE chỉ chạy trên Windows!'));
-        }
         const rawShare = String(shareName).trim();
         if (rawShare.startsWith('\\\\') || rawShare.startsWith('//') || rawShare.includes('\\') || rawShare.includes('/')) {
             return reject(new Error('Tên chia sẻ máy in Windows (shareName) không hợp lệ — từ chối đường dẫn UNC từ xa!'));
@@ -203,6 +200,9 @@ function sendViaWindowsShare(buffer, { shareName }) {
         const safeShare = rawShare.replace(/[^a-zA-Z0-9._\-\s]/g, '').trim();
         if (!safeShare) {
             return reject(new Error('Tên chia sẻ máy in Windows (shareName) không hợp lệ!'));
+        }
+        if (process.platform !== 'win32') {
+            return reject(new Error('Chế độ WINDOWS_SHARE chỉ chạy trên Windows!'));
         }
         const uncPath = `\\\\localhost\\${safeShare}`;
         const tmpFile = path.join(os.tmpdir(), `pos-print-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.bin`);
