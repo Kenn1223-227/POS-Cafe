@@ -212,26 +212,37 @@ async function seedAll(dbPool) {
 
         await client.query(
             `INSERT INTO public.SanPham
-                (MaMon, TenMon, DanhMuc, DonGia, CoSize, TrangThaiBan, DaXoa, TenantId, LoaiSanPham, tax_category_code)
+                (MaMon, TenMon, NhomMon, DanhMuc, DangKinhDoanh, LaHangDongGoi, TramCheBien, InTemCoc, TamHet, TenantId, tax_category_code)
              VALUES
-                ($1, 'Mon 60k', 'Cafe', 60000, FALSE, 1, FALSE, $2, 'PHA_CHE', 'VAT_0_FB'),
-                ($3, 'Mon 40k', 'Cafe', 40000, FALSE, 1, FALSE, $2, 'PHA_CHE', 'VAT_0_FB'),
-                ($4, 'Mon 100k VAT 8%', 'Cafe', 100000, FALSE, 1, FALSE, $2, 'PHA_CHE', 'VAT_8_FB'),
-                ($5, 'Mon BOM Restock', 'Cafe', 50000, FALSE, 1, FALSE, $2, 'PHA_CHE', 'VAT_0_FB'),
-                ($6, 'Mon Exp', 'Cafe', 50000, FALSE, 1, FALSE, $7, 'PHA_CHE', 'VAT_0_FB')`,
+                ($1, 'Mon 60k', 'Cà phê', 'Cafe', TRUE, FALSE, 'BAR_CHINH', TRUE, FALSE, $2, 'VAT_0_FB'),
+                ($3, 'Mon 40k', 'Cà phê', 'Cafe', TRUE, FALSE, 'BAR_CHINH', TRUE, FALSE, $2, 'VAT_0_FB'),
+                ($4, 'Mon 100k VAT 8%', 'Cà phê', 'Cafe', TRUE, FALSE, 'BAR_CHINH', TRUE, FALSE, $2, 'VAT_8_FB'),
+                ($5, 'Mon BOM Restock', 'Cà phê', 'Cafe', TRUE, FALSE, 'BAR_CHINH', TRUE, FALSE, $2, 'VAT_0_FB'),
+                ($6, 'Mon Exp', 'Cà phê', 'Cafe', TRUE, FALSE, 'BAR_CHINH', TRUE, FALSE, $7, 'VAT_0_FB')`,
             [IDS.mon60, TENANT_MAIN, IDS.mon40, IDS.mon100Vat, IDS.monBom, IDS.monExp, TENANT_EXP]
         );
 
         await client.query(
-            `INSERT INTO public.CongThuc (MaMon, MaNL, KichThuoc, KhoiLuongTieuHao, TenantId)
-             VALUES ($1, $2, 'M', 25, $3)`,
-            [IDS.monBom, IDS.nlBom, TENANT_MAIN]
+            `INSERT INTO public.SanPham_Size (MaMon, KichThuoc, GiaBan)
+             VALUES
+                ($1, 'M', 60000),
+                ($2, 'M', 40000),
+                ($3, 'M', 100000),
+                ($4, 'M', 50000),
+                ($5, 'M', 50000)`,
+            [IDS.mon60, IDS.mon40, IDS.mon100Vat, IDS.monBom, IDS.monExp]
         );
 
         await client.query(
-            `INSERT INTO public.KhuyenMai (MaKhuyenMai, TenKhuyenMai, LoaiGiam, GiaTriGiam, GiamToiDa, DonToiThieu, DangKichHoat, TenantId)
-             VALUES ($1, 'Giam 10k Test', 'FIXED', 10000, 10000, 0, TRUE, $2)`,
-            [IDS.kmCode, TENANT_MAIN]
+            `INSERT INTO public.CongThuc (MaMon, KichThuoc, MaNL, KhoiLuongTieuHao)
+             VALUES ($1, 'M', $2, 25)`,
+            [IDS.monBom, IDS.nlBom]
+        );
+
+        await client.query(
+            `INSERT INTO public.KhuyenMai (TenantId, MaCode, TenChuongTrinh, LoaiKM, KieuGiam, GiaTriGiam, GiamToiDa, DonToiThieu, DangHoatDong)
+             VALUES ($1, $2, 'Giam 10k Test', 'CODE', 'FIXED', 10000, 10000, 0, TRUE)`,
+            [TENANT_MAIN, IDS.kmCode]
         );
 
         await client.query('COMMIT');
@@ -258,9 +269,10 @@ async function cleanupAll(dbPool) {
         await client.query('DELETE FROM public.ChiTietHoaDon WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.HoaDon WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.CaThuNgan WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
-        await client.query('DELETE FROM public.CongThuc WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
+        await client.query('DELETE FROM public.CongThuc WHERE MaMon = ANY($1::text[])', [[IDS.monBom]]).catch(() => {});
         await client.query('DELETE FROM public.TonKhoChiNhanh WHERE TenantId = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.KhuyenMai WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
+        await client.query('DELETE FROM public.SanPham_Size WHERE MaMon = ANY($1::text[])', [[IDS.mon60, IDS.mon40, IDS.mon100Vat, IDS.monBom, IDS.monExp]]).catch(() => {});
         await client.query('DELETE FROM public.SanPham WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.tax_categories WHERE tenant_id = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.NguyenLieu WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
