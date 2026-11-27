@@ -414,10 +414,11 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
             token: cashierToken,
             body: {
                 maBan: IDS.ban1,
+                expectedVersion: Number(withPinGift.data?.hoaDon?.version || 1),
                 danhSachMon: [{ maMon: IDS.mon40, kichThuoc: 'M', soLuong: 1 }],
             },
         });
-        assert.ok(addNormal.ok);
+        assert.ok(addNormal.ok, `Thêm món thường vào bàn 1 thất bại: ${JSON.stringify(addNormal.data)}`);
 
         const cthdRes = await withTenantTx(pool, TENANT_MAIN, async (client) => {
             await client.query(`UPDATE public.HoaDon SET DaInTamTinh = TRUE WHERE MaHoaDon = $1`, [maHoaDon1]);
