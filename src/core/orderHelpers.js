@@ -2343,7 +2343,10 @@ async function congDinhLuongNguyenLieuDongMon(client, tenantId, { maCTHD, maMon,
     }
 
     const tpRes = await client.query(
-        `SELECT ctp.MaTopping, tp.MaNL, tp.KhoiLuongTieuHao, ctp.SoLuong
+        `SELECT ctp.MaTopping,
+                (to_jsonb(tp)->>'manl') AS MaNL,
+                COALESCE((to_jsonb(tp)->>'khoiluongtieuhao')::numeric, 0) AS KhoiLuongTieuHao,
+                ctp.SoLuong
            FROM ChiTietHoaDon_Topping ctp JOIN Topping tp ON tp.MaTopping = ctp.MaTopping
           WHERE ctp.MaCTHD = $1`,
         [maCTHD]
@@ -2366,8 +2369,8 @@ async function congDinhLuongNguyenLieuDongMon(client, tenantId, { maCTHD, maMon,
         } catch {
             await client.query('ROLLBACK TO SAVEPOINT sp_bom_tp').catch(() => {});
         }
-        if (!usedMulti) {
-            congNL(tp.manl, Number(tp.khoiluongtieuhao) * Number(tp.soluong));
+        if (!usedMulti && tp.manl) {
+            congNL(tp.manl, Number(tp.khoiluongtieuhao || 0) * Number(tp.soluong));
         }
     }
 }

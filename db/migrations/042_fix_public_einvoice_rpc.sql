@@ -35,6 +35,7 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
 AS $$
+#variable_conflict use_column
 DECLARE
     v_code      TEXT := UPPER(TRIM(COALESCE(p_lookup_code, '')));
     v_tax_code  TEXT := TRIM(COALESCE(p_buyer_tax_code, ''));
