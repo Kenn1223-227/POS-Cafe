@@ -1139,7 +1139,8 @@ function registerFohPhase1Routes(app, deps) {
         try {
             const list = await pool.withTenant(tenantId, async (client) => {
                 const hdRes = await client.query(
-                    `SELECT hd.MaHoaDon, hd.MaNV, nv.TenNV, hd.MaKH, kh.TenKH,
+                    `SELECT hd.MaHoaDon, hd.MaNV, nv.TenNV, hd.MaKH,
+                            COALESCE(to_jsonb(kh)->>'tenkh', to_jsonb(kh)->>'hoten') AS TenKH,
                             hd.ThoiGianTao, hd.TenKhachVangLai, hd.LoaiDonHang, hd.DiaChiGiao,
                             COALESCE((SELECT SUM(c.SoLuong) FROM ChiTietHoaDon c WHERE c.MaHoaDon = hd.MaHoaDon), 0) AS TongLy,
                             COALESCE((SELECT SUM((c.DonGia + COALESCE(c.GiaModifiers, 0)) * c.SoLuong)

@@ -783,23 +783,23 @@ async function tinhDoiSoatCa(db, maCaThuNgan, tienMatThucTe) {
                        UNION ALL
                        SELECT COALESCE(hd.PhuongThucTT, 'TIEN_MAT') AS PhuongThucTT, hd.TongTienThanhToan AS SoTien
                          FROM HoaDon hd
-                        WHERE hd.MaCaThuNgan = $1 AND hd.TrangThaiTT = 1
+                        WHERE hd.MaCaThuNgan::text = $1::text AND hd.TrangThaiTT = 1
                           AND NOT EXISTS (
                               SELECT 1 FROM Order_Payments op2
                                WHERE op2.MaHoaDon = hd.MaHoaDon::text AND op2.TrangThai = 'PAID'
                           )
                    ) combined
                   GROUP BY PhuongThucTT`,
-                [maCaThuNgan]
+                [String(maCaThuNgan)]
             ),
             db.query(
                 `SELECT COUNT(DISTINCT ma_hd) AS SoHoaDon
                    FROM (
                        SELECT MaHoaDon AS ma_hd FROM Order_Payments WHERE MaCaThuNgan = $1::text AND TrangThai = 'PAID'
                        UNION
-                       SELECT MaHoaDon::text AS ma_hd FROM HoaDon WHERE MaCaThuNgan = $1 AND TrangThaiTT = 1
+                       SELECT MaHoaDon::text AS ma_hd FROM HoaDon WHERE MaCaThuNgan::text = $1::text AND TrangThaiTT = 1
                    ) d`,
-                [maCaThuNgan]
+                [String(maCaThuNgan)]
             ),
         ]);
         for (const r of pRes.rows) {
@@ -2756,7 +2756,7 @@ async function ghiNhanThanhToanTrongGiaoDich(
             throw new LoiNghiepVu(400, 'Thanh toán bằng Ví thành viên (VI_KHACH) yêu cầu chọn khách hàng (maKH)!');
         }
         const khLock = await client.query(
-            `SELECT MaKH, TenKH, COALESCE(SoDuVi, 0) AS SoDuVi
+            `SELECT MaKH, COALESCE(to_jsonb(KhachHang)->>'tenkh', to_jsonb(KhachHang)->>'hoten') AS TenKH, COALESCE(SoDuVi, 0) AS SoDuVi
                FROM KhachHang
               WHERE MaKH = $1 AND COALESCE(TenantId, 'DEFAULT') = $2
               FOR UPDATE`,

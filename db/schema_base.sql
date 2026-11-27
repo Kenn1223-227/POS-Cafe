@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS public.Ban (
     MaBan       VARCHAR(64) PRIMARY KEY,
     TenBan      VARCHAR(100) NOT NULL,
     KhuVuc      VARCHAR(100) NOT NULL DEFAULT 'Tang 1',
+    ToaDoX      INT NOT NULL DEFAULT 0,
+    ToaDoY      INT NOT NULL DEFAULT 0,
     SucChua     INT NOT NULL DEFAULT 4,
     TrangThai   INT NOT NULL DEFAULT 1, -- 1=Trong, 2=DangPhucVu, 3=ChoDon
     QrToken     VARCHAR(128),

@@ -353,7 +353,7 @@ async function capNhatCrmVaZnsSauThanhToan(client, { tenantId, maKH, maHoaDon, t
     await client.query('SAVEPOINT sp_crm_tier_zns');
     try {
         const khRes = await client.query(
-            `SELECT MaKH, TenKH, SoDienThoai, COALESCE(TongChiTieu, 0) AS TongChiTieu,
+            `SELECT MaKH, COALESCE(to_jsonb(KhachHang)->>'tenkh', to_jsonb(KhachHang)->>'hoten') AS TenKH, SoDienThoai, COALESCE(TongChiTieu, 0) AS TongChiTieu,
                     COALESCE(HangThanhVien, 'DONG') AS HangThanhVien,
                     COALESCE(SoDuVi, 0) AS SoDuVi,
                     COALESCE(ZaloOptIn, TRUE) AS ZaloOptIn
@@ -1463,7 +1463,7 @@ function registerEcosystemPhase8Routes(
         try {
             const ketQua = await chayGiaoDich(async (client) => {
                 const khRes = await client.query(
-                    `SELECT MaKH, TenKH, SoDienThoai, COALESCE(SoDuVi, 0) AS SoDuVi
+                    `SELECT MaKH, COALESCE(to_jsonb(KhachHang)->>'tenkh', to_jsonb(KhachHang)->>'hoten') AS TenKH, SoDienThoai, COALESCE(SoDuVi, 0) AS SoDuVi
                        FROM KhachHang WHERE MaKH = $1 AND COALESCE(TenantId, 'DEFAULT') = $2 FOR UPDATE`,
                     [maKH, tenantId]
                 );
@@ -1535,7 +1535,7 @@ function registerEcosystemPhase8Routes(
                 const { dateISO } = layGioHienTaiVN();
                 const currentMonth = parseInt(dateISO.slice(5, 7), 10);
                 const khRes = await client.query(
-                    `SELECT MaKH, TenKH, SoDienThoai, NgaySinh, COALESCE(SoDuVi, 0) AS SoDuVi
+                    `SELECT MaKH, COALESCE(to_jsonb(KhachHang)->>'tenkh', to_jsonb(KhachHang)->>'hoten') AS TenKH, SoDienThoai, NgaySinh, COALESCE(SoDuVi, 0) AS SoDuVi
                        FROM KhachHang
                       WHERE COALESCE(TenantId, 'DEFAULT') = $1
                         AND COALESCE(ZaloOptIn, TRUE) = TRUE

@@ -893,7 +893,8 @@ app.get('/api/hoadon/dangmo', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, 
     const tenantId = layTenantId(req);
     try {
         const r = await qTenant(req, `
-            SELECT hd.MaHoaDon, hd.SoThuTuNgay, hd.ThoiGianTao, hd.MaKH, kh.TenKH,
+            SELECT hd.MaHoaDon, hd.SoThuTuNgay, hd.ThoiGianTao, hd.MaKH,
+                   COALESCE(to_jsonb(kh)->>'tenkh', to_jsonb(kh)->>'hoten') AS TenKH,
                    (SELECT string_agg(b.TenBan, ', ' ORDER BY b.TenBan)
                       FROM HoaDon_Ban hb JOIN Ban b ON b.MaBan = hb.MaBan
                      WHERE hb.MaHoaDon = hd.MaHoaDon) AS TenBan,
@@ -937,7 +938,7 @@ app.get('/api/hoadon/lichsu', kiemTraToken, choPhepVaiTro(1, 4), async (req, res
             qTenant(req, `
                 SELECT hd.MaHoaDon, hd.SoThuTuNgay, hd.TrangThaiTT, hd.PhuongThucTT, hd.TongTienThanhToan,
                        hd.ThoiGianTao, hd.ThoiGianThanhToan, hd.MaCaThuNgan,
-                       kh.TenKH,
+                       COALESCE(to_jsonb(kh)->>'tenkh', to_jsonb(kh)->>'hoten') AS TenKH,
                        (SELECT string_agg(b.TenBan, ', ' ORDER BY b.TenBan)
                           FROM HoaDon_Ban hb JOIN Ban b ON b.MaBan = hb.MaBan
                          WHERE hb.MaHoaDon = hd.MaHoaDon) AS TenBan,

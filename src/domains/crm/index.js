@@ -135,7 +135,7 @@ app.post('/api/khachhang', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res
     try {
         const out = await pool.withTenant(tenantId, async (client) => {
             const result = await client.query(
-                "SELECT MaKH, TenKH, SoDienThoai, DiemTichLuy FROM KhachHang WHERE COALESCE(TenantId, 'DEFAULT') = $2 AND SoDienThoai = $1",
+                "SELECT MaKH, COALESCE(to_jsonb(KhachHang)->>'tenkh', to_jsonb(KhachHang)->>'hoten') AS TenKH, SoDienThoai, DiemTichLuy FROM KhachHang WHERE COALESCE(TenantId, 'DEFAULT') = $2 AND SoDienThoai = $1",
                 [String(soDienThoai).trim(), tenantId]
             );
             if (result.rows.length > 0) {
@@ -152,10 +152,27 @@ app.post('/api/khachhang', kiemTraToken, choPhepVaiTro(1, 3, 4), async (req, res
             }
 
             const maKH = 'KH' + crypto.randomBytes(4).toString('hex').toUpperCase();
-            const insertResult = await client.query(
-                'INSERT INTO KhachHang (MaKH, TenKH, SoDienThoai, DiemTichLuy, TenantId) VALUES ($1, $2, $3, 0, $4) RETURNING MaKH, TenKH, SoDienThoai, DiemTichLuy',
-                [maKH, String(tenKH).trim().slice(0, 100), String(soDienThoai).trim().slice(0, 20), tenantId]
-            );
+            const cleanTen = String(tenKH).trim().slice(0, 100);
+            const cleanSdt = String(soDienThoai).trim().slice(0, 20);
+            let insertResult;
+            await client.query('SAVEPOINT sp_ins_kh_tenkh');
+            try {
+                insertResult = await client.query(
+                    'INSERT INTO KhachHang (MaKH, TenKH, SoDienThoai, DiemTichLuy, TenantId) VALUES ($1, $2, $3, 0, $4) RETURNING MaKH, TenKH, SoDienThoai, DiemTichLuy',
+                    [maKH, cleanTen, cleanSdt, tenantId]
+                );
+                await client.query('RELEASE SAVEPOINT sp_ins_kh_tenkh');
+            } catch (insErr) {
+                await client.query('ROLLBACK TO SAVEPOINT sp_ins_kh_tenkh').catch(() => {});
+                if (insErr && insErr.code === '42703') {
+                    insertResult = await client.query(
+                        'INSERT INTO KhachHang (MaKH, HoTen, SoDienThoai, DiemTichLuy, TenantId) VALUES ($1, $2, $3, 0, $4) RETURNING MaKH, HoTen AS TenKH, SoDienThoai, DiemTichLuy',
+                        [maKH, cleanTen, cleanSdt, tenantId]
+                    );
+                } else {
+                    throw insErr;
+                }
+            }
             const ins = insertResult.rows[0];
             return {
                 existing: false,

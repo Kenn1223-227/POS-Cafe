@@ -312,7 +312,7 @@ async function tinhUuDaiVaDiemTrongGiaoDich(
             throw new LoiNghiepVu(400, 'Vui lòng chọn Khách hàng thành viên trước khi đổi điểm Loyalty!');
         }
         const khRes = await client.query(
-            `SELECT MaKH, TenKH, COALESCE(DiemTichLuy, 0) AS DiemTichLuy
+            `SELECT MaKH, COALESCE(to_jsonb(KhachHang)->>'tenkh', to_jsonb(KhachHang)->>'hoten') AS TenKH, COALESCE(DiemTichLuy, 0) AS DiemTichLuy
                FROM KhachHang
               WHERE MaKH = $1 AND COALESCE(TenantId, 'DEFAULT') = $2${khoaCapNhat ? ' FOR UPDATE' : ''}`,
             [maKH, tId]

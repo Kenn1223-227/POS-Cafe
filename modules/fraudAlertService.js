@@ -693,7 +693,7 @@ async function kiemTraCanhBaoTanSuatGianLan(
             if (maKH && phuongThucTT === 'TIEN_MAT') {
                 const khCashRes = await client.query(
                     `SELECT COUNT(*)::int AS so_don,
-                            MAX(kh.TenKH) AS ten_kh,
+                            MAX(COALESCE(to_jsonb(kh)->>'tenkh', to_jsonb(kh)->>'hoten')) AS ten_kh,
                             MAX(kh.SoDienThoai) AS sdt
                        FROM HoaDon hd
                        LEFT JOIN KhachHang kh ON kh.MaKH = hd.MaKH

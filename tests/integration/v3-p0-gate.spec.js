@@ -277,6 +277,7 @@ async function cleanupAll(dbPool) {
         await client.query('DELETE FROM public.tax_categories WHERE tenant_id = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.NguyenLieu WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.Ban WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
+        await client.query('DELETE FROM public.KhachHang WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.NhanVien WHERE COALESCE(TenantId, \'DEFAULT\') = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.ChiNhanh WHERE TenantId = ANY($1::text[])', [tenantIds]).catch(() => {});
         await client.query('DELETE FROM public.Tenants WHERE TenantId = ANY($1::text[])', [tenantIds]).catch(() => {});
@@ -749,5 +750,117 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
             [401, 403].includes(res.status),
             `Webhook vào tenant chưa có khóa riêng phải bị từ chối 401/403, nhận ${res.status}: ${JSON.stringify(res.data)}`
         );
+    });
+
+    it('7. POS Bootstrap Read Endpoints under SKIP_AUTO_DDL=true & app_runtime: toàn bộ API tải trang /pos & đóng ca trả 200 (0 lỗi 42883/42703/500)', async () => {
+        // 1. Mở 1 ca thu ngân thật qua API trên terminal riêng (POS-BOOT)
+        const moCaRes = await apiReq('/api/ca/mo-ca', {
+            method: 'POST',
+            token: mgrToken,
+            body: {
+                tienMatDauCa: 500000,
+                branchId: BRANCH_MAIN,
+                terminalId: 'POS-BOOT',
+            },
+        });
+        assert.equal(moCaRes.status, 201, `POST /api/ca/mo-ca thất bại: ${JSON.stringify(moCaRes.data)}`);
+        const maCaBoot = moCaRes.data?.ca?.maCaThuNgan;
+        assert.ok(maCaBoot, 'Phải trả về maCaThuNgan sau khi mở ca');
+
+        // 2. Tạo 1 khách hàng thật (kiểm chứng tương thích HoTen/TenKH trên DB sạch)
+        const khName = `Khach Bootstrap ${RUN_TAG.slice(-4)}`;
+        const khRes = await apiReq('/api/khachhang', {
+            method: 'POST',
+            token: mgrToken,
+            body: {
+                tenKH: khName,
+                soDienThoai: `09${String(Date.now()).slice(-8)}`,
+            },
+        });
+        assert.equal(khRes.status, 200, `POST /api/khachhang thất bại: ${JSON.stringify(khRes.data)}`);
+        const maKH = khRes.data?.khachHang?.maKH;
+        assert.ok(maKH, 'Phải trả về maKH');
+        assert.equal(khRes.data?.khachHang?.tenKH, khName);
+
+        // 3. Tạo 1 đơn đang mở (TrangThaiTT = 0) có gắn khách hàng
+        const openOrderRes = await apiReq('/api/order', {
+            method: 'POST',
+            token: mgrToken,
+            body: {
+                maBan: IDS.ban2,
+                maKH,
+                loaiDonHang: 'TAI_BAN',
+                branchId: BRANCH_MAIN,
+                danhSachMon: [{ maMon: IDS.mon60, kichThuoc: 'M', soLuong: 1 }],
+            },
+        });
+        assert.equal(openOrderRes.status, 201, `Tạo đơn đang mở thất bại: ${JSON.stringify(openOrderRes.data)}`);
+        const maHdOpen = openOrderRes.data?.maHoaDon;
+
+        // 4. Tạo 1 đơn lưu tạm (TrangThaiTT = -1) có gắn khách hàng
+        const parkedRes = await apiReq('/api/order/luu-tam', {
+            method: 'POST',
+            token: mgrToken,
+            body: {
+                maKH,
+                label: `Don Tam ${RUN_TAG.slice(-4)}`,
+                loaiDonHang: 'MANG_DI',
+                danhSachMon: [{ maMon: IDS.mon40, kichThuoc: 'M', soLuong: 1 }],
+            },
+        });
+        assert.ok([200, 201].includes(parkedRes.status), `POST /api/order/luu-tam thất bại: ${JSON.stringify(parkedRes.data)}`);
+        const maHdParked = parkedRes.data?.maHoaDon;
+
+        // 5. Gọi lần lượt toàn bộ API khởi tạo trang /pos & đóng ca
+        const endpoints = [
+            `/api/ca/hientai?branchId=${encodeURIComponent(BRANCH_MAIN)}&terminalId=POS-BOOT`,
+            `/api/ca/doi-soat?maCaThuNgan=${encodeURIComponent(maCaBoot)}`,
+            `/api/ca/pre-close-check?branchId=${encodeURIComponent(BRANCH_MAIN)}&terminalId=POS-BOOT`,
+            '/api/ban',
+            '/api/hoadon/dangmo',
+            '/api/order/luu-tam',
+            '/api/hoadon/lichsu',
+            '/api/sanpham',
+            '/api/topping',
+            '/api/combos/active',
+            '/api/auth/staff-quick-list',
+        ];
+
+        const results = {};
+        for (const ep of endpoints) {
+            const r = await apiReq(ep, { token: mgrToken });
+            assert.equal(r.status, 200, `POS Bootstrap endpoint ${ep} trả HTTP ${r.status}: ${JSON.stringify(r.data)}`);
+            results[ep] = r.data;
+        }
+
+        // 6. Xác nhận payload chi tiết của các chốt trọng yếu
+        const caHienTai = results[endpoints[0]]?.caHienTai;
+        assert.ok(caHienTai, 'GET /api/ca/hientai phải trả về caHienTai đang mở');
+        assert.equal(String(caHienTai.maCaThuNgan), String(maCaBoot));
+        assert.equal(Number(caHienTai.tienMatDauCa), 500000);
+
+        const doiSoat = results[endpoints[1]]?.doiSoat || results[endpoints[1]];
+        assert.ok(doiSoat && doiSoat.doanhThu, 'GET /api/ca/doi-soat phải trả đủ số liệu đối soát');
+        assert.equal(String(doiSoat.maCaThuNgan), String(maCaBoot));
+        assert.equal(Number(doiSoat.tienMatDauCa), 500000);
+        assert.equal(Number(doiSoat.tienMatLyThuyet), 500000);
+
+        const banList = Array.isArray(results['/api/ban']) ? results['/api/ban'] : results['/api/ban']?.danhSachBan || [];
+        const matchedBan1 = banList.find((b) => (b.maban || b.maBan) === IDS.ban1);
+        assert.ok(matchedBan1, 'GET /api/ban phải trả về danh sách bàn');
+        assert.equal(Number(matchedBan1.toadox ?? matchedBan1.toadoX ?? 0), 0);
+        assert.equal(Number(matchedBan1.toadoy ?? matchedBan1.toadoY ?? 0), 0);
+
+        const openList = Array.isArray(results['/api/hoadon/dangmo']) ? results['/api/hoadon/dangmo'] : [];
+        const matchedOpen = openList.find((o) => o.maHoaDon === maHdOpen);
+        assert.ok(matchedOpen, 'GET /api/hoadon/dangmo phải chứa đơn đang mở vừa tạo');
+        assert.equal(matchedOpen.tenKH, khName, 'GET /api/hoadon/dangmo phải trả đúng tenKH của khách hàng');
+
+        const parkedList = Array.isArray(results['/api/order/luu-tam'])
+            ? results['/api/order/luu-tam']
+            : results['/api/order/luu-tam']?.danhSach || [];
+        const matchedParked = parkedList.find((o) => o.maHoaDon === maHdParked);
+        assert.ok(matchedParked, 'GET /api/order/luu-tam phải chứa đơn lưu tạm vừa tạo');
+        assert.equal(matchedParked.tenKH, khName, 'GET /api/order/luu-tam phải trả đúng tenKH của khách hàng');
     });
 });
