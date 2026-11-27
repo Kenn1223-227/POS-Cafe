@@ -153,11 +153,11 @@ async function seedAll(dbPool) {
 
         await client.query(
             `INSERT INTO public.NhanVien
-                (MaNV, TenNV, TenDangNhap, MatKhauHash, VaiTro, TrangThaiLamViec, MaPinHash, TenantId, BranchId, LuongCoBan, LoaiLuong)
+                (MaNV, TenNV, TenDangNhap, MatKhauHash, VaiTro, TrangThaiLamViec, PinHash, TenantId, BranchId)
              VALUES
-                ($1, 'Manager V3', $2, $3, 1, 1, $4, $5, $6, 12000000, 'THANG'),
-                ($7, 'Cashier V3', $8, $3, 4, 1, NULL, $5, $6, 7000000, 'THANG'),
-                ($9, 'Manager Exp', $10, $3, 1, 1, $4, $11, $12, 12000000, 'THANG')`,
+                ($1, 'Manager V3', $2, $3, 1, TRUE, $4, $5, $6),
+                ($7, 'Cashier V3', $8, $3, 4, TRUE, NULL, $5, $6),
+                ($9, 'Manager Exp', $10, $3, 1, TRUE, $4, $11, $12)`,
             [
                 IDS.mgrMain, `mgr_v3_${RUN_TAG.toLowerCase()}`, pwHash, pinHash, TENANT_MAIN, BRANCH_MAIN,
                 IDS.cashierMain, `csh_v3_${RUN_TAG.toLowerCase()}`,
