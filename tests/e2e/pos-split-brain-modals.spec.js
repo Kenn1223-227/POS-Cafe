@@ -40,7 +40,7 @@ describe('Wave 2 E2E [Tầng 4] — TC-W2-05: POS Split-Brain Modals (ThuChi, L�
 
         // PosPage: getLuuTam, preCloseCheck, payKeyRef, PosErrorBoundary
         assert.ok(posPageSrc.includes('orderService.getLuuTam()'), 'PosPage phải đồng bộ đơn lưu tạm online qua GET /api/order/luu-tam');
-        assert.ok(posPageSrc.includes('caService.preCloseCheck()'), 'PosPage phải gọi pre-close-check trước khi mở DongCaModal');
+        assert.ok(posPageSrc.includes('caService.preCloseCheck('), 'PosPage phải gọi pre-close-check trước khi mở DongCaModal');
         assert.ok(posPageSrc.includes('payKeyRef'), 'PosPage phải cố định Idempotency-Key bằng payKeyRef theo fingerprint đơn');
         assert.ok(posPageSrc.includes('<PosErrorBoundary'), 'PosPage phải bọc TableMap, MenuGrid, Cart & Modals bằng PosErrorBoundary');
 
