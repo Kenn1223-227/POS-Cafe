@@ -638,6 +638,7 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
             body: {
                 loaiDonHang: 'MANG_DI',
                 cachTinhThue: 'EXCLUDED',
+                thueVATPhanTram: 8,
                 danhSachMon: [{ maMon: IDS.mon100Vat, kichThuoc: 'M', soLuong: 1 }],
             },
         });
@@ -689,6 +690,7 @@ describe('Batch 12 — V3 P0 Release Gate E2E Suite (Real Express + PostgreSQL a
             body: {
                 loaiDonHang: 'MANG_DI',
                 cachTinhThue: 'EXCLUDED',
+                thueVATPhanTram: 8,
                 danhSachMon: [{ maMon: IDS.mon100Vat, kichThuoc: 'M', soLuong: 1 }],
             },
         });
